@@ -246,7 +246,7 @@ function createConfigForms({ flags, status, writable }) {
 }
 
 /** Собрать песочницу с плагином и вернуть наблюдаемые объекты. */
-function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, rejectCode = null, flags = { zoom: true, contextMenu: true }, configFormsAvailable = true, configStatus = 'ready', writable = true } = {}) {
+function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, rejectCode = null, flags = { zoom: true, contextMenu: true }, configFormsAvailable = true, configStatus = 'ready', writable = true, speech = null, legacySpeech = null } = {}) {
   const storage = createStorage();
   if (stored !== null) storage.setItem('dsh.ui-zoom.v1', stored);
   /** Полоска изменения ширины панели: по ней плагин находит рамку интерфейса. */
@@ -269,6 +269,16 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
   let timerSeq = 0;
   const reactCleanups = [];
   let shortcutsAvailableNow = shortcutsAvailable;
+  /**
+   * Клиентская служба распознавания. Её монтирует клиентская половина голосового
+   * ввода, поэтому до этого момента ключа `remote.speech` в контексте нет.
+   */
+  let speechNow = speech;
+  /**
+   * Сервис Remote-шины: namespace-службы живут отдельными ключами
+   * `remote.<namespace>`, а не свойствами этого объекта.
+   */
+  const remoteFace = { $mount: () => Promise.resolve(() => {}), $stream: () => ({}) };
   /** Куда плагин вешает масштаб: корень приложения, как в настоящей странице. */
   let zoomHostId = 'root';
 
@@ -427,6 +437,12 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
       if (name === 'slots') return slotsFace;
       if (name === 'shortcuts') return shortcutsAvailableNow ? shortcutsFace : undefined;
       if (name === 'configForms') return configFormsAvailable ? configForms : undefined;
+      // Шов распознавания — namespace-служба Remote-шины под ключом remote.speech.
+      if (name === 'remote.speech') return speechNow;
+      if (name === 'remote') return remoteFace;
+      // Прежнее (неверное) имя хост-сервиса: швом оно не является и не должно
+      // когда-либо подхватываться — проверка это стережёт.
+      if (name === 'speechController') return legacySpeech;
       return undefined;
     },
   };
@@ -527,6 +543,17 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
       const snapshot = [...intervals.values()];
       intervals.clear();
       for (const interval of snapshot) interval.fn();
+    },
+    /** Смонтировать клиентскую службу распознавания — как это делает voice-input. */
+    publishSpeech: (service) => {
+      speechNow = service;
+    },
+    /**
+     * Прокрутить живые интервалы, не снимая их: так проверяется опрос появления
+     * службы распознавания (опрос продолжает жить, пока службы нет).
+     */
+    runIntervals: () => {
+      for (const interval of [...intervals.values()]) interval.fn();
     },
     /** Выгрузить плагин: уведомить подписчиков ctx.on('dispose'). */
     dispose: () => {
@@ -692,6 +719,126 @@ function readyTweaks(env) {
   const raw = env.storage.dump()['dsh.ui-zoom.ready.v1'];
   assert.ok(raw, 'отметка инициализации записана в хранилище');
   return JSON.parse(raw).tweaks;
+}
+
+/** Каталог распознавания с одним провайдером whisper-local. */
+function speechCatalog(preparation, overrides = {}) {
+  return {
+    providers: [
+      {
+        id: 'whisper-local',
+        name: 'Whisper (local)',
+        location: 'host-local',
+        languages: ['ru'],
+        preparation,
+        ...overrides,
+      },
+    ],
+    selection: { providerId: 'whisper-local', language: 'ru' },
+  };
+}
+
+/**
+ * Заглушка клиентской службы распознавания `remote.speech`.
+ *
+ * Ответы устроены как у Remote-шины: прямой вызов отдаёт обёртку `{ ok, value }`
+ * (отказ — `{ ok: false, error }`), поток `follow` — сами снимки каталога.
+ * @param {object} options - стартовый каталог и ответ на `prepare`.
+ * @returns {object} служба, отправка снимков в поток и записанные вызовы.
+ */
+function createSpeech({ catalog = null, prepareAnswer = () => ({ ok: true, value: undefined }) } = {}) {
+  const calls = { catalog: 0, follow: 0, prepare: [] };
+  const queue = [];
+  const waiting = [];
+  let closed = false;
+  const stream = {
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+    next() {
+      if (queue.length > 0) return Promise.resolve({ value: queue.shift(), done: false });
+      if (closed) return Promise.resolve({ value: undefined, done: true });
+      return new Promise((resolve) => waiting.push(resolve));
+    },
+    return() {
+      closed = true;
+      return Promise.resolve({ value: undefined, done: true });
+    },
+  };
+  return {
+    calls,
+    /** Отдать очередной снимок каталога в открытый поток follow. */
+    emit(next) {
+      const waiter = waiting.shift();
+      if (waiter === undefined) queue.push(next);
+      else waiter({ value: next, done: false });
+    },
+    service: {
+      catalog: () => {
+        calls.catalog += 1;
+        return Promise.resolve({ ok: true, value: catalog });
+      },
+      follow: () => {
+        calls.follow += 1;
+        return stream;
+      },
+      prepare: (id, options) => {
+        calls.prepare.push({ id, options });
+        return Promise.resolve().then(() => prepareAnswer(id, options));
+      },
+      cancelPreparation: () => Promise.resolve({ ok: true, value: undefined }),
+    },
+  };
+}
+
+/** Дождаться микрозадач плагина: поток follow асинхронный. */
+function settle() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * Отрисовать строку кнопки загрузки модели так, как её видит страница пакета.
+ * @param {object} env - песочница плагина из loadPlugin.
+ * @returns {object} дерево кнопки подготовки.
+ */
+function whisperDetail(env) {
+  const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
+  assert.ok(entry, 'форма флагов зарегистрирована в слоте');
+  const form = entry.entry.component({
+    ...entry.entry.options.inject(),
+    view: 'page',
+    t: (key) => key,
+    translate: (key) => key,
+  });
+  const row = form.children.find((child) => child.props?.key === 'whisper-detail');
+  assert.ok(row, 'строка деталей твика whisper отрисована (флаг включён)');
+  const detail = row.children[0];
+  assert.equal(typeof detail.type, 'function', 'деталь — компонент кнопки подготовки');
+  return detail.type({});
+}
+
+/**
+ * Текст строки кнопки в том порядке, как его видит пользователь.
+ * @param {object} tree - дерево из whisperDetail.
+ * @returns {string} склеенный текст.
+ */
+function detailText(tree) {
+  return tree.children
+    .filter((child) => child !== null && child !== undefined)
+    .map((child) => (typeof child === 'string' ? child : String(child?.children?.[0] ?? '')))
+    .join(' | ');
+}
+
+/**
+ * Найти кнопку строки по подписи.
+ * @param {object} tree - дерево из whisperDetail.
+ * @param {string} label - подпись кнопки.
+ * @returns {object} элемент кнопки.
+ */
+function detailButton(tree, label) {
+  const button = tree.children.find((child) => child?.type === 'button' && child.children?.[0] === label);
+  assert.ok(button, `в строке есть кнопка «${label}» (${detailText(tree)})`);
+  return button;
 }
 
 check('стартовый масштаб 100% не задаёт лишних стилей', () => {
@@ -1480,6 +1627,127 @@ checkAsync('форма блокирует запись там, где докум
 check('плагин объявляет службу конфигурации и ждёт её', () => {
   const env = loadPlugin();
   assert.deepEqual(plain(env.plugin.inject), ['configForms'], 'каркас объявляет зависимость от configForms');
+});
+
+checkAsync('шов распознавания ищется по ключу remote.speech, а не по имени хост-сервиса', async () => {
+  // Namespace-службу Remote-шины api-gateway кладёт в контекст под ключом
+  // remote.<namespace>, поэтому служба распознавания — remote.speech. Хост-сервис
+  // называется иначе (speechController у API-обёртки) и клиенту не виден.
+  const speech = createSpeech({ catalog: speechCatalog({ phase: 'unprepared' }) });
+  const legacy = createSpeech({ catalog: speechCatalog({ phase: 'unprepared' }) });
+  const env = loadPlugin({
+    flags: { zoom: true, contextMenu: true, whisper: true },
+    speech: speech.service,
+    legacySpeech: legacy.service,
+  });
+  await settle();
+  assert.equal(speech.calls.follow, 1, 'живой поток готовности открыт через найденный шов');
+  assert.equal(legacy.calls.follow, 0, 'служба под именем speechController швом не считается');
+  const text = detailText(whisperDetail(env));
+  assert.ok(text.includes('Скачать модель'), `кнопка загрузки модели доступна (${text})`);
+
+  const source = fs.readFileSync(CLIENT, 'utf8');
+  assert.match(source, /ctx\.get\('remote\.speech'\)/, 'основной доступ — ctx.get(\'remote.speech\')');
+  assert.doesNotMatch(source, /ctx\.get\('speechController'\)/, 'прежнего имени хост-сервиса в коде нет');
+});
+
+checkAsync('без шва кнопка говорит, что служба распознавания не подключена', async () => {
+  const legacy = createSpeech({ catalog: speechCatalog({ phase: 'unprepared' }) });
+  const env = loadPlugin({
+    flags: { zoom: true, contextMenu: true, whisper: true },
+    legacySpeech: legacy.service,
+  });
+  await settle();
+  const tree = whisperDetail(env);
+  const text = detailText(tree);
+  assert.ok(text.includes('не подключена'), `кнопка объясняет причину, а не молчит (${text})`);
+  assert.equal(legacy.calls.follow, 0, 'служба под неверным именем не подключается');
+  detailButton(tree, 'Проверить снова');
+});
+
+checkAsync('служба, поднявшаяся позже, подхватывается опросом', async () => {
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: true } });
+  await settle();
+  assert.ok(detailText(whisperDetail(env)).includes('не подключена'), 'сначала шва действительно нет');
+
+  const speech = createSpeech({ catalog: speechCatalog({ phase: 'unprepared' }) });
+  env.publishSpeech(speech.service);
+  env.runIntervals();
+  await settle();
+  assert.equal(speech.calls.follow, 1, 'опрос нашёл службу и открыл поток');
+  assert.ok(detailText(whisperDetail(env)).includes('Скачать модель'), 'кнопка загрузки появилась');
+});
+
+checkAsync('во время загрузки виден прогресс в мегабайтах, после — готовность', async () => {
+  const speech = createSpeech({ catalog: speechCatalog({ phase: 'unprepared' }) });
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: true }, speech: speech.service });
+  await settle();
+  speech.emit(
+    speechCatalog({
+      phase: 'downloading',
+      resource: 'model.bin',
+      completedBytes: 500 * 1024 * 1024,
+      totalBytes: 1500 * 1024 * 1024,
+    }),
+  );
+  await settle();
+  const downloading = detailText(whisperDetail(env));
+  assert.ok(downloading.includes('500 / 1500 МБ'), `прогресс показан в мегабайтах (${downloading})`);
+
+  speech.emit(speechCatalog({ phase: 'ready' }));
+  await settle();
+  assert.ok(detailText(whisperDetail(env)).includes('Модель готова'), 'после загрузки — «Модель готова»');
+});
+
+checkAsync('отвергнутая подготовка показывает причину от службы', async () => {
+  // Отказ Remote-вызова приходит обёрткой { ok: false, error }, а не исключением:
+  // без разбора этой обёртки кнопка молчала бы о причине.
+  const speech = createSpeech({
+    catalog: speechCatalog({ phase: 'unprepared' }),
+    prepareAnswer: () => ({
+      ok: false,
+      error: { code: 'speech/unavailable', message: 'Speech provider is unavailable: whisper-local' },
+    }),
+  });
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: true }, speech: speech.service });
+  await settle();
+  detailButton(whisperDetail(env), 'Скачать модель').props.onClick();
+  await settle();
+  assert.deepEqual(speech.calls.prepare, [{ id: 'whisper-local', options: undefined }], 'запрос ушёл на whisper-local');
+  const text = detailText(whisperDetail(env));
+  assert.ok(text.includes('Speech provider is unavailable'), `причина отказа видна (${text})`);
+});
+
+checkAsync('провайдер не зарегистрирован и исключение подготовки тоже называют причину', async () => {
+  const empty = createSpeech({ catalog: { providers: [], selection: { providerId: 'whisper-local', language: 'ru' } } });
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: true }, speech: empty.service });
+  await settle();
+  const missing = detailText(whisperDetail(env));
+  assert.ok(missing.includes('не зарегистрирован'), `видно, что провайдера нет (${missing})`);
+
+  const failing = createSpeech({
+    catalog: speechCatalog({ phase: 'unprepared' }),
+    prepareAnswer: () => {
+      throw new Error('воркер не поднялся');
+    },
+  });
+  const env2 = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: true }, speech: failing.service });
+  await settle();
+  detailButton(whisperDetail(env2), 'Скачать модель').props.onClick();
+  await settle();
+  const text = detailText(whisperDetail(env2));
+  assert.ok(text.includes('воркер не поднялся'), `исключение тоже показано причиной (${text})`);
+});
+
+checkAsync('провайдер сообщил об ошибке подготовки — кнопка называет её', async () => {
+  const speech = createSpeech({ catalog: speechCatalog({ phase: 'unprepared' }) });
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: true }, speech: speech.service });
+  await settle();
+  speech.emit(speechCatalog({ phase: 'failed', message: 'download timed out', step: 'model' }));
+  await settle();
+  const tree = whisperDetail(env);
+  assert.ok(detailText(tree).includes('download timed out'), 'причина из каталога показана');
+  detailButton(tree, 'Повторить');
 });
 
 // Асинхронные проверки идут после обычных: их список собирается по ходу файла.

@@ -1242,21 +1242,41 @@ window.__ModuleLoader__.load({
     /* #region tweak-whisper */
     /**
      * Клиентская часть твика «распознавание русской речи»: кнопка загрузки
-     * модели и прогресс подготовки. Состояние читается из хост-сервиса
-     * `speechController` (Remote `catalog`/`follow`/`prepare`); доступ к нему —
-     * `ctx.get('speechController')`, поэтому твик переживает отсутствие шва.
+     * модели и прогресс подготовки.
+     *
+     * Шов к хост-половине — namespace-служба Remote-шины. Клиентская половина
+     * голосового ввода (`@deepseek-ai/dsh-experimental-client-ui-voice-input`)
+     * монтирует дескрипторы `@deepseek-ai/dsh-experimental-api-speech-to-text`
+     * через `ctx.remote.$mount`, а api-gateway кладёт namespace в контекст под
+     * ключом `remote.<namespace>` (функция `remoteServiceKey`). Значит, служба
+     * распознавания на клиенте — `ctx.get('remote.speech')`. Имена хост-сервисов
+     * (`speechToText` у реестра, `speechController` у API-обёртки) клиенту не
+     * видны: по ним шов не находится.
      */
     const WHISPER_PROVIDER_ID = 'whisper-local';
     const WHISPER_ROW_STYLE = { display: 'flex', alignItems: 'center', gap: '10px' };
+    /** Пояснение рядом с кнопкой: токен темы, литеральных цветов нет. */
+    const WHISPER_NOTICE_STYLE = { color: 'var(--dsw-alias-label-secondary)' };
+    /** Опрос появления шва: 0.5 с × 20 = 10 с, дальше остаётся ручная проверка. */
+    const WHISPER_LOOKUP_MS = 500;
+    const WHISPER_LOOKUP_TRIES = 20;
 
-    /** Последний снимок каталога распознавания либо null. */
+    /** Последний снимок каталога распознавания; null — снимок ещё не пришёл. */
     let whisperCatalog = null;
-    /** Подписчики снимка: кнопка перерисовывается при смене состояния. */
+    /** Причина последнего отказа: подготовка не запустилась либо канал молчит. */
+    let whisperFailure = '';
+    /** Запрос подготовки принят, но состояние из каталога ещё не пришло. */
+    let whisperPending = false;
+    /** Подписчики состояния кнопки: её перерисовывает любое изменение. */
     const whisperListeners = new Set();
-    /** Хост-сервис распознавания; заполняется при включении твика. */
+    /** Клиентская служба распознавания (`remote.speech`) либо null. */
     let speechService = null;
+    /** Контекст плагина: по нему кнопка «Проверить снова» ищет шов заново. */
+    let speechContext = null;
     /** Сигнал отмены потока follow. */
     let speechAbort = null;
+    /** Id опроса появления шва; 0 — опроса нет. */
+    let speechLookupTimer = 0;
 
     /**
      * Провайдер whisper-local из каталога и его состояние подготовки.
@@ -1277,64 +1297,276 @@ window.__ModuleLoader__.load({
       };
     }
 
-    /** Разослать новый снимок подписчикам. */
-    function whisperEmit(catalog) {
-      whisperCatalog = catalog;
-      for (const listener of [...whisperListeners]) listener(catalog);
+    /**
+     * Состояние кнопки одним объектом.
+     *
+     * Новый объект на каждый вызов: React сравнивает состояние по ссылке, и без
+     * этого смена причины отказа не перерисовала бы кнопку.
+     * @returns {object} каталог, причина отказа, ожидание ответа и наличие шва.
+     */
+    function whisperState() {
+      return {
+        catalog: whisperCatalog,
+        failure: whisperFailure,
+        pending: whisperPending,
+        connected: speechService !== null,
+      };
+    }
+
+    /** Разослать текущее состояние подписчикам кнопки. */
+    function whisperNotify() {
+      for (const listener of [...whisperListeners]) listener();
     }
 
     /**
-     * Подключить клиентскую часть твика: подписка на подготовку модели.
+     * Принять новый снимок каталога и уведомить кнопку.
+     * @param {object | null} catalog - снимок каталога либо null, если его нет.
+     * @returns {void}
+     */
+    function whisperEmit(catalog) {
+      whisperCatalog = catalog;
+      whisperPending = false;
+      // Снимок с провайдером означает, что мир изменился: прежняя причина отказа
+      // его больше не описывает. Снимок без провайдера причину сохраняет — иначе
+      // пользователь не увидел бы, почему подготовка не запустилась.
+      if (whisperSnapshot(catalog).provider !== null) whisperFailure = '';
+      whisperNotify();
+    }
+
+    /**
+     * Текст ошибки для показа пользователю.
+     * @param {*} error - пойманное значение.
+     * @returns {string} сообщение.
+     */
+    function whisperErrorText(error) {
+      if (error === null || error === undefined) return 'неизвестная ошибка';
+      if (typeof error === 'string') return error;
+      return String(error.message ?? error);
+    }
+
+    /**
+     * Значение прямого Remote-вызова: шина отдаёт обёртку `{ ok, value }`.
+     * @param {*} result - ответ вызова либо элемент потока.
+     * @returns {*} значение либо null, если вызов отвергнут.
+     */
+    function whisperValue(result) {
+      if (result === null || typeof result !== 'object') return result ?? null;
+      if (result.ok === true) return result.value ?? null;
+      if (result.ok === false) return null;
+      return result;
+    }
+
+    /**
+     * Причина отказа прямого Remote-вызова.
+     *
+     * Отвергнутый вызов не бросает исключение, а возвращает `{ ok: false, error }`:
+     * без разбора этого поля кнопка молчала бы о причине.
+     * @param {*} result - ответ вызова.
+     * @returns {string} сообщение либо пустая строка, если вызов принят.
+     */
+    function whisperRefusal(result) {
+      if (result === null || typeof result !== 'object' || result.ok !== false) return '';
+      return whisperErrorText(result.error);
+    }
+
+    /**
+     * Найти клиентскую службу распознавания.
+     *
+     * Первый доступ — `ctx.get('remote.speech')`: так namespace-службу кладёт
+     * api-gateway. Два запасных доступа нужны на случай сборки, где namespace
+     * отдан свойством самого сервиса Remote; шов они не подменяют.
+     * @param {object | null} ctx - клиентский контекст плагина.
+     * @returns {object | null} служба распознавания либо null, если её нет.
+     */
+    function findSpeechService(ctx) {
+      if (typeof ctx?.get !== 'function') return null;
+      const readers = [
+        () => ctx.get('remote.speech'),
+        () => ctx.get('remote')?.speech,
+        () => ctx.remote?.speech,
+      ];
+      for (const read of readers) {
+        try {
+          const service = read();
+          if (service !== null && typeof service === 'object') return service;
+        } catch (_error) {
+          /* доступ не поддержан сборкой: пробуем следующий */
+        }
+      }
+      return null;
+    }
+
+    /** Остановить опрос появления шва. */
+    function stopSpeechLookup() {
+      if (speechLookupTimer === 0) return;
+      window.clearInterval(speechLookupTimer);
+      speechLookupTimer = 0;
+    }
+
+    /**
+     * Подключиться к найденной службе: снимок каталога и живой поток готовности.
+     *
+     * Прямой вызов отдаёт обёртку `{ ok, value }`, поток `follow` — сами снимки
+     * каталога; `whisperValue` принимает оба вида.
+     * @param {object} service - служба `remote.speech`.
+     * @returns {void}
+     */
+    function connectSpeech(service) {
+      const signal = speechAbort?.signal;
+      if (signal === undefined) return;
+      speechService = service;
+      whisperFailure = '';
+      if (typeof service.catalog === 'function') {
+        Promise.resolve()
+          .then(() => service.catalog())
+          .then((result) => {
+            const catalog = whisperValue(result);
+            if (speechService === service && catalog !== null) whisperEmit(catalog);
+          })
+          .catch((error) => {
+            // Поток follow остаётся основным источником: сбой снимка не приговор.
+            if (speechService === service && whisperCatalog === null) {
+              whisperFailure = whisperErrorText(error);
+              whisperNotify();
+            }
+          });
+      }
+      if (typeof service.follow !== 'function') return;
+      (async () => {
+        try {
+          for await (const item of service.follow(signal)) {
+            if (signal.aborted) return;
+            const catalog = whisperValue(item);
+            if (speechService === service && catalog !== null) whisperEmit(catalog);
+          }
+        } catch (error) {
+          if (signal.aborted || speechService !== service) return;
+          whisperFailure = whisperErrorText(error);
+          whisperNotify();
+        }
+      })();
+    }
+
+    /**
+     * Найти шов сейчас и подключиться; при неудаче — опрос до появления службы.
+     * @returns {boolean} найден ли шов.
+     */
+    function lookupSpeechSeam() {
+      const service = findSpeechService(speechContext);
+      if (service === null) {
+        startSpeechLookup();
+        whisperNotify();
+        return false;
+      }
+      stopSpeechLookup();
+      if (speechService !== service) connectSpeech(service);
+      whisperNotify();
+      return true;
+    }
+
+    /**
+     * Опрашивать появление шва.
+     *
+     * Клиентская половина голосового ввода монтируется асинхронно, поэтому при
+     * включённом на старте твике службы может ещё не быть; ручной проверки мало.
+     * @returns {void}
+     */
+    function startSpeechLookup() {
+      if (speechLookupTimer !== 0 || speechAbort === null) return;
+      if (typeof window.setInterval !== 'function') return;
+      let left = WHISPER_LOOKUP_TRIES;
+      speechLookupTimer = window.setInterval(() => {
+        left -= 1;
+        if (left <= 0) {
+          stopSpeechLookup();
+          return;
+        }
+        if (findSpeechService(speechContext) === null) return;
+        lookupSpeechSeam();
+      }, WHISPER_LOOKUP_MS);
+    }
+
+    /** Кнопка «Проверить снова»: поиск шва заново, со свежим запасом попыток. */
+    function retrySpeechLookup() {
+      stopSpeechLookup();
+      lookupSpeechSeam();
+    }
+
+    /**
+     * Подключить клиентскую часть твика: найти шов и слушать подготовку модели.
      * @param {object} ctx - клиентский контекст плагина.
      * @param {object} api - api твика (`own` регистрирует очистки).
      * @returns {void}
      */
     function setupWhisper(ctx, api) {
-      const service = typeof ctx?.get === 'function' ? ctx.get('speechController') : undefined;
-      speechService = service !== null && typeof service === 'object' ? service : null;
-      const abort = new AbortController();
-      speechAbort = abort;
-      if (typeof api?.own === 'function') api.own(() => abort.abort());
-      if (speechService === null) {
-        whisperEmit(null);
-        return;
-      }
-      // Начальный снимок сразу, затем живой поток follow.
-      Promise.resolve()
-        .then(() => speechService.catalog())
-        .then((catalog) => whisperEmit(catalog))
-        .catch(() => whisperEmit(null));
-      if (typeof speechService.follow === 'function') {
-        (async () => {
-          try {
-            for await (const catalog of speechService.follow(abort.signal)) whisperEmit(catalog);
-          } catch (_error) {
-            /* поток закрылся: остаётся последний снимок */
-          }
-        })();
-      }
+      const own = typeof api?.own === 'function' ? api.own : () => {};
+      speechContext = ctx;
+      speechAbort = new AbortController();
+      whisperCatalog = null;
+      whisperFailure = '';
+      whisperPending = false;
+      own(teardownWhisper);
+      lookupSpeechSeam();
     }
 
     /** Отключить клиентскую часть твика: снять подписку и очистить состояние. */
     function teardownWhisper() {
       if (speechAbort !== null) speechAbort.abort();
       speechAbort = null;
+      stopSpeechLookup();
       speechService = null;
+      speechContext = null;
       whisperCatalog = null;
+      whisperFailure = '';
+      whisperPending = false;
       whisperListeners.clear();
     }
 
     /**
-     * Реакт-хук: перерисовать кнопку при смене снимка каталога.
-     * @returns {object | null} текущий снимок каталога.
+     * Попросить хост подготовить модель и показать причину, если запрос отвергнут.
+     *
+     * Отвергнутый Remote-вызов возвращает обёртку `{ ok: false, error }`, а не
+     * бросает исключение, поэтому причину разбираем и в ответе, и в исключении.
+     * @returns {Promise<void>} завершается после ответа службы.
      */
-    function useWhisperCatalog() {
-      const [catalog, setCatalog] = React.useState(whisperCatalog);
+    async function requestPrepare() {
+      const service = speechService;
+      if (service === null || typeof service.prepare !== 'function') {
+        whisperFailure = 'служба распознавания не подключена';
+        whisperNotify();
+        return;
+      }
+      whisperFailure = '';
+      whisperPending = true;
+      whisperNotify();
+      try {
+        const result = await service.prepare(WHISPER_PROVIDER_ID);
+        if (speechService !== service) return;
+        const refusal = whisperRefusal(result);
+        if (refusal !== '') {
+          whisperFailure = refusal;
+          whisperPending = false;
+        }
+      } catch (error) {
+        if (speechService !== service) return;
+        whisperFailure = whisperErrorText(error);
+        whisperPending = false;
+      }
+      whisperNotify();
+    }
+
+    /**
+     * Реакт-хук: состояние кнопки, перерисовка на любое изменение.
+     * @returns {object} снимок: каталог, причина отказа, ожидание, наличие шва.
+     */
+    function useWhisperState() {
+      const [state, setState] = React.useState(whisperState());
       React.useEffect(() => {
-        whisperListeners.add(setCatalog);
-        return () => whisperListeners.delete(setCatalog);
+        const listener = () => setState(whisperState());
+        whisperListeners.add(listener);
+        return () => whisperListeners.delete(listener);
       }, []);
-      return catalog;
+      return state;
     }
 
     /** Объём в мегабайтах; при известном общем размере — «X / Y МБ». */
@@ -1344,52 +1576,84 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Строка кнопки подготовки: подпись и, если нужно, действие.
+     * @param {...object} children - содержимое строки.
+     * @returns {object} React-элемент.
+     */
+    function whisperRow(...children) {
+      return React.createElement('div', { style: WHISPER_ROW_STYLE }, ...children);
+    }
+
+    /**
+     * Подпись состояния.
+     * @param {string} value - текст.
+     * @param {boolean} [secondary] - показывать как пояснение.
+     * @returns {object} React-элемент.
+     */
+    function whisperText(value, secondary = false) {
+      return React.createElement('span', secondary ? { style: WHISPER_NOTICE_STYLE } : null, value);
+    }
+
+    /**
+     * Кнопка действия.
+     * @param {string} label - подпись.
+     * @param {Function} onClick - обработчик.
+     * @returns {object} React-элемент.
+     */
+    function whisperButton(label, onClick) {
+      return React.createElement('button', { type: 'button', onClick }, label);
+    }
+
+    /**
      * Кнопка загрузки модели с прогрессом подготовки.
+     *
+     * Состояния честные: нет шва — об этом сказано и предложена проверка; нет
+     * провайдера — назван он сам; отказ подготовки — названа его причина.
      * @returns {object} React-элемент.
      */
     function WhisperPrepareButton() {
-      const catalog = useWhisperCatalog();
-      const snapshot = whisperSnapshot(catalog);
-      const { phase, message, completedBytes, totalBytes } = snapshot;
-      const service = speechService;
-      const prepare = () => {
-        if (service === null) return;
-        try {
-          service.prepare(WHISPER_PROVIDER_ID);
-        } catch (_error) {
-          /* сбой подготовки покажется фазой failed */
-        }
-      };
+      const { catalog, failure, pending, connected } = useWhisperState();
 
-      if (phase === 'unprepared' || phase === 'cancelled') {
-        return React.createElement('div', { style: WHISPER_ROW_STYLE },
-          React.createElement('button', { type: 'button', onClick: prepare }, 'Скачать модель'),
+      if (!connected) {
+        return whisperRow(
+          whisperText('Служба распознавания не подключена.', true),
+          whisperButton('Проверить снова', retrySpeechLookup),
         );
+      }
+      if (catalog === null) {
+        const waiting = [whisperText(pending ? 'Подготовка запущена…' : 'Подключение к службе распознавания…')];
+        if (failure !== '') waiting.push(whisperText(`Причина: ${failure}`, true));
+        return whisperRow(...waiting);
+      }
+
+      const { provider, phase, message, completedBytes, totalBytes } = whisperSnapshot(catalog);
+      if (provider === null) {
+        const missing = [whisperText(`Провайдер «${WHISPER_PROVIDER_ID}» не зарегистрирован.`)];
+        if (failure !== '') missing.push(whisperText(`Причина: ${failure}`, true));
+        missing.push(whisperButton('Повторить', requestPrepare));
+        return whisperRow(...missing);
       }
       if (phase === 'downloading') {
-        return React.createElement('div', { style: WHISPER_ROW_STYLE },
-          React.createElement('span', null, `Загрузка модели: ${formatBytes(completedBytes, totalBytes)}`),
-        );
+        return whisperRow(whisperText(`Загрузка модели: ${formatBytes(completedBytes, totalBytes)}`));
       }
-      if (phase === 'checking' || phase === 'loading' || phase === 'waking') {
-        return React.createElement('div', { style: WHISPER_ROW_STYLE },
-          React.createElement('span', null, 'Подготовка модели…'),
-        );
+      if (phase === 'checking' || phase === 'loading' || phase === 'waking' || phase === 'cancelling') {
+        return whisperRow(whisperText('Подготовка модели…'));
       }
       if (phase === 'ready' || phase === 'standby') {
-        return React.createElement('div', { style: WHISPER_ROW_STYLE },
-          React.createElement('span', null, 'Модель готова'),
-        );
+        return whisperRow(whisperText('Модель готова'));
       }
       if (phase === 'failed') {
-        return React.createElement('div', { style: WHISPER_ROW_STYLE },
-          React.createElement('span', null, `Ошибка: ${message || 'неизвестная'}`),
-          React.createElement('button', { type: 'button', onClick: prepare }, 'Повторить'),
+        return whisperRow(
+          whisperText(`Ошибка подготовки: ${message || failure || 'неизвестная'}`),
+          whisperButton('Повторить', requestPrepare),
         );
       }
-      return React.createElement('div', { style: WHISPER_ROW_STYLE },
-        React.createElement('span', null, 'Подготовка…'),
-      );
+      // unprepared | cancelled: модель ещё не подготовлена.
+      const ready = [];
+      if (pending) ready.push(whisperText('Подготовка запущена…'));
+      if (failure !== '') ready.push(whisperText(`Не удалось запустить: ${failure}`, true));
+      if (!pending) ready.push(whisperButton('Скачать модель', requestPrepare));
+      return whisperRow(...ready);
     }
     /* #endregion tweak-whisper */
 
