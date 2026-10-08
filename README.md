@@ -31,7 +31,7 @@ plugin_manager action=install_bundle target=<путь к папке плагин
 
 * `client.js` — браузерная половина: значение масштаба, `zoom`, команды, плашка.
 * `index.js` — хост-половина, пустая.
-* `cordis.patch.yml` — вставка строки плагина (`rowId: ui-zoom`).
+* `cordis.patch.yml` — вставка строки плагина (`rowId: zoom`) и подписи твика.
 
 ### Масштаб
 
