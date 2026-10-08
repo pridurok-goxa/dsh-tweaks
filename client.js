@@ -1136,7 +1136,7 @@ window.__ModuleLoader__.load({
           try {
             storage?.setItem(
               'dsh.ui-zoom.ready.v1',
-              JSON.stringify({ version: '1.1.0', stage, at: new Date().toISOString() }),
+              JSON.stringify({ version: '1.2.0', stage, at: new Date().toISOString() }),
             );
           } catch (_error) {
             /* хранилище недоступно: отметка не критична для работы */
