@@ -10,7 +10,7 @@
  * Значение масштаба живёт на устройстве в localStorage: хосту писать нечего.
  */
 window.__ModuleLoader__.load({
-  id: '@local/dsh-ui-zoom',
+  id: 'dsh-ui-tweaks',
   factory(require) {
     const React = require('react');
 
