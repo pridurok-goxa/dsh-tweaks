@@ -31,6 +31,11 @@ export const Config = Schema.object({
   whisperModel: Schema.union(['tiny', 'base', 'small', 'medium', 'large-v3', 'turbo'])
     .default('medium')
     .volatile(),
+  // Служебное поле, а не твик: признак «провайдер и язык распознавания уже
+  // выставлены». Галочки у него нет — форма строится из реестра TWEAKS
+  // (client.js), а не из схемы. Хранить признак в чужой записи профиля или в
+  // файле нельзя: это наша настройка, и её видно в нашем же снимке конфигурации.
+  whisperSelectionApplied: Schema.boolean().default(false).volatile(),
 });
 
 /** Модуль хост-части твика «речь»: путь относительно нашего index.js. */
@@ -38,6 +43,12 @@ const WHISPER_HOST = './tweaks/whisper-host.js';
 /** Размеры модели из схемы Config; всё прочее сводится к размеру по умолчанию. */
 const WHISPER_MODELS = ['tiny', 'base', 'small', 'medium', 'large-v3', 'turbo'];
 const WHISPER_DEFAULT_MODEL = 'medium';
+/** Провайдер распознавания, который твик «речь» ставит выбором по умолчанию. */
+const WHISPER_PROVIDER_ID = 'whisper-local';
+/** Язык, который твик «речь» ставит выбором по умолчанию. */
+const WHISPER_LANGUAGE = 'ru';
+/** Имя служебного поля схемы: «провайдер и язык уже выставлены». */
+const SELECTION_FIELD = 'whisperSelectionApplied';
 
 /**
  * Значение поля конфигурации.
@@ -104,6 +115,55 @@ function warn(ctx, message, error) {
 }
 
 /**
+ * Служба распознавания речи (`ctx.speechToText`), если она есть в сборке.
+ *
+ * Сервиса может не быть вовсе: пакет `speech-to-text` — отдельный плагин, и без
+ * него распознавание живёт только в нашей хост-части. Свойство контекста на
+ * незарегистрированной службе может бросить, поэтому оба способа доступа —
+ * свойство и `ctx.get` — под защитой.
+ * @param {object} ctx - хост-контекст плагина.
+ * @returns {object | null} служба распознавания либо null.
+ */
+function speechService(ctx) {
+  try {
+    const direct = ctx?.speechToText;
+    if (typeof direct?.configure === 'function') return direct;
+  } catch (_error) {
+    /* службы нет: свойство контекста бросило */
+  }
+  try {
+    const viaGet = typeof ctx?.get === 'function' ? ctx.get('speechToText') : undefined;
+    if (typeof viaGet?.configure === 'function') return viaGet;
+  } catch (_error) {
+    /* службы нет и через ctx.get */
+  }
+  return null;
+}
+
+/**
+ * Записать признак «провайдер и язык выставлены» в своё поле схемы Config.
+ *
+ * Поле volatile, а ссылка `Volatile` доступна плагину только на чтение, поэтому
+ * значение сохраняется штатной службой настроек — она пишет в запись профиля
+ * нашего же пакета (`ctx.fiber.entry.options.id`), а не в чужую. Службы может не
+ * быть (плагин поднят без Loader) — тогда признак не сохранить, и об этом
+ * сообщается в лог.
+ * @param {object} ctx - хост-контекст плагина.
+ * @param {boolean} value - новое значение признака.
+ * @returns {Promise<boolean>} удалось ли сохранить признак.
+ */
+async function persistSelection(ctx, value) {
+  const settings = typeof ctx?.get === 'function' ? ctx.get('settings') : undefined;
+  const entryId = ctx?.fiber?.entry?.options?.id;
+  if (typeof settings?.update !== 'function' || typeof entryId !== 'string' || entryId === '') {
+    warn(ctx, 'dsh-tweaks: служба настроек недоступна — признак «провайдер и язык распознавания выставлены» не сохранён');
+    return false;
+  }
+  await settings.update(entryId, { [SELECTION_FIELD]: value });
+  return true;
+}
+
+/**
  * Подключить хост-часть твика «распознавание русской речи».
  *
  * Модуль твика — отдельный файл, которого может не быть (другая ветка,
@@ -122,6 +182,10 @@ function attachWhisper(ctx, config) {
   let model = '';
   /** Очередь переключений: activate и deactivate не накладываются друг на друга. */
   let queue = Promise.resolve();
+  /** Признак «выбор уже выставлен в этой сессии» — до того, как его вернёт конфигурация. */
+  let selectionApplied = false;
+  /** Идёт попытка выставить выбор прямо сейчас. */
+  let selecting = false;
 
   /**
    * Загрузить модуль хост-части.
@@ -154,6 +218,49 @@ function attachWhisper(ctx, config) {
   }
 
   /**
+   * Выставить провайдера и язык распознавания при первом включении твика.
+   *
+   * Порядок обязателен: провайдера `whisper-local` регистрирует `activate`,
+   * а `configure` сверяет язык со списком языков уже зарегистрированного
+   * провайдера и падает, если того нет. Признак «уже выставляли» живёт в нашем
+   * поле схемы Config, поэтому пользовательскую правку выбора мы больше не
+   * перезаписываем: если владелец потом сменил провайдера или язык руками,
+   * `configure` не зовётся.
+   *
+   * Ошибка не роняет твик: `configure` пишет в чужую запись профиля и может
+   * упасть (нет плагина распознавания, язык не поддержан, нет службы настроек),
+   * поэтому всё под `try/catch`, а причина уходит в лог. При падении признак не
+   * ставится — попробуем при следующем включении.
+   * @param {object} plain - конфигурация из обычных значений.
+   * @returns {Promise<void>}
+   */
+  async function ensureSelection(plain) {
+    if (selectionApplied || plain[SELECTION_FIELD] === true || selecting) return;
+    selecting = true;
+    try {
+      const speech = speechService(ctx);
+      if (speech === null) {
+        warn(ctx, 'dsh-tweaks: служба распознавания речи (speechToText) недоступна — провайдер и язык не выставлены');
+        return;
+      }
+      await speech.configure({ providerId: WHISPER_PROVIDER_ID, language: WHISPER_LANGUAGE });
+      // Выбор выставлен: дальше его не трогаем даже при переактивации твика.
+      selectionApplied = true;
+      try {
+        await persistSelection(ctx, true);
+      } catch (error) {
+        // Выбор уже применён и записан самим `configure`; не сохранился только
+        // наш признак — значит, после перезапуска попробуем ещё раз.
+        warn(ctx, 'dsh-tweaks: признак «провайдер и язык распознавания выставлены» не сохранён', error);
+      }
+    } catch (error) {
+      warn(ctx, 'dsh-tweaks: не удалось выставить провайдера и язык распознавания', error);
+    } finally {
+      selecting = false;
+    }
+  }
+
+  /**
    * Включить хост-часть с заданным размером модели.
    * @param {object} plain - конфигурация из обычных значений.
    * @param {string} nextModel - размер модели.
@@ -177,7 +284,10 @@ function attachWhisper(ctx, config) {
       await release(module);
       enabled = false;
       model = '';
+      return;
     }
+    // Выбор провайдера и языка — только после регистрации провайдера.
+    await ensureSelection(plain);
   }
 
   /** Выключить хост-часть. @returns {Promise<void>} */
