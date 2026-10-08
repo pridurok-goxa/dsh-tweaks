@@ -655,6 +655,34 @@ function checkAsync(name, fn) {
   asyncChecks.push({ name, fn });
 }
 
+/**
+ * Собрать форму флагов из зарегистрированного слота — так её рисует страница пакета.
+ * @param {object} env - песочница плагина из loadPlugin.
+ * @returns {Array<object>} строки формы: по одной на твик.
+ */
+function formRows(env) {
+  const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
+  assert.ok(entry, 'форма флагов зарегистрирована в слоте plugins.bundle.config');
+  const form = entry.entry.component({
+    ...entry.entry.options.inject(),
+    view: 'page',
+    t: (key) => key,
+    translate: (key) => key,
+  });
+  return form.children.filter((child) => child.props?.['data-tweak']);
+}
+
+/**
+ * Активные твики из отметки инициализации: каркас пишет её в хранилище устройства.
+ * @param {object} env - песочница плагина из loadPlugin.
+ * @returns {string[]} id активных твиков.
+ */
+function readyTweaks(env) {
+  const raw = env.storage.dump()['dsh.ui-zoom.ready.v1'];
+  assert.ok(raw, 'отметка инициализации записана в хранилище');
+  return JSON.parse(raw).tweaks;
+}
+
 check('стартовый масштаб 100% не задаёт лишних стилей', () => {
   const env = loadPlugin();
   assert.ok(!env.zoom(), 'при 100% масштаб не выставляется');
@@ -734,12 +762,63 @@ check('без службы конфигурации работают дефол�
   const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
   assert.ok(entry, 'форма флагов всё равно зарегистрирована');
   const form = entry.entry.component({ ...entry.entry.options.inject(), view: 'page', t: (key) => key, translate: (key) => key });
-  assert.equal(form.children.filter((child) => child.props?.['data-tweak']).length, 2, 'показывает состояние обоих твиков');
+  assert.equal(form.children.filter((child) => child.props?.['data-tweak']).length, 3, 'показывает состояние всех твиков');
   const texts = form.children.map((child) => child.children?.[0]).filter((text) => typeof text === 'string');
   assert.ok(texts.includes('form.unavailable'), `форма говорит о недоступности настроек (${texts.join(' | ')})`);
   for (const row of form.children.filter((child) => child.props?.['data-tweak'])) {
     assert.equal(row.children[1].props.disabled, true, 'без службы переключатели заблокированы');
   }
+});
+
+check('реестр знает три твика', () => {
+  const env = loadPlugin();
+  const ids = formRows(env).map((row) => row.props['data-tweak']);
+  assert.deepEqual(ids, ['zoom', 'contextMenu', 'whisper'], 'в реестре три твика: zoom, contextMenu, whisper');
+});
+
+check('форма рисует три галочки', () => {
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: true } });
+  const rows = formRows(env);
+  assert.equal(rows.length, 3, 'по галочке на каждый твик');
+  for (const row of rows) {
+    const id = row.props['data-tweak'];
+    assert.equal(row.children.length, 2, `строка ${id}: подпись и переключатель`);
+    // Мини-React отдаёт элемент как есть: тип — компонент переключателя из примитивов.
+    assert.equal(typeof row.children[1].type, 'function', `строка ${id}: переключатель, а не текст`);
+    assert.equal(row.children[1].props.checked, true, `строка ${id}: галочка стоит по флагу`);
+  }
+});
+
+check('whisper по умолчанию выключен', () => {
+  // Дефолты реестра работают, пока конфигурация не готова: тяжёлый твик не
+  // включается сам — иначе он поднимал бы Python-воркер и качал модель весов.
+  const env = loadPlugin({ configFormsAvailable: false });
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu'], 'активны только твики с defaultOn');
+  const row = formRows(env).find((child) => child.props['data-tweak'] === 'whisper');
+  assert.equal(row.children[1].props.checked, false, 'галочка whisper снята');
+});
+
+check('включённый флаг вызывает клиентский activate, выключение снимает твик', () => {
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: false } });
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu'], 'пока флаг снят, твик не активен');
+  /** Ресурсы соседей и формы: переключение whisper их трогать не должно. */
+  const resources = () => ({
+    keydown: env.listenerCount('keydown'),
+    wheel: env.listenerCount('wheel'),
+    storage: env.listenerCount('storage'),
+    commands: env.registeredCommands.length,
+    slots: env.slotEntries.length,
+    subscribers: env.formsSubscribers(),
+  });
+  const before = resources();
+
+  env.setFlags({ whisper: true });
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'whisper'], 'флаг включил твик без клиентского кода');
+  assert.deepEqual(resources(), before, 'включение whisper не задело соседей');
+
+  env.setFlags({ whisper: false });
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu'], 'выключение убрало твик из активных');
+  assert.deepEqual(resources(), before, 'выключение ничего не оставило висеть');
 });
 
 check('неготовый снимок конфигурации тоже даёт дефолты', () => {
@@ -967,7 +1046,7 @@ check('словари en и ru зарегистрированы, ru не пад�
   assert.deepEqual(locales, ['en', 'ru']);
   for (const row of env.dictionaries) {
     assert.equal(row.ns, 'dsh-tweaks');
-    for (const key of ['zoom.in', 'zoom.out', 'zoom.reset', 'zoom.hint', 'tweak.zoom', 'tweak.contextMenu']) {
+    for (const key of ['zoom.in', 'zoom.out', 'zoom.reset', 'zoom.hint', 'tweak.zoom', 'tweak.contextMenu', 'tweak.whisper']) {
       assert.ok(row.dict[key], `${row.locale}: есть ключ ${key}`);
     }
   }
@@ -1362,7 +1441,7 @@ checkAsync('форма пишет флаг операцией set с прочи�
   const injected = entry.entry.options.inject();
   const form = entry.entry.component({ ...injected, view: 'page', t: (key) => key, translate: (key) => key });
   const rows = form.children.filter((child) => child.props?.['data-tweak']);
-  assert.equal(rows.length, 2, 'по переключателю на твик');
+  assert.equal(rows.length, 3, 'по переключателю на твик');
   const zoomRow = rows.find((row) => row.props['data-tweak'] === 'zoom');
   const toggle = zoomRow.children[1];
   assert.equal(toggle.props.checked, true, 'галочка стоит по значению флага');

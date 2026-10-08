@@ -11,11 +11,11 @@
     "./locale/*.json": "./locale/*.json"
   },
   "files": [
-    "index.js",
     "client.js",
+    "index.js",
     "cordis.patch.yml",
-    "locale/*.json",
-    "README.md"
+    "locale/**",
+    "tweaks/**"
   ],
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },

@@ -109,6 +109,7 @@ window.__ModuleLoader__.load({
         'menu.selectAll': 'Select All',
         'tweak.zoom': 'Interface size',
         'tweak.contextMenu': 'Custom right-click menu',
+        'tweak.whisper': 'Russian speech recognition',
         'form.hint': 'A check box turns the tweak on at once, without a restart.',
         'form.unavailable': 'Settings are unavailable: this deployment has no configuration service.',
         'form.readOnly': 'This deployment stores settings read-only.',
@@ -127,6 +128,7 @@ window.__ModuleLoader__.load({
         'menu.selectAll': 'Выделить всё',
         'tweak.zoom': 'Масштаб интерфейса',
         'tweak.contextMenu': 'Своё меню по правой кнопке',
+        'tweak.whisper': 'Распознавание русской речи',
         'form.hint': 'Галочка включает твик сразу, без перезапуска.',
         'form.unavailable': 'Настройки недоступны: в этой сборке нет службы конфигурации.',
         'form.readOnly': 'Эта сборка хранит настройки только для чтения.',
@@ -1257,6 +1259,18 @@ window.__ModuleLoader__.load({
           attachContextMenu(ctx, api);
         },
       },
+      whisper: {
+        title: 'Распознавание русской речи',
+        titleKey: 'tweak.whisper',
+        // Тяжёлый твик: поднимает Python-воркер и качает модель весов,
+        // поэтому сам не включается — только галочкой.
+        defaultOn: false,
+        // Клиентской части у твика нет: распознавание живёт в хост-половине
+        // (`tweaks/whisper-host.js`), и каркас обязан переживать пустые
+        // обработчики — галочка включает твик на хосте.
+        activate() {},
+        deactivate() {},
+      },
     };
 
     /** Активные твики: id → очистки его ресурсов. */
@@ -1302,11 +1316,27 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Включён ли твик по значениям снимка конфигурации.
+     *
+     * Отсутствие поля — это дефолт реестра (`defaultOn`), а не «включено»:
+     * у твика, выключенного по умолчанию, пропавшее поле не должно включаться
+     * само. Так же читается и незаготовленный снимок (`value === null`).
+     * @param {object} tweak - запись реестра твиков.
+     * @param {string} id - id твика (он же имя флага в схеме Config).
+     * @param {object | null} value - значения флагов из готового снимка либо null.
+     * @returns {boolean} включён ли твик.
+     */
+    function flagOn(tweak, id, value) {
+      const declared = value === null || value === undefined ? undefined : value[id];
+      if (declared === undefined) return tweak.defaultOn !== false;
+      return declared !== false;
+    }
+
+    /**
      * Прочитать флаги твиков из снимка конфигурации.
      *
      * Пока конфигурация не готова, работают дефолты реестра: пакет ведёт себя так,
-     * как вёл до появления флагов. В готовом снимке отсутствие поля — тоже дефолт
-     * схемы (`default(true)` в index.js).
+     * как вёл до появления флагов.
      * @param {object | undefined} controller - форма записи сервиса configForms.
      * @returns {object} id твика → включён ли он.
      */
@@ -1318,7 +1348,7 @@ window.__ModuleLoader__.load({
           : null;
       const flags = {};
       for (const [id, tweak] of Object.entries(TWEAKS)) {
-        flags[id] = value === null ? tweak.defaultOn !== false : value[id] !== false;
+        flags[id] = flagOn(tweak, id, value);
       }
       return flags;
     }
@@ -1394,7 +1424,7 @@ window.__ModuleLoader__.load({
       const rows = [];
       for (const [id, tweak] of Object.entries(TWEAKS)) {
         const label = copy(tweak.titleKey);
-        const checked = ready ? snapshot.value?.[id] !== false : tweak.defaultOn !== false;
+        const checked = flagOn(tweak, id, ready ? snapshot.value : null);
         rows.push(
           React.createElement(
             'div',
@@ -1527,10 +1557,12 @@ window.__ModuleLoader__.load({
             if (on) enableTweak(ctx, id, markReady);
             else disableTweak(id);
           }
+          // Отметка пишется и здесь, а не только на старте: по ней видно, какие
+          // твики активны после каждой правки флагов.
+          markReady(`applied: ${[...activeTweaks.keys()].join(',') || 'none'}`);
         };
         reconcile();
         if (typeof controller?.subscribe === 'function') scope.own(controller.subscribe(reconcile));
-        markReady(`applied: ${[...activeTweaks.keys()].join(',') || 'none'}`);
 
         try {
           if (typeof ctx.on === 'function') {
