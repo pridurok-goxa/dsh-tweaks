@@ -1612,6 +1612,11 @@ window.__ModuleLoader__.load({
             }),
           ),
         );
+        // Твик может показать рядом со своим переключателем дополнительную строку:
+        // например, «речь» — кнопку загрузки модели с прогрессом.
+        if (checked && typeof tweak.renderDetail === 'function') {
+          rows.push(React.createElement('div', { key: `${id}-detail` }, tweak.renderDetail()));
+        }
       }
       const notices = [React.createElement('p', { key: 'hint', style: FORM_NOTICE_STYLE }, copy('form.hint'))];
       if (!ready) {

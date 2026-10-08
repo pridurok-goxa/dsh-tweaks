@@ -457,6 +457,17 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
       }
     },
     MutationObserver: FakeMutationObserver,
+    // Браузерный глобал: клиентский твик «речи» снимает подписку через сигнал отмены.
+    AbortController: class FakeAbortController {
+      constructor() {
+        this.signal = { aborted: false };
+      }
+
+      abort() {
+        this.signal.aborted = true;
+      }
+    },
+    AbortSignal: {},
     getComputedStyle,
     console,
     setTimeout: windowObject.setTimeout,
