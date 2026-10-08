@@ -890,36 +890,36 @@ window.__ModuleLoader__.load({
               id: 'ui-zoom.in',
               labelKey: 'zoom.in',
               aliases: ['zoom in', 'larger text', 'increase interface size', 'масштаб', 'крупнее'],
-              codes: ['Equal', 'NumpadAdd'],
+              code: 'Equal',
               direction: 1,
             },
             {
               id: 'ui-zoom.out',
               labelKey: 'zoom.out',
               aliases: ['zoom out', 'smaller text', 'decrease interface size', 'масштаб', 'мельче'],
-              codes: ['Minus', 'NumpadSubtract'],
+              code: 'Minus',
               direction: -1,
             },
             {
               id: 'ui-zoom.reset',
               labelKey: 'zoom.reset',
               aliases: ['zoom reset', 'actual size', 'reset interface size', 'сброс масштаба'],
-              codes: ['Digit0'],
+              code: 'Digit0',
               direction: 0,
             },
           ];
           const registered = [];
           for (const definition of definitions) {
-            // Сервис принимает одну привязку на профиль, поэтому клавиша нумпада
-            // идёт отдельной командой с тем же действием.
-            definition.codes.forEach((code, index) => {
-              const id = index === 0 ? definition.id : `${definition.id}.numpad`;
+            // Клавиши нумпада сервис не принимает (`Unsupported shortcut code`), и одна
+            // такая команда роняла регистрацию всех остальных. Нумпад обрабатывает
+            // прямой перехват, а команду заводим только для поддерживаемой клавиши.
+            try {
               registered.push(
                 shortcuts.register({
-                  id,
-                  label: () => (index === 0 ? translate(definition.labelKey) : `${translate(definition.labelKey)} (NumPad)`),
+                  id: definition.id,
+                  label: () => translate(definition.labelKey),
                   aliases: definition.aliases,
-                  defaults: binding(code),
+                  defaults: binding(definition.code),
                   regions: ['page', 'editable'],
                   modals: [],
                   resolve: () => ({
@@ -929,7 +929,9 @@ window.__ModuleLoader__.load({
                   }),
                 }),
               );
-            });
+            } catch (error) {
+              console.error(`ui-zoom: команда ${definition.id} не зарегистрирована`, error);
+            }
           }
           return registered;
         }

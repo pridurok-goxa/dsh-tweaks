@@ -153,7 +153,7 @@ function createElement(id, classes = []) {
 }
 
 /** Собрать песочницу с плагином и вернуть наблюдаемые объекты. */
-function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null } = {}) {
+function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, rejectCode = null } = {}) {
   const storage = createStorage();
   if (stored !== null) storage.setItem('dsh.ui-zoom.v1', stored);
   /** Полоска изменения ширины панели: по ней плагин находит рамку интерфейса. */
@@ -282,6 +282,12 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
   };
   const shortcutsFace = {
     register: (command) => {
+      // Сервис проверяет физический код и на неподдерживаемом бросает ошибку:
+      // раньше это роняло регистрацию всех команд масштаба.
+      const code = command.defaults?.['desktop:windows']?.code;
+      if (rejectCode !== null && code === rejectCode) {
+        throw new Error(`Unsupported shortcut code: ${code}`);
+      }
       registeredCommands.push(command);
       return () => {};
     },
@@ -529,16 +535,10 @@ check('испорченное значение игнорируется', () => 
   }
 });
 
-check('команды масштаба зарегистрированы, включая клавиши нумпада', () => {
+check('команды масштаба зарегистрированы', () => {
   const env = loadPlugin();
   const ids = env.registeredCommands.map((row) => row.id).sort();
-  assert.deepEqual(ids, [
-    'ui-zoom.in',
-    'ui-zoom.in.numpad',
-    'ui-zoom.out',
-    'ui-zoom.out.numpad',
-    'ui-zoom.reset',
-  ]);
+  assert.deepEqual(ids, ['ui-zoom.in', 'ui-zoom.out', 'ui-zoom.reset']);
   const increase = env.registeredCommands.find((row) => row.id === 'ui-zoom.in');
   assert.deepEqual(plain(increase.defaults['desktop:windows']), { code: 'Equal', modifiers: ['primary'] });
   assert.deepEqual(plain(increase.defaults['web:windows']), { code: 'Equal', modifiers: ['primary', 'alt'] });
@@ -546,11 +546,6 @@ check('команды масштаба зарегистрированы, вкл�
   assert.deepEqual(plain(decrease.defaults['desktop:windows']), { code: 'Minus', modifiers: ['primary'] });
   const reset = env.registeredCommands.find((row) => row.id === 'ui-zoom.reset');
   assert.deepEqual(plain(reset.defaults['desktop:windows']), { code: 'Digit0', modifiers: ['primary'] });
-  // Нумпад: Ctrl и клавиши + / − на цифровом блоке.
-  const numpadIn = env.registeredCommands.find((row) => row.id === 'ui-zoom.in.numpad');
-  assert.deepEqual(plain(numpadIn.defaults['desktop:windows']), { code: 'NumpadAdd', modifiers: ['primary'] });
-  const numpadOut = env.registeredCommands.find((row) => row.id === 'ui-zoom.out.numpad');
-  assert.deepEqual(plain(numpadOut.defaults['desktop:windows']), { code: 'NumpadSubtract', modifiers: ['primary'] });
   for (const command of env.registeredCommands) {
     assert.deepEqual(plain(command.regions), ['page', 'editable'], `${command.id}: работает и в поле ввода`);
     assert.ok(
@@ -561,11 +556,22 @@ check('команды масштаба зарегистрированы, вкл�
   }
 });
 
+check('неподдерживаемый код не роняет остальные команды', () => {
+  // Сервис горячих клавиш отвергает часть кодов («Unsupported shortcut code») и раньше
+  // ронял регистрацию целиком: без команд оставались и Ctrl+=, и сброс масштаба.
+  const env = loadPlugin({ rejectCode: 'Minus' });
+  const ids = env.registeredCommands.map((row) => row.id).sort();
+  assert.deepEqual(ids, ['ui-zoom.in', 'ui-zoom.reset'], 'остальные команды на месте');
+  env.press('Equal');
+  assert.equal(env.zoom(), '1.05', 'прямой перехват работает независимо от сервиса');
+});
+
 check('клавиша нумпада даёт тот же шаг масштаба', () => {
+  // Нумпад живёт только в прямом перехвате: сервис такие коды не принимает.
   const env = loadPlugin();
-  env.runCommand('ui-zoom.in.numpad');
+  env.press('NumpadAdd');
   assert.equal(env.zoom(), '1.05', '+ на нумпаде увеличивает');
-  env.runCommand('ui-zoom.out.numpad');
+  env.press('NumpadSubtract');
   assert.ok(!env.zoom(), '− на нумпаде уменьшает');
 });
 
@@ -647,7 +653,7 @@ check('без сервиса shortcuts команды не падают, а по
   env.publishShortcuts();
   assert.deepEqual(
     env.registeredCommands.map((row) => row.id).sort(),
-    ['ui-zoom.in', 'ui-zoom.in.numpad', 'ui-zoom.out', 'ui-zoom.out.numpad', 'ui-zoom.reset'],
+    ['ui-zoom.in', 'ui-zoom.out', 'ui-zoom.reset'],
     'после появления сервиса команды зарегистрированы',
   );
 });
@@ -655,7 +661,7 @@ check('без сервиса shortcuts команды не падают, а по
 check('без сервиса locale плагин не падает и масштаб всё равно работает', () => {
   const env = loadPlugin({ servicesAvailable: false });
   assert.equal(env.dictionaries.length, 0, 'словари не регистрируются');
-  assert.equal(env.registeredCommands.length, 5, 'команды регистрируются независимо от локали');
+  assert.equal(env.registeredCommands.length, 3, 'команды регистрируются независимо от локали');
   env.runCommand('ui-zoom.in');
   assert.equal(env.zoom(), '1.05', 'масштаб меняется');
 });
@@ -766,7 +772,7 @@ check('без ctx.effect и ctx.styles плагин работает (фасад
   assert.doesNotMatch(source, /ctx\.effect\(/, 'нет обращений к ctx.effect');
   assert.doesNotMatch(source, /ctx\.styles/, 'стили не берутся через ctx.styles');
   assert.doesNotMatch(source, /ctx\.inject\(/, 'нет обращений к ctx.inject');
-  assert.ok(env.registeredCommands.length === 5, 'команды всё равно зарегистрированы');
+  assert.ok(env.registeredCommands.length === 3, 'команды всё равно зарегистрированы');
 });
 
 check('недоступное хранилище не ломает плагин', () => {
