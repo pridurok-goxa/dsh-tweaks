@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Стенд: точная репродукция позиционирования меню при CSS-зуме</title>
+<style>
+  body { margin: 0; background: #10151b; color: #e9eef5; font: 12px/1.45 monospace; }
+  #out { padding: 8px; white-space: pre; color: #7ee787; }
+  iframe { position: absolute; left: -20000px; top: 0; width: 2400px; height: 1200px; border: 0; }
+</style>
+</head>
+<body>
+<pre id="out">считаю…</pre>
+<script>
+/** Внутренний документ: раскладка AppFrame (сайдбар | центр | правая панель + полоска). */
+function frameDoc() {
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+    html,body,#root{height:100%;margin:0;}
+    #frame{display:grid;grid-template-rows:100%;height:100%;position:relative;overflow:hidden;}
+    #sidebar{background:#1b2430;} #center{background:#10151b;} #rightbar{background:#18202a;}
+    #handle{position:absolute;top:0;bottom:0;width:8px;margin-left:-4px;cursor:col-resize;z-index:11;}
+  </style></head><body>
+  <div id="root"><div id="frame" data-sidebar-collapsed="">
+    <div id="sidebar"></div><div id="center"></div><div id="rightbar"></div>
+    <div id="handle" data-side="rightbar"></div>
+  </div></div>
+  <script>
+    // Копия AppFrame: измеряет себя через getBoundingClientRect и раскладывает колонки.
+    const frame = document.getElementById('frame');
+    const handle = document.getElementById('handle');
+    const rightbarEl = document.getElementById('rightbar');
+    let dragOrigin = null, dragBase = 0, dragMax = 0;
+    function compute(viewport) {
+      const s = 280;
+      const available = viewport - s - 400;
+      const r = available < 300 ? 0 : Math.min(available, Math.max(300, Math.min(700, viewport * 0.5)));
+      return { s, r };
+    }
+    function layout(rOverride) {
+      const viewport = frame.getBoundingClientRect().width;   // ← как в AppFrame
+      const { s, r: computed } = compute(viewport);
+      const r = rOverride === undefined ? computed : Math.max(300, Math.min(computed, rOverride));
+      frame.style.gridTemplateColumns = s + 'px minmax(' + (r === 0 ? 0 : 400) + 'px, 1fr) minmax(0px, ' + r + 'px)';
+      handle.style.left = (viewport - r) + 'px';
+      return r;
+    }
+    // Копия DragHandle: сдвиг считается по clientX.
+    handle.addEventListener('pointerdown', (e) => {
+      dragOrigin = e.clientX;
+      dragBase = layout();
+      dragMax = compute(frame.getBoundingClientRect().width).r;
+    });
+    handle.addEventListener('pointermove', (e) => {
+      if (dragOrigin === null) return;
+      const dx = e.clientX - dragOrigin;
+      window.__debug = { dx, dragBase, dragMax, viewport: frame.getBoundingClientRect().width };
+      layout(Math.max(300, Math.min(dragMax, dragBase + dx)));
+    });
+    handle.addEventListener('pointerup', () => { dragOrigin = null; });
+    window.addEventListener('resize', () => layout());
+    new ResizeObserver(() => layout()).observe(frame);
+    window.__layout = layout;
+    window.__frameEl = () => frame;
+    window.__rootEl = () => document.getElementById('root');
+    window.__handle = () => handle;
+    window.__rightbar = () => rightbarEl.getBoundingClientRect();
+    layout();
+  <\/script></body></html>`;
+}
+
+/** Внутренний документ повторяет структуру DSH и механику Menu.place/useAnchoredPosition. */
+function innerDoc(side, align) {
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+    html,body,#root{height:100%;margin:0;}
+    #chip{position:absolute;right:280px;bottom:200px;font-size:14px;padding:8px 14px;}
+    #panel{position:fixed;left:0;top:0;width:240px;padding:10px;background:#2a3340;color:#fff;
+           border:1px solid #3a4553;border-radius:10px;font:13px sans-serif;visibility:hidden;}
+  </style></head><body>
+  <div id="root"><button id="chip">Кнопка</button></div>
+  <div id="panel">Меню портала с длинным текстом для проверки переносов строки</div>
+  <script>
+    const GAP = 4, MARGIN = 12;
+    const chip = document.getElementById('chip');
+    const panel = document.getElementById('panel');
+    function place() {
+      const rect = chip.getBoundingClientRect();
+      const width = panel.offsetWidth;
+      const height = panel.offsetHeight;
+      let left = ${JSON.stringify(align)} === 'end' ? rect.right - width : rect.left;
+      let top = ${JSON.stringify(side)} === 'top' ? rect.top - GAP - height : rect.bottom + GAP;
+      if (width > 0) left = Math.min(Math.max(left, MARGIN), window.innerWidth - width - MARGIN);
+      if (height > 0) top = Math.min(Math.max(top, MARGIN), window.innerHeight - height - MARGIN);
+      panel.style.left = left + 'px';
+      panel.style.top = top + 'px';
+      panel.style.visibility = 'visible';
+    }
+    function track() { place(); requestAnimationFrame(track); }
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    window.__place = place;
+    window.__track = track;
+    window.__chip = () => chip.getBoundingClientRect();
+    window.__panel = () => panel.getBoundingClientRect();
+    window.__panelEl = () => panel;
+    window.__rootEl = () => document.getElementById('root');
+    place();
+  <\/script></body></html>`;
+}
+
+// ---- Точная копия логики плагина из client.js ----
+const popupStates = new WeakMap();
+const VIEWPORT_PROPS = ['left', 'top', 'width', 'maxWidth', 'minWidth', 'maxHeight'];
+const SCALE_VAR = '--dsh-ui-zoom';
+
+function stateFor(node) {
+  let s = popupStates.get(node);
+  if (!s) { s = { patched: false }; popupStates.set(node, s); }
+  return s;
+}
+function patchMetrics(node) {
+  const s = stateFor(node);
+  if (s.patched) return;
+  for (const [prop, axis] of [['offsetWidth', 'width'], ['offsetHeight', 'height']]) {
+    try { Object.defineProperty(node, prop, { configurable: true, get: () => node.getBoundingClientRect()[axis] }); } catch (e) {}
+  }
+  s.patched = true;
+}
+const sourceVar = (prop) => `--dsh-ui-zoom-src-${prop}`;
+/** Координаты приложения уходят в переменные, деление делает CSS. */
+function pickUp(node) {
+  for (const prop of VIEWPORT_PROPS) {
+    const value = node.style[prop];
+    if (typeof value === 'string' && value.startsWith('calc(')) continue;
+    const parsed = Number.parseFloat(value);
+    if (!Number.isFinite(parsed)) { node.style.removeProperty(sourceVar(prop)); continue; }
+    node.style.setProperty(sourceVar(prop), `${parsed}px`);
+    node.style[prop] = `calc(var(${sourceVar(prop)}) / var(${SCALE_VAR}))`;
+  }
+}
+/** Применить масштаб: переменная на корне документа + собственный zoom слоя. */
+function applyScale(win, panel, k) {
+  win.document.documentElement.style.setProperty(SCALE_VAR, String(k));
+  panel.style.zoom = k === 1 ? '' : String(k);
+  pickUp(panel);
+}
+
+// ---- Копия patchFrameMetrics из client.js ----
+const scaleOf = new WeakMap();
+
+/**
+ * Отдать приложению логическую рамку интерфейса.
+ * @param {Window} win - окно стенда.
+ * @param {number} k - текущий масштаб.
+ * @returns {void}
+ */
+function patchFrame(win, k) {
+  const handle = win.document.querySelector('[data-side="sidebar"], [data-side="rightbar"]');
+  const frame = handle?.parentElement ?? null;
+  if (!frame || frame.__patched) return;
+  frame.__patched = true;
+  const original = frame.getBoundingClientRect.bind(frame);
+  frame.getBoundingClientRect = () => {
+    const rect = original();
+    const zoom = scaleOf.get(win) ?? 1;
+    if (zoom === 1) return rect;
+    return {
+      x: rect.x / zoom, y: rect.y / zoom,
+      width: rect.width / zoom, height: rect.height / zoom,
+      left: rect.left / zoom, top: rect.top / zoom,
+      right: rect.right / zoom, bottom: rect.bottom / zoom,
+    };
+  };
+}
+
+/**
+ * Отдать приложению логический clientX на полоске (копия patchPointerCoordinates).
+ * @param {Window} win - окно стенда.
+ * @returns {void}
+ */
+function patchPointer(win) {
+  const proto = win.PointerEvent?.prototype;
+  if (!proto || proto.__patched) return;
+  const desc = Object.getOwnPropertyDescriptor(win.MouseEvent.prototype, 'clientX');
+  if (typeof desc?.get !== 'function') return;
+  proto.__patched = true;
+  Object.defineProperty(proto, 'clientX', {
+    configurable: true,
+    get() {
+      const raw = desc.get.call(this);
+      const zoom = scaleOf.get(win) ?? 1;
+      if (zoom === 1) return raw;
+      const target = this.target;
+      const onHandle = target !== null && typeof target?.closest === 'function' && target.closest('[data-side]') !== null;
+      return onHandle ? raw / zoom : raw;
+    },
+  });
+}
+
+/** Внутренний документ: слой меню по правой кнопке (координаты задаёт плагин). */
+function ctxDoc() {
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+    html,body,#root{height:100%;margin:0;}
+    #ctx{position:fixed;left:0;top:0;width:150px;height:200px;background:#2a3340;}
+  </style></head><body>
+  <div id="root"></div><div id="ctx"></div>
+  <script>
+    window.__ctx = () => document.getElementById('ctx');
+    window.__rootEl = () => document.getElementById('root');
+  <\/script></body></html>`;
+}
+
+const out = document.getElementById('out');
+const lines = [];
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function run() {
+  for (const layout of [{ side: 'bottom', align: 'start' }, { side: 'top', align: 'end' }, { side: 'bottom', align: 'end' }, { side: 'top', align: 'start' }]) {
+    const ks = [];
+    for (let v = 50; v <= 200; v += 5) ks.push(v / 100);
+    for (const k of ks) {
+      const frame = document.createElement('iframe');
+      frame.srcdoc = innerDoc(layout.side, layout.align);
+      document.body.appendChild(frame);
+      await new Promise((resolve) => { frame.onload = resolve; });
+      const win = frame.contentWindow;
+      await wait(20);
+      const panel = win.__panelEl();
+      const root = win.__rootEl();
+
+      root.style.zoom = k === 1 ? '' : String(k);
+      patchMetrics(panel);
+      applyScale(win, panel, k);
+      win.__place();
+      pickUp(panel);
+      win.dispatchEvent(new win.Event('resize'));
+      win.__place();
+      pickUp(panel);
+
+      // Проверка устойчивости: многократная смена масштаба туда-обратно, как при
+      // нажатии Ctrl+= / Ctrl+-. Координаты при этом не пересчитываются в JS —
+      // их делит CSS по переменной масштаба.
+      const alt = [1.15, 0.95, 1.4, 0.65, 1.75, 1.05];
+      for (const a of alt) {
+        root.style.zoom = a === 1 ? '' : String(a);
+        applyScale(win, panel, a);
+        win.__place();
+        pickUp(panel);
+      }
+      root.style.zoom = k === 1 ? '' : String(k);
+      applyScale(win, panel, k);
+      win.__place();
+      pickUp(panel);
+      await wait(40);
+
+      const chip = win.__chip();
+      const p = win.__panel();
+      const gap = layout.side === 'top' ? +(chip.top - p.bottom).toFixed(1) : +(p.top - chip.bottom).toFixed(1);
+      const alignErr = layout.align === 'end' ? +(chip.right - p.right).toFixed(1) : +(p.left - chip.left).toFixed(1);
+      const chipInside = chip.left >= 0 && chip.top >= 0 && chip.right <= win.innerWidth + 0.5 && chip.bottom <= win.innerHeight + 0.5;
+      const overflow = +(Math.max(0, p.right - win.innerWidth) + Math.max(0, -p.left) + Math.max(0, p.bottom - win.innerHeight) + Math.max(0, -p.top)).toFixed(1);
+      const bad = Math.abs(gap - 4) > 0.6 || Math.abs(alignErr) > 0.6 || overflow > 0 || !chipInside;
+      if (bad) {
+        lines.push(`${layout.side}/${layout.align} k=${k} зазор=${gap} выравн=${alignErr} overflow=${overflow} chip=${chipInside ? 'да' : 'НЕТ'}  <-- ПРОБЛЕМА`);
+      }
+      frame.remove();
+      out.textContent = (lines.length ? lines.join('\n') : 'пока всё чисто');
+    }
+  }
+
+  // Отдельно: полоска изменения ширины правой панели должна стоять на её границе.
+  for (const k of [1, 1.05, 1.15, 1.25, 1.5, 1.75, 2, 0.75, 0.5]) {
+    const frame = document.createElement('iframe');
+    frame.srcdoc = frameDoc();
+    document.body.appendChild(frame);
+    await new Promise((resolve) => { frame.onload = resolve; });
+    const win = frame.contentWindow;
+    await wait(20);
+    scaleOf.set(win, k);
+    win.__rootEl().style.zoom = k === 1 ? '' : String(k);
+    patchFrame(win, k);
+    win.dispatchEvent(new win.Event('resize'));
+    win.__layout();
+    await wait(40);
+    const h = win.__handle().getBoundingClientRect();
+    const rb = win.__rightbar();
+    const center = h.left + h.width / 2;
+    const delta = +(center - rb.left).toFixed(1);
+    const visible = center >= 0 && center <= win.innerWidth;
+    if (Math.abs(delta) > 2 || !visible) {
+      lines.push(`полоска панели k=${k}: смещение от границы ${delta}px, в окне=${visible ? 'да' : 'НЕТ'}  <-- ПРОБЛЕМА`);
+    }
+
+    // Перетаскивание: панель обязана следовать за курсором один в один.
+    patchPointer(win);
+    patchFrame(win, k);
+    const handleEl = win.__handle();
+    const before = win.__rightbar().left;
+    const startX = win.innerWidth * 0.75;
+    const pointer = (type, x) => {
+      const event = new win.PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, pointerId: 1 });
+      handleEl.dispatchEvent(event);
+    };
+    pointer('pointerdown', startX);
+    pointer('pointermove', startX - 80);
+    await wait(20);
+    const moved = Math.abs(+(before - win.__rightbar().left).toFixed(1));
+    if (Math.abs(moved - 80) > 2) {
+      const d = win.__debug ?? {};
+      lines.push(`перетаскивание k=${k}: курсор 80px, панель ${moved}px (dx=${d.dx}, база=${d.dragBase}, макс=${d.dragMax}, рамка=${d.viewport})  <-- ПРОБЛЕМА`);
+    }
+    frame.remove();
+    out.textContent = (lines.length ? lines.join('\n') : 'пока всё чисто');
+  }
+
+  // Отдельно: меню по правой кнопке должно вставать ровно под курсором.
+  for (const k of [1, 1.05, 1.25, 1.5, 2, 0.75, 0.5]) {
+    const frame = document.createElement('iframe');
+    frame.srcdoc = ctxDoc();
+    document.body.appendChild(frame);
+    await new Promise((resolve) => { frame.onload = resolve; });
+    const win = frame.contentWindow;
+    await wait(20);
+    scaleOf.set(win, k);
+    win.__rootEl().style.zoom = k === 1 ? '' : String(k);
+    const ctx = win.__ctx();
+    patchMetrics(ctx);
+    applyScale(win, ctx, k);
+    // Как в плагине: координаты курсора во вьюпортных пикселях, деление отдаём CSS.
+    ctx.style.left = '400px';
+    ctx.style.top = '300px';
+    pickUp(ctx);
+    await wait(30);
+    const rect = ctx.getBoundingClientRect();
+    const dx = +(rect.left - 400).toFixed(1);
+    const dy = +(rect.top - 300).toFixed(1);
+    if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+      lines.push(`меню под курсором k=${k}: смещение ${dx}/${dy}px  <-- ПРОБЛЕМА`);
+    }
+    frame.remove();
+    out.textContent = (lines.length ? lines.join('\n') : 'пока всё чисто');
+  }
+
+  out.textContent = (lines.length
+    ? lines.join('\n')
+    : 'все проверки пройдены: меню у кнопок и под курсором, полоска панели — на её границе') + '\n\nготово';
+}
+
+run();
+</script>
+</body>
+</html>
