@@ -350,7 +350,7 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
   vm.runInContext(fs.readFileSync(CLIENT, 'utf8'), sandbox, { filename: CLIENT });
 
   assert.ok(loaded, 'client.js должен вызвать window.__ModuleLoader__.load');
-  assert.equal(loaded.id, 'dsh-ui-tweaks', 'id клиентского модуля');
+  assert.equal(loaded.id, 'dsh-tweaks', 'id клиентского модуля');
   const plugin = loaded.factory(sandbox.require);
   // Прототип события общий на весь файл: снимаем патч прошлого прогона, иначе
   // геттер остаётся привязанным к store предыдущей песочницы.

@@ -1,9 +1,9 @@
 {
-  "name": "dsh-ui-tweaks",
+  "name": "dsh-tweaks",
   "version": "1.2.0",
   "private": true,
   "type": "module",
-  "description": "Масштаб всего интерфейса: Ctrl+=, Ctrl+-, Ctrl+0, нумпад и Ctrl+колесо.",
+  "description": "Твики DeepSeek Harness: масштаб интерфейса, дальше — перевод и другое. Каждый твик включается отдельно.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js"
