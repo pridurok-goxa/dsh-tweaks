@@ -1,9 +1,10 @@
 /**
- * Проверка плагина ui-zoom без браузера: реальный client.js исполняется в vm
- * с заглушками window/document/React/ctx, затем проверяются масштаб, команды,
- * хранение значения, границы и индикатор.
+ * Проверка плагина dsh-tweaks без браузера: реальный client.js исполняется в vm
+ * с заглушками window/document/React/ctx/configForms, затем проверяются каркас
+ * твиков (флаги включают и выключают твики), масштаб, команды, хранение значения,
+ * границы, индикатор, форма флагов и меню по правой кнопке.
  *
- * Запуск: node test/check-client.js
+ * Запуск: node test/check-client.cjs
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -47,6 +48,17 @@ function createReact(cleanups) {
 
 /** Заглушка класса Element: плагин проверяет узлы через instanceof. */
 class FakeElement {}
+
+/**
+ * Заглушка переключателя из примитивов интерфейса: форму каркас собирает сам,
+ * поэтому достаточно различимого элемента с теми же параметрами.
+ * @returns {Function} компонент переключателя.
+ */
+function createSwitch() {
+  return function Switch(props) {
+    return { type: 'switch', props: props ?? {}, children: [] };
+  };
+}
 
 /** Заглушка MouseEvent: clientX объявлен геттером, как в браузере. */
 class FakeMouseEvent {
@@ -133,7 +145,13 @@ function createElement(id, classes = []) {
     addEventListener: () => {},
     removeEventListener: () => {},
     focus: () => {},
-    remove: () => {},
+    remove() {
+      const parent = element.parentElement;
+      if (parent === null) return;
+      const index = parent.childNodes.indexOf(element);
+      if (index >= 0) parent.childNodes.splice(index, 1);
+      element.parentElement = null;
+    },
     /** Геометрия заглушки: тесты задают её сами, layout здесь не считается. */
     rect: { left: 0, top: 0, right: 200, bottom: 100, width: 200, height: 100 },
     getBoundingClientRect() {
@@ -152,8 +170,83 @@ function createElement(id, classes = []) {
   return element;
 }
 
+/**
+ * Заглушка клиентского сервиса configForms.
+ *
+ * Снимок устроен как настоящий: `{status, value, base, user, revision, writable, mode}`.
+ * `mutate` принимает операции и revision, обновляет снимок и уведомляет подписчиков —
+ * ровно то, что каркас твиков ожидает от службы конфигурации.
+ * @param {object} options - стартовые флаги, состояние службы и режим записи.
+ * @returns {object} сервис и наблюдаемые величины.
+ */
+function createConfigForms({ flags, status, writable }) {
+  const listeners = new Set();
+  /** Вызовы записи: операции и revision, с которой их отправили. */
+  const calls = [];
+  /** Id, по которым каркас спрашивал форму. */
+  const ids = [];
+  let revision = 4;
+  const snapshot = {
+    status,
+    value: status === 'ready' ? { ...flags } : undefined,
+    base: {},
+    user: {},
+    revision,
+    writable,
+    mode: 'host',
+  };
+  const controllers = new Map();
+  const notify = () => {
+    for (const listener of [...listeners]) listener();
+  };
+  return {
+    calls,
+    ids,
+    snapshot,
+    /** Изменить флаги так, как это сделала бы правка документа в другой вкладке. */
+    setFlags(next) {
+      if (snapshot.value === undefined) snapshot.value = {};
+      Object.assign(snapshot.value, next);
+      revision += 1;
+      snapshot.revision = revision;
+      notify();
+    },
+    /** Подписчиков на снимке: каркас не должен копить их при переключениях. */
+    subscribers: () => listeners.size,
+    get(id) {
+      ids.push(id);
+      if (!controllers.has(id)) {
+        controllers.set(id, {
+          getSnapshot: () => snapshot,
+          subscribe(listener) {
+            listeners.add(listener);
+            return () => listeners.delete(listener);
+          },
+          /**
+           * Записать операции: как служба, применяем их к снимку и соглашаемся.
+           * @param {Array<object>} ops - операции записи.
+           * @param {number} expectedRevision - revision, прочитанная перед правкой.
+           * @returns {Promise<boolean>} принята ли запись.
+           */
+          mutate(ops, expectedRevision) {
+            calls.push({ ops, expectedRevision });
+            for (const op of ops) {
+              if (op.op === 'set') snapshot.value[op.path[0]] = op.value;
+            }
+            revision += 1;
+            snapshot.revision = revision;
+            notify();
+            return Promise.resolve(true);
+          },
+        });
+      }
+      return controllers.get(id);
+    },
+  };
+}
+
 /** Собрать песочницу с плагином и вернуть наблюдаемые объекты. */
-function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, rejectCode = null } = {}) {
+function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, rejectCode = null, flags = { zoom: true, contextMenu: true }, configFormsAvailable = true, configStatus = 'ready', writable = true } = {}) {
   const storage = createStorage();
   if (stored !== null) storage.setItem('dsh.ui-zoom.v1', stored);
   /** Полоска изменения ширины панели: по ней плагин находит рамку интерфейса. */
@@ -164,9 +257,12 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
   const columnsMock = columns ?? {};
   /** Текущее выделение: плагин показывает по нему копирование вне поля ввода. */
   let selectionText = '';
+  /** Служба конфигурации: снимок флагов твиков и очередь записей. */
+  const configForms = createConfigForms({ flags, status: configStatus, writable });
 
   /** Стиль элемента-носителя масштаба: и CSS-переменные, и обычные свойства. */
   const style = createStyle();
+  /** Слушатели window: тип → список обработчиков (нужен счёт, а не последний). */
   const listeners = new Map();
   const timers = new Map();
   const intervals = new Map();
@@ -250,8 +346,18 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
       return id;
     },
     clearInterval: (id) => intervals.delete(id),
-    addEventListener: (type, fn) => listeners.set(type, fn),
-    removeEventListener: (type) => listeners.delete(type),
+    // Обработчики хранятся списком: тесты проверяют, что повторное включение
+    // твика не оставляет двойных подписок.
+    addEventListener: (type, fn) => {
+      const list = listeners.get(type) ?? [];
+      list.push(fn);
+      listeners.set(type, list);
+    },
+    removeEventListener: (type, fn) => {
+      const list = listeners.get(type) ?? [];
+      const index = list.indexOf(fn);
+      if (index >= 0) list.splice(index, 1);
+    },
     dispatchEvent: (event) => {
       dispatched.push(event?.type ?? String(event));
       return true;
@@ -289,14 +395,22 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
         throw new Error(`Unsupported shortcut code: ${code}`);
       }
       registeredCommands.push(command);
-      return () => {};
+      // Как настоящий сервис: возвращённая очистка снимает команду, поэтому
+      // повторное включение твика не оставляет её в списке дважды.
+      return () => {
+        const index = registeredCommands.indexOf(command);
+        if (index >= 0) registeredCommands.splice(index, 1);
+      };
     },
   };
   const slotsFace = {
     inject: (name, callback) => {
       const entry = callback();
       slotEntries.push({ name, entry });
-      return () => {};
+      return () => {
+        const index = slotEntries.findIndex((row) => row.entry === entry);
+        if (index >= 0) slotEntries.splice(index, 1);
+      };
     },
     register: (options, component) => ({ options, component }),
   };
@@ -312,6 +426,7 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
       if (name === 'locale') return localeFace;
       if (name === 'slots') return slotsFace;
       if (name === 'shortcuts') return shortcutsAvailableNow ? shortcutsFace : undefined;
+      if (name === 'configForms') return configFormsAvailable ? configForms : undefined;
       return undefined;
     },
   };
@@ -348,6 +463,7 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     clearTimeout: windowObject.clearTimeout,
     require: (name) => {
       if (name === 'react') return createReact(reactCleanups);
+      if (name === '@deepseek-ai/dsh-client-ui-primitives') return { Switch: createSwitch() };
       throw new Error(`unexpected require: ${name}`);
     },
   };
@@ -364,6 +480,9 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
   delete FakePointerEvent.prototype.__dshUiZoomPatched;
   plugin.apply(ctx);
 
+  /** Последний обработчик window по типу — так браузер зовёт обработчики по очереди. */
+  const lastListener = (type) => (listeners.get(type) ?? []).at(-1);
+
   return {
     plugin,
     storage,
@@ -378,6 +497,19 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     registeredCommands,
     disposeListeners,
     reactCleanups,
+    /** Сколько обработчиков этого типа висит на window. */
+    listenerCount: (type) => (listeners.get(type) ?? []).length,
+    /** Изменить флаги конфигурации и уведомить плагин (как служба конфигурации). */
+    setFlags: (next) => configForms.setFlags(next),
+    /** Записи, отправленные формой в службу конфигурации. */
+    formsCalls: () => configForms.calls,
+    /** Id, по которым каркас спросил форму у службы конфигурации. */
+    formsIds: () => configForms.ids,
+    /** Сколько подписок на снимок конфигурации держит каркас. */
+    formsSubscribers: () => configForms.subscribers(),
+    /** Запись слота по имени (и ключу, если он задан). */
+    slotEntry: (name, key) =>
+      slotEntries.find((row) => row.name === name && (key === undefined || row.entry.options.key === key)) ?? null,
     /** Дождаться сервиса shortcuts: включить его и прокрутить опрос. */
     publishShortcuts: () => {
       shortcutsAvailableNow = true;
@@ -411,7 +543,7 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     /** Конструктор события указателя для проверки подмены clientX. */
     PointerEvent: FakePointerEvent,
     /** Нажать клавишу: вызвать обработчик storage-события. */
-    fireStorage: (key) => listeners.get('storage')?.({ key }),
+    fireStorage: (key) => lastListener('storage')?.({ key }),
     /** Вызвать слушателя документа — так браузер доставляет событие. */
     fireDocument: (type, event) => {
       for (const listener of [...(documentListeners.get(type) ?? [])]) listener(event);
@@ -452,8 +584,9 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
      * @returns {object} признак того, что событие было перехвачено.
      */
     press: (code, modifiers = {}) => {
-      const handler = listeners.get('keydown');
-      assert.ok(handler, 'прямой перехват клавиш установлен');
+      const handlers = listeners.get('keydown') ?? [];
+      assert.equal(handlers.length, 1, 'прямой перехват клавиш установлен ровно один раз');
+      const handler = handlers[0];
       let prevented = false;
       let stopped = false;
       handler({
@@ -480,8 +613,9 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
      * @returns {object} признак того, что событие было перехвачено.
      */
     wheel: (deltaY, modifiers = {}) => {
-      const handler = listeners.get('wheel');
-      assert.ok(handler, 'перехват колеса установлен');
+      const handlers = listeners.get('wheel') ?? [];
+      assert.equal(handlers.length, 1, 'перехват колеса установлен ровно один раз');
+      const handler = handlers[0];
       let prevented = false;
       handler({
         deltaY,
@@ -515,6 +649,12 @@ function check(name, fn) {
   }
 }
 
+/** Проверки с записью в службу конфигурации: она отвечает обещанием. */
+const asyncChecks = [];
+function checkAsync(name, fn) {
+  asyncChecks.push({ name, fn });
+}
+
 check('стартовый масштаб 100% не задаёт лишних стилей', () => {
   const env = loadPlugin();
   assert.ok(!env.zoom(), 'при 100% масштаб не выставляется');
@@ -533,6 +673,81 @@ check('испорченное значение игнорируется', () => 
     const expected = bad === '0.1' ? '0.5' : bad === '99' ? '2' : '';
     assert.equal(env.zoom(), expected, `значение ${JSON.stringify(bad)} → ${expected || '100%'}`);
   }
+});
+
+check('флаги конфигурации включают и выключают твики по отдельности', () => {
+  // Каркас читает флаги схемы Config по записи `zoom` в cordis.patch.yml:
+  // выключенный твик не работает, соседний продолжает.
+  const env = loadPlugin({ flags: { zoom: false, contextMenu: true } });
+  assert.deepEqual(env.formsIds(), ['zoom'], 'флаги спрашиваются по id записи в patch');
+  assert.equal(env.registeredCommands.length, 0, 'выключенный твик команд не регистрирует');
+  assert.equal(env.listenerCount('keydown'), 0, 'и клавиши не перехватывает');
+  assert.equal(env.zoom(), undefined, 'и масштаб не задаёт');
+  assert.ok(env.menuElement(), 'соседний твик при этом включён');
+
+  env.setFlags({ zoom: true });
+  assert.equal(env.registeredCommands.length, 3, 'флаг включил твик: команды зарегистрированы');
+  assert.equal(env.listenerCount('keydown'), 1, 'прямой перехват клавиш поставлен');
+  env.press('Equal');
+  assert.equal(env.zoom(), '1.05', 'твик работает');
+
+  env.setFlags({ zoom: false });
+  assert.equal(env.listenerCount('keydown'), 0, 'флаг выключил твик: перехват снят');
+  assert.equal(env.listenerCount('wheel'), 0, 'и колесо тоже');
+  assert.equal(env.listenerCount('storage'), 0, 'подписка на чужие вкладки снята');
+  assert.ok(!env.zoom(), 'интерфейс вернулся к 100%');
+  assert.equal(env.scaleVar(), '1', 'переменную масштаба оставляем единицей: на неё смотрят координаты попапов');
+  assert.ok(env.menuElement(), 'соседний твик выключение пережил');
+
+  env.setFlags({ contextMenu: false });
+  assert.equal(env.menuElement(), null, 'соседний твик выключается своим флагом');
+});
+
+check('повторное включение твика не оставляет двойных обработчиков', () => {
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true } });
+  for (const pass of [1, 2]) {
+    env.setFlags({ zoom: false, contextMenu: false });
+    assert.equal(env.listenerCount('keydown'), 0, `проход ${pass}: перехват снят`);
+    assert.equal(env.slotEntry('shell.overlay'), null, `проход ${pass}: плашка снята из слота`);
+    assert.equal(env.menuElement(), null, `проход ${pass}: меню убрано из body`);
+    assert.equal(env.formsSubscribers(), 1, `проход ${pass}: подписка на флаги одна`);
+
+    env.setFlags({ zoom: true, contextMenu: true });
+    assert.equal(env.listenerCount('keydown'), 1, `проход ${pass}: перехват ровно один`);
+    assert.equal(env.listenerCount('wheel'), 1, `проход ${pass}: колесо ровно одно`);
+    assert.equal(env.listenerCount('storage'), 1, `проход ${pass}: подписка на вкладки одна`);
+    assert.equal(env.slotEntries.filter((row) => row.name === 'shell.overlay').length, 1, `проход ${pass}: плашка одна`);
+    assert.equal(env.body.children.filter((node) => node.className === 'dsh-ui-zoom-menu').length, 1, `проход ${pass}: меню одно`);
+    assert.equal(env.registeredCommands.length, 3, `проход ${pass}: команды зарегистрированы`);
+    env.press('Equal');
+    assert.equal(env.zoom(), '1.05', `проход ${pass}: твик снова работает`);
+    env.press('Digit0');
+  }
+});
+
+check('без службы конфигурации работают дефолты реестра', () => {
+  const env = loadPlugin({ configFormsAvailable: false });
+  assert.equal(env.registeredCommands.length, 3, 'твик «масштаб» включён по дефолту');
+  assert.ok(env.menuElement(), 'твик «меню» включён по дефолту');
+  assert.equal(env.formsSubscribers(), 0, 'подписываться не на что — и не падаем');
+  assert.equal(env.formsIds().length, 0, 'службы нет: форму не спрашиваем');
+  const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
+  assert.ok(entry, 'форма флагов всё равно зарегистрирована');
+  const form = entry.entry.component({ ...entry.entry.options.inject(), view: 'page', t: (key) => key, translate: (key) => key });
+  assert.equal(form.children.filter((child) => child.props?.['data-tweak']).length, 2, 'показывает состояние обоих твиков');
+  const texts = form.children.map((child) => child.children?.[0]).filter((text) => typeof text === 'string');
+  assert.ok(texts.includes('form.unavailable'), `форма говорит о недоступности настроек (${texts.join(' | ')})`);
+  for (const row of form.children.filter((child) => child.props?.['data-tweak'])) {
+    assert.equal(row.children[1].props.disabled, true, 'без службы переключатели заблокированы');
+  }
+});
+
+check('неготовый снимок конфигурации тоже даёт дефолты', () => {
+  const env = loadPlugin({ configStatus: 'loading' });
+  assert.equal(env.registeredCommands.length, 3, 'пока конфигурация грузится, твики работают');
+  assert.ok(env.menuElement(), 'оба твика включены');
+  env.setFlags({ zoom: false });
+  assert.equal(env.listenerCount('keydown'), 1, 'снимок без значения не выключает твик');
 });
 
 check('команды масштаба зарегистрированы', () => {
@@ -704,7 +919,7 @@ check('индикатор регистрируется в shell.overlay и по�
   const env = loadPlugin();
   const entry = env.slotEntries.find((row) => row.name === 'shell.overlay');
   assert.ok(entry, 'индикатор добавлен в shell.overlay');
-  assert.equal(entry.entry.options.id, 'ui-zoom.hint');
+  assert.equal(entry.entry.options.id, 'dsh-tweaks.hint');
   assert.equal(entry.entry.options.name, 'shell.overlay');
 
   const Hint = entry.entry.component;
@@ -751,8 +966,8 @@ check('словари en и ru зарегистрированы, ru не пад�
   const locales = env.dictionaries.map((row) => row.locale).sort();
   assert.deepEqual(locales, ['en', 'ru']);
   for (const row of env.dictionaries) {
-    assert.equal(row.ns, 'ui-zoom');
-    for (const key of ['zoom.in', 'zoom.out', 'zoom.reset', 'zoom.hint']) {
+    assert.equal(row.ns, 'dsh-tweaks');
+    for (const key of ['zoom.in', 'zoom.out', 'zoom.reset', 'zoom.hint', 'tweak.zoom', 'tweak.contextMenu']) {
       assert.ok(row.dict[key], `${row.locale}: есть ключ ${key}`);
     }
   }
@@ -762,8 +977,18 @@ check('плагин освобождает ресурсы при выгрузк�
   const env = loadPlugin();
   assert.equal(env.disposeListeners.length, 1, 'подписка на dispose зарегистрирована');
   assert.ok(!env.zoom(), 'до выгрузки масштаб не задан');
+  env.setFlags({ zoom: false, contextMenu: false });
+  // Форма флагов — ресурс пакета, а не твика: без неё твики было бы нечем включить.
+  assert.ok(env.slotEntry('plugins.bundle.config', 'dsh-tweaks'), 'форма флагов остаётся на месте');
+  assert.equal(env.listenerCount('keydown'), 0, 'а работающие твики выключены');
+  env.setFlags({ zoom: true, contextMenu: true });
+  assert.equal(env.listenerCount('storage'), 1, 'твик снова подписан на вкладки');
   env.dispose();
-  assert.equal(env.listeners.has('storage'), false, 'подписка на storage снята');
+  assert.equal(env.listenerCount('storage'), 0, 'выгрузка сняла подписку на storage');
+  assert.equal(env.listenerCount('keydown'), 0, 'и перехват клавиш');
+  assert.equal(env.formsSubscribers(), 0, 'и подписку на флаги конфигурации');
+  assert.equal(env.slotEntry('plugins.bundle.config', 'dsh-tweaks'), null, 'форма флагов снята со слота');
+  assert.equal(env.menuElement(), null, 'меню по правой кнопке убрано из body');
 });
 
 check('без ctx.effect и ctx.styles плагин работает (фасад даёт только ctx.get/on)', () => {
@@ -1099,16 +1324,86 @@ check('при выделении вне поля ввода остаётся т�
   assert.equal(buttons.length, 1, 'вне поля ввода доступно только копирование');
 });
 
-check('попапы освобождаются при выгрузке плагина', () => {
+check('выключение твика возвращает попапы к исходным координатам', () => {
+  // Координаты попапов записаны как calc(источник / var(--dsh-ui-zoom)):
+  // после выключения переменная равна единице, поэтому деление перестаёт
+  // менять значения, а собственный zoom слоя снимается.
   const env = loadPlugin({ stored: '1.5' });
   const menu = createElement('menu-portal', ['portal']);
   menu.style.position = 'fixed';
   menu.style.left = '80px';
   env.body.appendChild(menu);
   assert.equal(env.resolved(menu, 'left').toFixed(3), '53.333', 'попап под масштабом');
-  env.dispose();
-  assert.equal(env.zoom(), '1.5', 'стиль носителя плагин не откатывает: страница перезагружается целиком');
+  assert.equal(menu.style.zoom, '1.5', 'слой масштабирован');
+  env.setFlags({ zoom: false });
+  assert.equal(env.zoom(), undefined, 'inline-масштаб носителя снят');
+  assert.equal(env.scaleVar(), '1', 'переменная масштаба равна единице');
+  assert.equal(env.resolved(menu, 'left'), 80, 'координата попапа снова исходная');
+  assert.equal(menu.style.zoom, undefined, 'собственный zoom слоя снят');
+  env.setFlags({ zoom: true });
+  assert.equal(env.zoom(), '1.5', 'включение вернуло прежний масштаб из хранилища');
+  assert.equal(env.resolved(menu, 'left').toFixed(3), '53.333', 'и масштаб слоя');
 });
 
-console.log(results.join('\n'));
-console.log(process.exitCode ? '\nЕСТЬ ОШИБКИ' : '\nвсе проверки пройдены');
+check('выгрузка плагина снимает масштаб и ресурсы', () => {
+  const env = loadPlugin({ stored: '1.5' });
+  assert.equal(env.zoom(), '1.5', 'до выгрузки масштаб стоит');
+  env.dispose();
+  assert.equal(env.zoom(), undefined, 'выгрузка вернула интерфейс к 100%');
+  assert.equal(env.scaleVar(), '1', 'переменная масштаба оставлена единицей');
+  assert.equal(env.listenerCount('keydown'), 0, 'обработчики сняты');
+});
+
+checkAsync('форма пишет флаг операцией set с прочитанной ревизией', async () => {
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true } });
+  const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
+  assert.ok(entry, 'форма зарегистрирована в слоте plugins.bundle.config');
+  assert.equal(entry.entry.options.locale, 'dsh-tweaks', 'подписи формы берутся из словаря пакета');
+  const injected = entry.entry.options.inject();
+  const form = entry.entry.component({ ...injected, view: 'page', t: (key) => key, translate: (key) => key });
+  const rows = form.children.filter((child) => child.props?.['data-tweak']);
+  assert.equal(rows.length, 2, 'по переключателю на твик');
+  const zoomRow = rows.find((row) => row.props['data-tweak'] === 'zoom');
+  const toggle = zoomRow.children[1];
+  assert.equal(toggle.props.checked, true, 'галочка стоит по значению флага');
+  assert.equal(toggle.props.disabled, false, 'запись разрешена');
+  toggle.props.onChange(false);
+  await Promise.resolve();
+  await Promise.resolve();
+  const call = env.formsCalls().at(-1);
+  assert.deepEqual(plain(call.ops), [{ op: 'set', path: ['zoom'], value: false }], 'операция set по полю твика');
+  assert.equal(typeof call.expectedRevision, 'number', 'ревизия прочитана из снимка');
+  assert.equal(env.listenerCount('keydown'), 0, 'запись сразу применилась: твик выключен');
+});
+
+checkAsync('форма блокирует запись там, где документ только для чтения', async () => {
+  const env = loadPlugin({ writable: false });
+  const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
+  const form = entry.entry.component({ ...entry.entry.options.inject(), view: 'page', t: (key) => key, translate: (key) => key });
+  for (const row of form.children.filter((child) => child.props?.['data-tweak'])) {
+    assert.equal(row.children[1].props.disabled, true, 'переключатель заблокирован');
+  }
+  const texts = form.children.map((child) => child.children?.[0]).filter((text) => typeof text === 'string');
+  assert.ok(texts.includes('form.readOnly'), `форма объясняет причину (${texts.join(' | ')})`);
+});
+
+check('плагин объявляет службу конфигурации и ждёт её', () => {
+  const env = loadPlugin();
+  assert.deepEqual(plain(env.plugin.inject), ['configForms'], 'каркас объявляет зависимость от configForms');
+});
+
+// Асинхронные проверки идут после обычных: их список собирается по ходу файла.
+Promise.all(
+  asyncChecks.map(async ({ name, fn }) => {
+    try {
+      await fn();
+      results.push(`ok   ${name}`);
+    } catch (error) {
+      results.push(`FAIL ${name}: ${error.message}`);
+      process.exitCode = 1;
+    }
+  }),
+).then(() => {
+  console.log(results.join('\n'));
+  console.log(process.exitCode ? '\nЕСТЬ ОШИБКИ' : '\nвсе проверки пройдены');
+});

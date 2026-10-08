@@ -1,6 +1,3 @@
 - insert:
     - id: zoom
       name: 'dsh-tweaks'
-      meta:
-        title: 'Масштаб интерфейса'
-        description: 'Ctrl+=, Ctrl+-, Ctrl+0, нумпад и Ctrl+колесо'

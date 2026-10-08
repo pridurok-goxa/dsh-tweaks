@@ -1,13 +1,22 @@
 {
   "name": "dsh-tweaks",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Твики DeepSeek Harness: масштаб интерфейса, дальше — перевод и другое. Каждый твик включается отдельно.",
+  "description": "Твики DeepSeek Harness: масштаб интерфейса и своё меню по правой кнопке. Каждый включается галочкой на странице пакета.",
   "exports": {
     ".": "./index.js",
-    "./client": "./client.js"
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "README.md"
+  ],
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": {
@@ -16,8 +25,12 @@
       "inject": [
         "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-client-shortcuts",
-        "@deepseek-ai/dsh-client-locale"
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings"
       ]
     }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "3.18.4"
   }
 }

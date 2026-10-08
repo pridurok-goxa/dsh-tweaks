@@ -1,18 +1,57 @@
 /**
- * ui-zoom — масштаб интерфейса Harness по Ctrl+= / Ctrl+- / Ctrl+0.
+ * dsh-tweaks — каркас твиков интерфейса Harness.
  *
- * Механизм: CSS-свойство zoom на корневом элементе документа. Оно масштабирует
- * разом и текст, и геометрию всего интерфейса, включая оверлеи, и остаётся
- * согласованным с попаданием курсора, в отличие от transform: scale.
+ * Твик — запись в реестре TWEAKS: `activate` его включает, `deactivate` выключает.
+ * Что включено, решают флаги схемы Config из index.js: их по id записи в
+ * cordis.patch.yml (`zoom`) отдаёт клиентский сервис configForms, а форму с
+ * галочками рисует сам плагин — в слоте plugins.bundle.config карточки пакета.
  *
- * Клиентский фасад контекста даёт только `ctx.get` / `ctx.on` / `ctx.provide`,
- * поэтому сервисы берутся через `ctx.get`, а ресурсы освобождаются через `ctx.on('dispose')`.
- * Значение масштаба живёт на устройстве в localStorage: хосту писать нечего.
+ * Пока конфигурация не готова (`configForms` нет или `status !== 'ready'`),
+ * работают дефолты реестра: все твики включены. Ресурсы твика регистрируются
+ * через `api.own` и снимаются при выключении, поэтому повторное включение
+ * безопасно. Твик «масштаб» работает и один: он не зависит от соседей.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-tweaks',
   factory(require) {
     const React = require('react');
+    // Примитивы — базовый модуль страницы (platform seed): объявлять их отдельно не нужно.
+    const primitives = require('@deepseek-ai/dsh-client-ui-primitives');
+
+    /** Пространство имён словаря; оно же стоит на регистрации формы. */
+    const NS = 'dsh-tweaks';
+    /** Id записи пакета в cordis.patch.yml: он же namespace конфигурации в configForms. */
+    const ROW_ID = 'zoom';
+    /** Ключ отметки этапа инициализации в хранилище устройства. */
+    const READY_KEY = 'dsh.ui-zoom.ready.v1';
+    /**
+     * Переменная с текущим масштабом: её читает `calc()` попапов.
+     * Живёт на корне документа, поэтому наследуется и слоями в `body`.
+     */
+    const SCALE_VAR = '--dsh-ui-zoom';
+
+    /**
+     * Переключатель из примитивов интерфейса; без примитивов — нативный чекбокс.
+     *
+     * @param {object} props - состояние, подпись и обработчик переключения.
+     * @returns {object} элемент переключателя.
+     */
+    const Switch =
+      typeof primitives?.Switch === 'function'
+        ? primitives.Switch
+        : function PlainSwitch({ checked, onChange, label, disabled }) {
+            return React.createElement(
+              'label',
+              null,
+              React.createElement('input', {
+                type: 'checkbox',
+                checked,
+                disabled,
+                onChange: (event) => onChange(event.target.checked),
+              }),
+              React.createElement('span', null, label),
+            );
+          };
 
     /* #region zoom-model */
     /** Границы и шаг масштаба; 1 — исходный размер интерфейса. */
@@ -55,7 +94,7 @@ window.__ModuleLoader__.load({
     }
     /* #endregion zoom-model */
 
-    /** Слова команд, индикатора и меню; локаль без перевода показывает английский. */
+    /** Слова команд, индикатора, меню и формы твиков; локаль без перевода показывает английский. */
     const DICTIONARIES = {
       en: {
         'zoom.in': 'Increase interface size',
@@ -68,6 +107,12 @@ window.__ModuleLoader__.load({
         'menu.copy': 'Copy',
         'menu.paste': 'Paste',
         'menu.selectAll': 'Select All',
+        'tweak.zoom': 'Interface size',
+        'tweak.contextMenu': 'Custom right-click menu',
+        'form.hint': 'A check box turns the tweak on at once, without a restart.',
+        'form.unavailable': 'Settings are unavailable: this deployment has no configuration service.',
+        'form.readOnly': 'This deployment stores settings read-only.',
+        'form.saveFailed': 'The value was not saved. Try again.',
       },
       ru: {
         'zoom.in': 'Увеличить размер интерфейса',
@@ -80,6 +125,12 @@ window.__ModuleLoader__.load({
         'menu.copy': 'Копировать',
         'menu.paste': 'Вставить',
         'menu.selectAll': 'Выделить всё',
+        'tweak.zoom': 'Масштаб интерфейса',
+        'tweak.contextMenu': 'Своё меню по правой кнопке',
+        'form.hint': 'Галочка включает твик сразу, без перезапуска.',
+        'form.unavailable': 'Настройки недоступны: в этой сборке нет службы конфигурации.',
+        'form.readOnly': 'Эта сборка хранит настройки только для чтения.',
+        'form.saveFailed': 'Значение не сохранилось. Попробуйте ещё раз.',
       },
     };
 
@@ -161,12 +212,61 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Переводчик словаря плагина.
+     *
+     * Штатный переводчик отдаёт сам ключ, если словарь ещё не успел подключиться
+     * (так бывает при перезагрузке модуля в живую страницу): пользователь видел
+     * «menu.copy» вместо «Copy». Поэтому, не получив перевода, берём текст из
+     * собственного словаря по активной локали.
+     * @param {object} locale - сервис локали либо undefined.
+     * @returns {Function} перевод по ключу словаря.
+     */
+    function createTranslator(locale) {
+      const t = typeof locale?.bind === 'function' ? locale.bind(NS) : (key) => key;
+      return (key) => {
+        const translated = t(key);
+        if (translated !== key) return translated;
+        let active = '';
+        try {
+          const snapshot = locale?.getLocale?.() ?? locale?.getSnapshot?.();
+          active = String(snapshot?.active ?? '');
+        } catch (_error) {
+          active = '';
+        }
+        const dictionary = active.toLowerCase().startsWith('ru') ? DICTIONARIES.ru : DICTIONARIES.en;
+        return dictionary[key] ?? DICTIONARIES.en[key] ?? key;
+      };
+    }
+
+    /**
+     * Рамки интерфейса, которым уже подменён замер: рамка → исходный метод.
+     *
+     * Подмена живёт на уровне пакета, а не твика: рамку патчит каждый экземпляр
+     * твика, и без общей памяти повторное включение наложило бы деление дважды.
+     */
+    const framePatches = new WeakMap();
+
+    /**
+     * Текущий масштаб по переменной документа.
+     *
+     * Значение читается из DOM, а не из хранилища твика: так подменённые замеры
+     * и координаты указателя переживают выключение и повторное включение твика.
+     * @returns {number} масштаб, 1 если переменная не задана.
+     */
+    function readScale() {
+      const raw = Number.parseFloat(document.documentElement.style.getPropertyValue(SCALE_VAR));
+      return Number.isFinite(raw) && raw > 0 ? raw : 1;
+    }
+
+    /**
      * Развернуть масштаб: значение, команды, индикатор.
      * @param {object} ctx - клиентский контекст плагина.
      * @param {Function} markReady - отметка этапа инициализации.
+     * @param {Function} own - регистратор очисток твика.
      * @returns {void}
      */
-    function setup(ctx, markReady) {
+    function setup(ctx, markReady, own) {
+
         const html = document.documentElement;
         let storage = null;
         try {
@@ -177,32 +277,7 @@ window.__ModuleLoader__.load({
         const store = createZoomStore(storage);
         const locale = ctx.get('locale');
         const slots = ctx.get('slots');
-        const t = typeof locale?.bind === 'function' ? locale.bind('ui-zoom') : (key) => key;
-        const cleanups = [];
-
-        /**
-         * Подпись из словаря плагина.
-         *
-         * Штатный переводчик отдаёт сам ключ, если словарь ещё не успел подключиться
-         * (так бывает при перезагрузке модуля в живую страницу): пользователь видел
-         * «menu.copy» вместо «Copy». Поэтому, не получив перевода, берём текст из
-         * собственного словаря по активной локали.
-         * @param {string} key - ключ словаря.
-         * @returns {string} подпись для показа.
-         */
-        const translate = (key) => {
-          const translated = t(key);
-          if (translated !== key) return translated;
-          let active = '';
-          try {
-            const snapshot = locale?.getLocale?.() ?? locale?.getSnapshot?.();
-            active = String(snapshot?.active ?? '');
-          } catch (_error) {
-            active = '';
-          }
-          const dictionary = active.toLowerCase().startsWith('ru') ? DICTIONARIES.ru : DICTIONARIES.en;
-          return dictionary[key] ?? DICTIONARIES.en[key] ?? key;
-        };
+        const translate = createTranslator(locale);
 
         markReady('loaded');
 
@@ -290,18 +365,8 @@ window.__ModuleLoader__.load({
          */
         const VIEWPORT_PROPS = ['left', 'top', 'width', 'maxWidth', 'minWidth', 'maxHeight'];
 
-        /**
-         * Переменная с текущим масштабом: её читает `calc()` попапов.
-         *
-         * Живёт на корне документа, поэтому наследуется и слоями в `body`.
-         */
-        const SCALE_VAR = '--dsh-ui-zoom';
-
         /** Слои, взятые под масштаб: нужны, чтобы пересчитать их при смене размера. */
         const popups = new Set();
-
-        /** Рамки интерфейса, которым уже отдаются логические размеры. */
-        const framesPatched = new WeakSet();
 
         /**
          * Порог, ниже которого приложение сворачивает сайдбар
@@ -515,12 +580,12 @@ window.__ModuleLoader__.load({
         function patchFrameMetrics() {
           const handle = document.querySelector('[data-side="sidebar"], [data-side="rightbar"]');
           const frame = handle?.parentElement ?? null;
-          if (!frame || framesPatched.has(frame)) return;
-          framesPatched.add(frame);
+          if (!frame || framePatches.has(frame)) return;
           const original = frame.getBoundingClientRect.bind(frame);
+          framePatches.set(frame, original);
           frame.getBoundingClientRect = () => {
             const rect = original();
-            const zoom = store.get();
+            const zoom = readScale();
             if (zoom === 1) return rect;
             const width = Math.max(rect.width / zoom, SIDEBAR_MIN_WIDTH);
             return {
@@ -589,7 +654,7 @@ window.__ModuleLoader__.load({
             configurable: true,
             get() {
               const raw = descriptor.get.call(this);
-              const zoom = store.get();
+              const zoom = readScale();
               if (zoom === 1) return raw;
               const target = this.target;
               const onHandle =
@@ -632,171 +697,6 @@ window.__ModuleLoader__.load({
           own(() => observer.disconnect());
         }
         /* #endregion popup-zoom */
-
-        /* #region context-menu */
-        /** Признак того, что узел принимает текстовый ввод. */
-        function isEditable(node) {
-          if (!node || node.nodeType !== 1) return false;
-          if (node.isContentEditable === true) return true;
-          const tag = node.tagName;
-          if (tag === 'TEXTAREA') return true;
-          if (tag !== 'INPUT') return false;
-          const type = String(node.type ?? 'text').toLowerCase();
-          return ['text', 'search', 'url', 'tel', 'email', 'password', 'number'].includes(type);
-        }
-
-        /** Вставить содержимое буфера: `execCommand('paste')` в Chromium недоступен. */
-        function pasteFromClipboard() {
-          const read = navigator.clipboard?.readText;
-          if (typeof read !== 'function') return;
-          read.call(navigator.clipboard).then(
-            (text) => {
-              if (typeof text === 'string' && text.length > 0) document.execCommand('insertText', false, text);
-            },
-            () => {
-              /* нет доступа к буферу — оставляем как есть */
-            },
-          );
-        }
-
-        /**
-         * Своё меню по правой кнопке.
-         *
-         * DSH показывает здесь нативное меню Electron (`Menu.popup` в главном процессе):
-         * его рисует система, и `zoom` страницы до него не достаёт. Своё меню — обычный
-         * слой в `body`, поэтому получает тот же масштаб, что и остальные попапы;
-         * действия выполняются командами редактирования документа.
-         * @returns {void}
-         */
-        function attachContextMenu() {
-          const items = [
-            { id: 'undo', key: 'menu.undo', run: () => document.execCommand('undo') },
-            { id: 'redo', key: 'menu.redo', run: () => document.execCommand('redo') },
-            { separator: true },
-            { id: 'cut', key: 'menu.cut', run: () => document.execCommand('cut') },
-            { id: 'copy', key: 'menu.copy', run: () => document.execCommand('copy') },
-            { id: 'paste', key: 'menu.paste', run: pasteFromClipboard },
-            { separator: true },
-            { id: 'selectAll', key: 'menu.selectAll', run: () => document.execCommand('selectAll') },
-          ];
-
-          const style = document.createElement('style');
-          // Только существующие токены темы: непрозрачный фон попапа, граница, текст
-          // и подсветка наведения. Токенов вида `--dsw-specific-menu` или
-          // `--dsw-elevation-prominent` в теме нет — с ними фон становился прозрачным.
-          style.textContent = [
-            '.dsh-ui-zoom-menu{position:fixed;left:0;top:0;z-index:2147483000;display:flex;flex-direction:column;',
-            'min-width:160px;padding:5px;box-sizing:border-box;border:0.5px solid var(--dsw-alias-border-l2);',
-            'border-radius:10px;background:var(--dsw-alias-bg-overlay);',
-            'box-shadow:0 8px 28px rgba(0,0,0,.42);',
-            'color:var(--dsw-alias-label-primary);font:13px/20px system-ui,sans-serif}',
-            '.dsh-ui-zoom-menu[hidden]{display:none}',
-            '.dsh-ui-zoom-menu button{display:flex;align-items:center;min-height:30px;padding:4px 10px;border:0;',
-            'border-radius:7px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}',
-            '.dsh-ui-zoom-menu button:hover{background:var(--dsw-alias-bg-layer-2)}',
-            '.dsh-ui-zoom-menu hr{height:0.5px;margin:3px 2px;border:0;background:var(--dsw-alias-border-l2)}',
-          ].join('');
-          document.head?.appendChild(style);
-
-          const menu = document.createElement('div');
-          menu.className = 'dsh-ui-zoom-menu';
-          menu.setAttribute('role', 'menu');
-          menu.hidden = true;
-          document.body?.appendChild(menu);
-          // Берём слой под масштаб сразу: иначе первое измерение ниже прошло бы
-          // по ещё не пересчитанному слою.
-          mark(menu);
-
-          let restoreFocus = null;
-
-          const hide = () => {
-            if (menu.hidden) return;
-            menu.hidden = true;
-            window.removeEventListener('pointerdown', onOutside, true);
-            window.removeEventListener('keydown', onKey, true);
-            window.removeEventListener('resize', hide, true);
-            window.removeEventListener('scroll', hide, true);
-          };
-
-          const runItem = (item) => {
-            const target = restoreFocus;
-            hide();
-            if (target !== null && typeof target.focus === 'function') target.focus({ preventScroll: true });
-            try {
-              item.run();
-            } catch (error) {
-              console.error('ui-zoom: команда меню не выполнена', error);
-            }
-          };
-
-          function onOutside(event) {
-            if (!menu.contains(event.target)) hide();
-          }
-
-          function onKey(event) {
-            if (event.key === 'Escape') hide();
-          }
-
-          const show = (x, y, editable) => {
-            menu.replaceChildren();
-            for (const item of items) {
-              if (item.separator === true) {
-                if (menu.childElementCount > 0) menu.appendChild(document.createElement('hr'));
-                continue;
-              }
-              // Как в системном меню: правки — для полей ввода, копирование — и для выделения.
-              if (!editable && item.id !== 'copy') continue;
-              const button = document.createElement('button');
-              button.type = 'button';
-              button.setAttribute('role', 'menuitem');
-              button.textContent = translate(item.key);
-              // Иначе фокус уходит из поля и команда редактирования бьёт мимо.
-              button.addEventListener('pointerdown', (event) => event.preventDefault());
-              button.addEventListener('click', () => runItem(item));
-              menu.appendChild(button);
-            }
-            if (menu.childElementCount === 0) return;
-            menu.hidden = false;
-            menu.style.left = '0px';
-            menu.style.top = '0px';
-            // Клампим по фактическим размерам слоя (они уже в вьюпортных пикселях).
-            const rect = menu.getBoundingClientRect();
-            const margin = 8;
-            const left = Math.max(margin, Math.min(x, window.innerWidth - margin - rect.width));
-            const top = Math.max(margin, Math.min(y, window.innerHeight - margin - rect.height));
-            menu.style.left = `${left}px`;
-            menu.style.top = `${top}px`;
-            // Деление координат отдаём calc() сразу, не дожидаясь наблюдателя.
-            pickUp(menu);
-            window.addEventListener('pointerdown', onOutside, true);
-            window.addEventListener('keydown', onKey, true);
-            window.addEventListener('resize', hide, true);
-            window.addEventListener('scroll', hide, true);
-          };
-
-          const onContextMenu = (event) => {
-            const target = event.target;
-            const editable =
-              isEditable(target) ||
-              (typeof target?.closest === 'function' &&
-                target.closest('[contenteditable=""],[contenteditable="true"]') !== null);
-            const selection =
-              typeof window.getSelection === 'function' ? String(window.getSelection() ?? '') : '';
-            if (!editable && selection.length === 0) return;
-            event.preventDefault();
-            restoreFocus = editable && typeof target.focus === 'function' ? target : null;
-            show(event.clientX, event.clientY, editable);
-          };
-
-          document.addEventListener('contextmenu', onContextMenu, true);
-          own(() => {
-            document.removeEventListener('contextmenu', onContextMenu, true);
-            hide();
-            style.remove();
-            menu.remove();
-          });
-        }
-        /* #endregion context-menu */
 
         paint();
         markReady(zoomSupported ? 'loaded: zoom' : 'loaded: transform');
@@ -930,7 +830,7 @@ window.__ModuleLoader__.load({
                 }),
               );
             } catch (error) {
-              console.error(`ui-zoom: команда ${definition.id} не зарегистрирована`, error);
+              console.error(`dsh-tweaks: команда ${definition.id} не зарегистрирована`, error);
             }
           }
           return registered;
@@ -992,45 +892,40 @@ window.__ModuleLoader__.load({
           own(() => window.removeEventListener('wheel', onWheel, { capture: true }));
         }
 
+        // Слои вне корня (попапы, своё меню) получают масштаб только от этого твика,
+        // поэтому мост живёт ровно столько, сколько живёт твик.
         /**
-         * Отдать ресурс владельцу контекста; фасад без `ctx.effect` откатывается
-         * на ручную очистку при выгрузке плагина.
-         * @param {Function} dispose - освобождение ресурса.
+         * Вернуть интерфейс к исходному размеру.
+         *
+         * Значение в хранилище не трогаем: включение твика вернёт прежний масштаб.
+         * Переменную масштаба оставляем равной единице, а не удаляем: координаты
+         * попапов записаны как `calc(источник / var(--dsh-ui-zoom))`, и без
+         * переменной браузер отбросил бы их совсем.
          * @returns {void}
          */
-        function own(dispose) {
-          if (typeof dispose === 'function') cleanups.push(dispose);
+        function releaseView() {
+          const host = zoomHost();
+          for (const node of knownPopups()) node.style.removeProperty('zoom');
+          html.style.setProperty(SCALE_VAR, '1');
+          host.style.removeProperty('zoom');
+          host.style.removeProperty('transform');
+          host.style.removeProperty('transform-origin');
+          host.style.removeProperty('width');
+          host.style.removeProperty('height');
         }
 
-        if (typeof locale?.register === 'function') {
-          for (const [code, dictionary] of Object.entries(DICTIONARIES)) {
-            try {
-              own(locale.register('ui-zoom', code, dictionary));
-            } catch (error) {
-              // Повторная загрузка модуля в ту же страницу (HMR) оставляет словарь
-              // прежнего экземпляра: подписи уже на месте, регистрация не нужна.
-              console.warn(`ui-zoom: словарь ${code} не зарегистрирован заново`, error);
-            }
-          }
-        }
-
-        try {
-          if (typeof ctx.on === 'function') ctx.on('dispose', () => disposeAll());
-        } catch (_error) {
-          /* контекст без события dispose: очистка произойдёт при выгрузке страницы */
-        }
-
-        /** Освободить всё, что зарегистрировал плагин. */
-        function disposeAll() {
-          window.clearTimeout(hideTimer);
-          for (const dispose of cleanups.splice(0)) {
-            try {
-              dispose();
-            } catch (_error) {
-              /* очистка не должна мешать остальным */
-            }
-          }
-        }
+        // Слои вне корня (попапы, своё меню) получают масштаб только от этого твика,
+        // поэтому мост живёт ровно столько, сколько живёт твик.
+        zoomBridge.adopt = mark;
+        zoomBridge.place = pickUp;
+        zoomBridge.reset = releaseView;
+        own(() => {
+          if (zoomBridge.adopt === mark) zoomBridge.adopt = null;
+          if (zoomBridge.place === pickUp) zoomBridge.place = null;
+          if (zoomBridge.reset === releaseView) zoomBridge.reset = null;
+        });
+        own(releaseView);
+        own(() => window.clearTimeout(hideTimer));
 
         /**
          * Зарегистрировать команды масштаба и запомнить их очистки.
@@ -1053,7 +948,7 @@ window.__ModuleLoader__.load({
               markReady('commands-already-registered');
               return;
             }
-            console.error('ui-zoom: команды масштаба не зарегистрированы', error);
+            console.error('dsh-tweaks: команды масштаба не зарегистрированы', error);
             markReady(`register-failed: ${message}`);
           }
         }
@@ -1081,25 +976,18 @@ window.__ModuleLoader__.load({
         try {
           attachPopupZoom();
         } catch (error) {
-          console.error('ui-zoom: масштаб всплывающих меню не подключён', error);
-        }
-
-        // Своё меню по правой кнопке: системное не масштабируется вместе с интерфейсом.
-        try {
-          attachContextMenu();
-        } catch (error) {
-          console.error('ui-zoom: меню по правой кнопке не подключено', error);
+          console.error('dsh-tweaks: масштаб всплывающих меню не подключён', error);
         }
 
         if (typeof slots?.inject === 'function') {
           try {
             own(
               slots.inject('shell.overlay', () =>
-                slots.register({ name: 'shell.overlay', id: 'ui-zoom.hint', order: 20 }, ZoomHint),
+                slots.register({ name: 'shell.overlay', id: 'dsh-tweaks.hint', order: 20 }, ZoomHint),
               ),
             );
           } catch (error) {
-            console.error('ui-zoom: плашка размера не подключена', error);
+            console.error('dsh-tweaks: плашка размера не подключена', error);
           }
         }
 
@@ -1112,18 +1000,463 @@ window.__ModuleLoader__.load({
           window.addEventListener('storage', onStorage);
           own(() => window.removeEventListener('storage', onStorage));
         } catch (error) {
-          console.error('ui-zoom: синхронизация между вкладками не подключена', error);
+          console.error('dsh-tweaks: синхронизация между вкладками не подключена', error);
         }
+        markReady('zoom-active');
+    }
+
+        /**
+     * Твик «своё меню по правой кнопке»: включить перехват правого клика.
+     *
+     * DSH показывает здесь нативное меню Electron (`Menu.popup` в главном процессе):
+     * его рисует система, и `zoom` страницы до него не достаёт. Своё меню — обычный
+     * слой в `body`, поэтому получает тот же масштаб, что и остальные попапы (мост
+     * к твику «масштаб»), а действия выполняются командами редактирования документа.
+     * @param {object} ctx - клиентский контекст плагина.
+     * @param {object} api - отметка этапа и регистратор очисток твика.
+     * @returns {void}
+     */
+    /* #region tweak-context-menu */
+    /** Признак того, что узел принимает текстовый ввод. */
+    function isEditable(node) {
+      if (!node || node.nodeType !== 1) return false;
+      if (node.isContentEditable === true) return true;
+      const tag = node.tagName;
+      if (tag === 'TEXTAREA') return true;
+      if (tag !== 'INPUT') return false;
+      const type = String(node.type ?? 'text').toLowerCase();
+      return ['text', 'search', 'url', 'tel', 'email', 'password', 'number'].includes(type);
+    }
+
+    /** Вставить содержимое буфера: `execCommand('paste')` в Chromium недоступен. */
+    function pasteFromClipboard() {
+      const read = navigator.clipboard?.readText;
+      if (typeof read !== 'function') return;
+      read.call(navigator.clipboard).then(
+        (text) => {
+          if (typeof text === 'string' && text.length > 0) document.execCommand('insertText', false, text);
+        },
+        () => {
+          /* нет доступа к буферу — оставляем как есть */
+        },
+      );
+    }
+
+    /**
+     * Включить своё меню по правой кнопке.
+     * @param {object} ctx - клиентский контекст плагина.
+     * @param {object} api - отметка этапа и регистратор очисток твика.
+     * @returns {void}
+     */
+    function attachContextMenu(ctx, api) {
+      const translate = createTranslator(ctx.get('locale'));
+      const own = api.own;
+      const items = [
+        { id: 'undo', key: 'menu.undo', run: () => document.execCommand('undo') },
+        { id: 'redo', key: 'menu.redo', run: () => document.execCommand('redo') },
+        { separator: true },
+        { id: 'cut', key: 'menu.cut', run: () => document.execCommand('cut') },
+        { id: 'copy', key: 'menu.copy', run: () => document.execCommand('copy') },
+        { id: 'paste', key: 'menu.paste', run: pasteFromClipboard },
+        { separator: true },
+        { id: 'selectAll', key: 'menu.selectAll', run: () => document.execCommand('selectAll') },
+      ];
+
+      const style = document.createElement('style');
+      // Только существующие токены темы: непрозрачный фон попапа, граница, текст
+      // и подсветка наведения. Токенов вида `--dsw-specific-menu` или
+      // `--dsw-elevation-prominent` в теме нет — с ними фон становился прозрачным.
+      style.textContent = [
+        '.dsh-ui-zoom-menu{position:fixed;left:0;top:0;z-index:2147483000;display:flex;flex-direction:column;',
+        'min-width:160px;padding:5px;box-sizing:border-box;border:0.5px solid var(--dsw-alias-border-l2);',
+        'border-radius:10px;background:var(--dsw-alias-bg-overlay);',
+        'box-shadow:0 8px 28px rgba(0,0,0,.42);',
+        'color:var(--dsw-alias-label-primary);font:13px/20px system-ui,sans-serif}',
+        '.dsh-ui-zoom-menu[hidden]{display:none}',
+        '.dsh-ui-zoom-menu button{display:flex;align-items:center;min-height:30px;padding:4px 10px;border:0;',
+        'border-radius:7px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}',
+        '.dsh-ui-zoom-menu button:hover{background:var(--dsw-alias-bg-layer-2)}',
+        '.dsh-ui-zoom-menu hr{height:0.5px;margin:3px 2px;border:0;background:var(--dsw-alias-border-l2)}',
+      ].join('');
+      document.head?.appendChild(style);
+
+      const menu = document.createElement('div');
+      menu.className = 'dsh-ui-zoom-menu';
+      menu.setAttribute('role', 'menu');
+      menu.hidden = true;
+      document.body?.appendChild(menu);
+      // Слой фиксированный и лежит в body мимо корня приложения: его позицию
+      // считает своё меню, а масштаб отдаёт мост к твику «масштаб».
+      menu.style.position = 'fixed';
+      zoomBridge.adopt?.(menu);
+
+      let restoreFocus = null;
+
+      const hide = () => {
+        if (menu.hidden) return;
+        menu.hidden = true;
+        window.removeEventListener('pointerdown', onOutside, true);
+        window.removeEventListener('keydown', onKey, true);
+        window.removeEventListener('resize', hide, true);
+        window.removeEventListener('scroll', hide, true);
+      };
+
+      const runItem = (item) => {
+        const target = restoreFocus;
+        hide();
+        if (target !== null && typeof target.focus === 'function') target.focus({ preventScroll: true });
+        try {
+          item.run();
+        } catch (error) {
+          console.error('dsh-tweaks: команда меню не выполнена', error);
+        }
+      };
+
+      function onOutside(event) {
+        if (!menu.contains(event.target)) hide();
+      }
+
+      function onKey(event) {
+        if (event.key === 'Escape') hide();
+      }
+
+      const show = (x, y, editable) => {
+        menu.replaceChildren();
+        for (const item of items) {
+          if (item.separator === true) {
+            if (menu.childElementCount > 0) menu.appendChild(document.createElement('hr'));
+            continue;
+          }
+          // Как в системном меню: правки — для полей ввода, копирование — и для выделения.
+          if (!editable && item.id !== 'copy') continue;
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.setAttribute('role', 'menuitem');
+          button.textContent = translate(item.key);
+          // Иначе фокус уходит из поля и команда редактирования бьёт мимо.
+          button.addEventListener('pointerdown', (event) => event.preventDefault());
+          button.addEventListener('click', () => runItem(item));
+          menu.appendChild(button);
+        }
+        if (menu.childElementCount === 0) return;
+        menu.hidden = false;
+        menu.style.left = '0px';
+        menu.style.top = '0px';
+        // Клампим по фактическим размерам слоя (они уже в вьюпортных пикселях).
+        const rect = menu.getBoundingClientRect();
+        const margin = 8;
+        const left = Math.max(margin, Math.min(x, window.innerWidth - margin - rect.width));
+        const top = Math.max(margin, Math.min(y, window.innerHeight - margin - rect.height));
+        menu.style.left = `${left}px`;
+        menu.style.top = `${top}px`;
+        // Деление координат отдаём calc() сразу, не дожидаясь наблюдателя.
+        zoomBridge.place?.(menu);
+        window.addEventListener('pointerdown', onOutside, true);
+        window.addEventListener('keydown', onKey, true);
+        window.addEventListener('resize', hide, true);
+        window.addEventListener('scroll', hide, true);
+      };
+
+      const onContextMenu = (event) => {
+        const target = event.target;
+        const editable =
+          isEditable(target) ||
+          (typeof target?.closest === 'function' &&
+            target.closest('[contenteditable=""],[contenteditable="true"]') !== null);
+        const selection =
+          typeof window.getSelection === 'function' ? String(window.getSelection() ?? '') : '';
+        if (!editable && selection.length === 0) return;
+        event.preventDefault();
+        restoreFocus = editable && typeof target.focus === 'function' ? target : null;
+        show(event.clientX, event.clientY, editable);
+      };
+
+      document.addEventListener('contextmenu', onContextMenu, true);
+      own(() => {
+        document.removeEventListener('contextmenu', onContextMenu, true);
+        hide();
+        style.remove();
+        menu.remove();
+      });
+      api.markReady('context-menu-active');
+    }
+    /* #endregion tweak-context-menu */
+
+    /**
+     * Мост к твику «масштаб».
+     *
+     * Слои вне корня приложения (попапы, своё меню) получают масштаб только от
+     * этого твика, поэтому мост ведёт к его `mark`/`pickUp`, а пока твик выключен,
+     * вызовы ничего не делают: интерфейс и так не масштабирован.
+     */
+    const zoomBridge = {
+      /** @type {((node: Element) => void) | null} взять слой под масштаб. */
+      adopt: null,
+      /** @type {((node: HTMLElement) => void) | null} пересчитать координаты слоя. */
+      place: null,
+      /** @type {(() => void) | null} вернуть интерфейс к исходному размеру. */
+      reset: null,
+    };
+
+    /**
+     * Ресурсы одного активного твика.
+     *
+     * Твик отдаёт свои очистки в `api.own`, каркас зовёт их при выключении; повторное
+     * включение регистрирует всё заново, а не копит обработчики и подписки.
+     * @returns {object} регистратор очисток и их разовая уборка.
+     */
+    function createScope() {
+      const cleanups = [];
+      return {
+        /**
+         * @param {Function} dispose - освобождение ресурса твика.
+         * @returns {void}
+         */
+        own(dispose) {
+          if (typeof dispose === 'function') cleanups.push(dispose);
+        },
+        /** Освободить всё, что зарегистрировал твик. */
+        dispose() {
+          for (const dispose of cleanups.splice(0)) {
+            try {
+              dispose();
+            } catch (_error) {
+              /* очистка одного ресурса не мешает остальным */
+            }
+          }
+        },
+      };
+    }
+
+    /**
+     * Реестр твиков пакета.
+     *
+     * Ключ — id твика; он же имя флага в схеме Config (index.js), поэтому галочка
+     * с этим id включает ровно этот твик. `activate` получает контекст и `api`
+     * (`markReady` — отметка этапа, `own` — регистрация очисток); `deactivate`
+     * нужен только тем твикам, у которых есть откат помимо `own`. Новый твик
+     * добавляется сюда и полем в схему, не трогая соседей.
+     */
+    const TWEAKS = {
+      zoom: {
+        title: 'Масштаб интерфейса',
+        titleKey: 'tweak.zoom',
+        defaultOn: true,
+        activate(ctx, api) {
+          setup(ctx, api.markReady, api.own);
+        },
+        deactivate() {
+          zoomBridge.reset?.();
+        },
+      },
+      contextMenu: {
+        title: 'Своё меню по правой кнопке',
+        titleKey: 'tweak.contextMenu',
+        defaultOn: true,
+        activate(ctx, api) {
+          attachContextMenu(ctx, api);
+        },
+      },
+    };
+
+    /** Активные твики: id → очистки его ресурсов. */
+    const activeTweaks = new Map();
+
+    /**
+     * Включить твик, если он ещё не включён.
+     * @param {object} ctx - клиентский контекст плагина.
+     * @param {string} id - id твика в реестре.
+     * @param {Function} markReady - отметка этапа инициализации.
+     * @returns {void}
+     */
+    function enableTweak(ctx, id, markReady) {
+      if (activeTweaks.has(id)) return;
+      const scope = createScope();
+      activeTweaks.set(id, scope);
+      try {
+        TWEAKS[id].activate(ctx, { markReady, own: scope.own, scope });
+      } catch (error) {
+        // Сломанный твик не должен мешать соседям: снимаем его ресурсы и идём дальше.
+        activeTweaks.delete(id);
+        scope.dispose();
+        markReady(`failed: ${id}: ${error?.message ?? error}`);
+        console.error(`dsh-tweaks: твик «${id}» прерван`, error);
+      }
+    }
+
+    /**
+     * Выключить твик: сначала его собственный откат, потом снятие ресурсов.
+     * @param {string} id - id твика в реестре.
+     * @returns {void}
+     */
+    function disableTweak(id) {
+      const scope = activeTweaks.get(id);
+      if (scope === undefined) return;
+      activeTweaks.delete(id);
+      try {
+        TWEAKS[id].deactivate?.();
+      } catch (error) {
+        console.error(`dsh-tweaks: твик «${id}» не откатился до конца`, error);
+      }
+      scope.dispose();
+    }
+
+    /**
+     * Прочитать флаги твиков из снимка конфигурации.
+     *
+     * Пока конфигурация не готова, работают дефолты реестра: пакет ведёт себя так,
+     * как вёл до появления флагов. В готовом снимке отсутствие поля — тоже дефолт
+     * схемы (`default(true)` в index.js).
+     * @param {object | undefined} controller - форма записи сервиса configForms.
+     * @returns {object} id твика → включён ли он.
+     */
+    function readFlags(controller) {
+      const snapshot = controller?.getSnapshot?.();
+      const value =
+        snapshot?.status === 'ready' && typeof snapshot.value === 'object' && snapshot.value !== null
+          ? snapshot.value
+          : null;
+      const flags = {};
+      for (const [id, tweak] of Object.entries(TWEAKS)) {
+        flags[id] = value === null ? tweak.defaultOn !== false : value[id] !== false;
+      }
+      return flags;
+    }
+
+    /** Стиль формы твиков: только токены темы, чтобы она следовала светлой и тёмной схеме. */
+    const FORM_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '10px',
+      color: 'var(--dsw-alias-label-primary)',
+      font: '400 14px/22px system-ui, sans-serif',
+    };
+    const FORM_ROW_STYLE = {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: '12px',
+    };
+    const FORM_NOTICE_STYLE = { margin: '0', color: 'var(--dsw-alias-label-secondary)' };
+
+    /**
+     * Подписаться на снимок конфигурации твиков.
+     *
+     * Своя подписка, а не `useSyncExternalStore`: каркас обходится теми же
+     * `useState`/`useEffect`, что и плашка размера.
+     * @param {object | undefined} controller - форма записи сервиса configForms.
+     * @returns {object} снимок: status, value, revision, writable.
+     */
+    function useConfigSnapshot(controller) {
+      const read = () => controller?.getSnapshot?.() ?? { status: 'unavailable' };
+      const [snapshot, setSnapshot] = React.useState(read());
+      React.useEffect(() => {
+        if (controller === undefined) return undefined;
+        setSnapshot(read());
+        return controller.subscribe?.(() => setSnapshot(read()));
+      }, [controller]);
+      return snapshot;
+    }
+
+    /**
+     * Записать флаг твика одной операцией `set`.
+     *
+     * Ревизию берём из снимка: по устаревшей ревизии служба конфигурации запись
+     * отвергает и перечитывает документ, а форма сообщает о неудаче.
+     * @param {object} controller - форма записи сервиса configForms.
+     * @param {string} field - имя флага (id твика).
+     * @param {boolean} value - новое значение флага.
+     * @returns {Promise<boolean>} приняла ли запись служба конфигурации.
+     */
+    async function writeFlag(controller, field, value) {
+      const revision = controller.getSnapshot?.().revision;
+      const accepted = await controller.mutate([{ op: 'set', path: [field], value }], revision);
+      return accepted !== false;
+    }
+
+    /**
+     * Форма твиков на странице пакета: по переключателю на каждый твик.
+     * @param {object} props - форма записи из слота, переводчик и `t` словаря.
+     * @returns {object} список переключателей и подписи состояния.
+     */
+    function TweaksForm(props) {
+      const { controller, t, translate } = props;
+      const snapshot = useConfigSnapshot(controller);
+      const [pending, setPending] = React.useState('');
+      const [failed, setFailed] = React.useState(false);
+      const copy = (key) => {
+        const translated = typeof t === 'function' ? t(key) : key;
+        if (translated !== key) return translated;
+        return typeof translate === 'function' ? translate(key) : key;
+      };
+      const ready = controller !== undefined && snapshot.status === 'ready';
+      const writable = ready && snapshot.writable !== false;
+      const rows = [];
+      for (const [id, tweak] of Object.entries(TWEAKS)) {
+        const label = copy(tweak.titleKey);
+        const checked = ready ? snapshot.value?.[id] !== false : tweak.defaultOn !== false;
+        rows.push(
+          React.createElement(
+            'div',
+            { key: id, 'data-tweak': id, style: FORM_ROW_STYLE },
+            React.createElement('span', null, label),
+            React.createElement(Switch, {
+              checked,
+              label,
+              disabled: !writable || pending !== '',
+              onChange: (next) => {
+                setFailed(false);
+                setPending(id);
+                Promise.resolve(writeFlag(controller, id, next)).then(
+                  (accepted) => {
+                    setPending('');
+                    if (!accepted) setFailed(true);
+                  },
+                  () => {
+                    setPending('');
+                    setFailed(true);
+                  },
+                );
+              },
+            }),
+          ),
+        );
+      }
+      const notices = [React.createElement('p', { key: 'hint', style: FORM_NOTICE_STYLE }, copy('form.hint'))];
+      if (!ready) {
+        notices.push(
+          React.createElement('p', { key: 'off', style: FORM_NOTICE_STYLE }, copy('form.unavailable')),
+        );
+      } else if (!writable) {
+        notices.push(
+          React.createElement('p', { key: 'readonly', style: FORM_NOTICE_STYLE }, copy('form.readOnly')),
+        );
+      }
+      if (failed) {
+        notices.push(
+          React.createElement('p', { key: 'failed', style: FORM_NOTICE_STYLE }, copy('form.saveFailed')),
+        );
+      }
+      return React.createElement('div', { style: FORM_STYLE }, ...rows, ...notices);
     }
 
     return {
       /**
-       * Подключить масштаб. Отметки этапов пишутся в хранилище устройства: без них
-       * сбой инициализации в браузере неотличим от незагруженного модуля.
+       * Сервис конфигурации: строку пакета DSH держит под id записи в
+       * cordis.patch.yml, а служба отдаёт по нему флаги твиков. Без неё пакет
+       * ждёт её появления; каркас при этом умеет работать и на дефолтах.
+       */
+      inject: ['configForms'],
+
+      /**
+       * Применить пакет: включить твики по флагам, нарисовать форму флагов и
+       * слушать их изменения. Отметки этапов пишутся в хранилище устройства:
+       * без них сбой инициализации в браузере неотличим от незагруженного модуля.
        * @param {object} ctx - клиентский контекст плагина.
        * @returns {void}
        */
       apply(ctx) {
+        const scope = createScope();
         let storage = null;
         try {
           storage = window.localStorage;
@@ -1133,22 +1466,81 @@ window.__ModuleLoader__.load({
         /**
          * Записать этап инициализации в хранилище устройства.
          * @param {string} stage - этап инициализации.
+         * @returns {void}
          */
         const markReady = (stage) => {
           try {
             storage?.setItem(
-              'dsh.ui-zoom.ready.v1',
-              JSON.stringify({ version: '1.2.0', stage, at: new Date().toISOString() }),
+              READY_KEY,
+              JSON.stringify({
+                version: '2.0.0',
+                tweaks: [...activeTweaks.keys()],
+                stage,
+                at: new Date().toISOString(),
+              }),
             );
           } catch (_error) {
             /* хранилище недоступно: отметка не критична для работы */
           }
         };
+
+        const locale = ctx.get('locale');
+        if (typeof locale?.register === 'function') {
+          for (const [code, dictionary] of Object.entries(DICTIONARIES)) {
+            try {
+              scope.own(locale.register(NS, code, dictionary));
+            } catch (error) {
+              // Повторная загрузка модуля в ту же страницу (HMR) оставляет словарь
+              // прежнего экземпляра: подписи уже на месте, регистрация не нужна.
+              console.warn(`dsh-tweaks: словарь ${code} не зарегистрирован заново`, error);
+            }
+          }
+        }
+
+        const forms = ctx.get('configForms');
+        const controller = typeof forms?.get === 'function' ? forms.get(ROW_ID) : undefined;
+
+        const slots = ctx.get('slots');
+        if (typeof slots?.inject === 'function') {
+          try {
+            scope.own(
+              slots.inject('plugins.bundle.config', () =>
+                slots.register(
+                  {
+                    name: 'plugins.bundle.config',
+                    key: 'dsh-tweaks',
+                    locale: NS,
+                    inject: () => ({ controller, translate: createTranslator(locale) }),
+                  },
+                  TweaksForm,
+                ),
+              ),
+            );
+          } catch (error) {
+            console.error('dsh-tweaks: форма флагов не подключена', error);
+          }
+        }
+
+        /** Привести набор твиков в соответствие флагам конфигурации. */
+        const reconcile = () => {
+          for (const [id, on] of Object.entries(readFlags(controller))) {
+            if (on) enableTweak(ctx, id, markReady);
+            else disableTweak(id);
+          }
+        };
+        reconcile();
+        if (typeof controller?.subscribe === 'function') scope.own(controller.subscribe(reconcile));
+        markReady(`applied: ${[...activeTweaks.keys()].join(',') || 'none'}`);
+
         try {
-          setup(ctx, markReady);
-        } catch (error) {
-          markReady(`failed: ${error?.message ?? error}`);
-          console.error('ui-zoom: инициализация прервана', error);
+          if (typeof ctx.on === 'function') {
+            ctx.on('dispose', () => {
+              for (const id of Object.keys(TWEAKS)) disableTweak(id);
+              scope.dispose();
+            });
+          }
+        } catch (_error) {
+          /* контекст без события dispose: очистка произойдёт при выгрузке страницы */
         }
       },
     };
