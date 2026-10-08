@@ -1239,6 +1239,160 @@ window.__ModuleLoader__.load({
      * нужен только тем твикам, у которых есть откат помимо `own`. Новый твик
      * добавляется сюда и полем в схему, не трогая соседей.
      */
+    /* #region tweak-whisper */
+    /**
+     * Клиентская часть твика «распознавание русской речи»: кнопка загрузки
+     * модели и прогресс подготовки. Состояние читается из хост-сервиса
+     * `speechController` (Remote `catalog`/`follow`/`prepare`); доступ к нему —
+     * `ctx.get('speechController')`, поэтому твик переживает отсутствие шва.
+     */
+    const WHISPER_PROVIDER_ID = 'whisper-local';
+    const WHISPER_ROW_STYLE = { display: 'flex', alignItems: 'center', gap: '10px' };
+
+    /** Последний снимок каталога распознавания либо null. */
+    let whisperCatalog = null;
+    /** Подписчики снимка: кнопка перерисовывается при смене состояния. */
+    const whisperListeners = new Set();
+    /** Хост-сервис распознавания; заполняется при включении твика. */
+    let speechService = null;
+    /** Сигнал отмены потока follow. */
+    let speechAbort = null;
+
+    /**
+     * Провайдер whisper-local из каталога и его состояние подготовки.
+     * @param {object | null} catalog - каталог распознавания.
+     * @returns {object} снимок провайдера.
+     */
+    function whisperSnapshot(catalog) {
+      const provider = Array.isArray(catalog?.providers)
+        ? catalog.providers.find((entry) => entry.id === WHISPER_PROVIDER_ID) ?? null
+        : null;
+      const prep = provider?.preparation;
+      return {
+        provider,
+        phase: prep?.phase ?? 'unprepared',
+        message: prep?.message ?? '',
+        completedBytes: prep?.completedBytes ?? 0,
+        totalBytes: prep?.totalBytes,
+      };
+    }
+
+    /** Разослать новый снимок подписчикам. */
+    function whisperEmit(catalog) {
+      whisperCatalog = catalog;
+      for (const listener of [...whisperListeners]) listener(catalog);
+    }
+
+    /**
+     * Подключить клиентскую часть твика: подписка на подготовку модели.
+     * @param {object} ctx - клиентский контекст плагина.
+     * @param {object} api - api твика (`own` регистрирует очистки).
+     * @returns {void}
+     */
+    function setupWhisper(ctx, api) {
+      const service = typeof ctx?.get === 'function' ? ctx.get('speechController') : undefined;
+      speechService = service !== null && typeof service === 'object' ? service : null;
+      const abort = new AbortController();
+      speechAbort = abort;
+      if (typeof api?.own === 'function') api.own(() => abort.abort());
+      if (speechService === null) {
+        whisperEmit(null);
+        return;
+      }
+      // Начальный снимок сразу, затем живой поток follow.
+      Promise.resolve()
+        .then(() => speechService.catalog())
+        .then((catalog) => whisperEmit(catalog))
+        .catch(() => whisperEmit(null));
+      if (typeof speechService.follow === 'function') {
+        (async () => {
+          try {
+            for await (const catalog of speechService.follow(abort.signal)) whisperEmit(catalog);
+          } catch (_error) {
+            /* поток закрылся: остаётся последний снимок */
+          }
+        })();
+      }
+    }
+
+    /** Отключить клиентскую часть твика: снять подписку и очистить состояние. */
+    function teardownWhisper() {
+      if (speechAbort !== null) speechAbort.abort();
+      speechAbort = null;
+      speechService = null;
+      whisperCatalog = null;
+      whisperListeners.clear();
+    }
+
+    /**
+     * Реакт-хук: перерисовать кнопку при смене снимка каталога.
+     * @returns {object | null} текущий снимок каталога.
+     */
+    function useWhisperCatalog() {
+      const [catalog, setCatalog] = React.useState(whisperCatalog);
+      React.useEffect(() => {
+        whisperListeners.add(setCatalog);
+        return () => whisperListeners.delete(setCatalog);
+      }, []);
+      return catalog;
+    }
+
+    /** Объём в мегабайтах; при известном общем размере — «X / Y МБ». */
+    function formatBytes(bytes, total) {
+      const mb = (value) => `${Math.round(value / (1024 * 1024))}`;
+      return total === undefined ? `${mb(bytes)} МБ` : `${mb(bytes)} / ${mb(total)} МБ`;
+    }
+
+    /**
+     * Кнопка загрузки модели с прогрессом подготовки.
+     * @returns {object} React-элемент.
+     */
+    function WhisperPrepareButton() {
+      const catalog = useWhisperCatalog();
+      const snapshot = whisperSnapshot(catalog);
+      const { phase, message, completedBytes, totalBytes } = snapshot;
+      const service = speechService;
+      const prepare = () => {
+        if (service === null) return;
+        try {
+          service.prepare(WHISPER_PROVIDER_ID);
+        } catch (_error) {
+          /* сбой подготовки покажется фазой failed */
+        }
+      };
+
+      if (phase === 'unprepared' || phase === 'cancelled') {
+        return React.createElement('div', { style: WHISPER_ROW_STYLE },
+          React.createElement('button', { type: 'button', onClick: prepare }, 'Скачать модель'),
+        );
+      }
+      if (phase === 'downloading') {
+        return React.createElement('div', { style: WHISPER_ROW_STYLE },
+          React.createElement('span', null, `Загрузка модели: ${formatBytes(completedBytes, totalBytes)}`),
+        );
+      }
+      if (phase === 'checking' || phase === 'loading' || phase === 'waking') {
+        return React.createElement('div', { style: WHISPER_ROW_STYLE },
+          React.createElement('span', null, 'Подготовка модели…'),
+        );
+      }
+      if (phase === 'ready' || phase === 'standby') {
+        return React.createElement('div', { style: WHISPER_ROW_STYLE },
+          React.createElement('span', null, 'Модель готова'),
+        );
+      }
+      if (phase === 'failed') {
+        return React.createElement('div', { style: WHISPER_ROW_STYLE },
+          React.createElement('span', null, `Ошибка: ${message || 'неизвестная'}`),
+          React.createElement('button', { type: 'button', onClick: prepare }, 'Повторить'),
+        );
+      }
+      return React.createElement('div', { style: WHISPER_ROW_STYLE },
+        React.createElement('span', null, 'Подготовка…'),
+      );
+    }
+    /* #endregion tweak-whisper */
+
     const TWEAKS = {
       zoom: {
         title: 'Масштаб интерфейса',
@@ -1265,11 +1419,18 @@ window.__ModuleLoader__.load({
         // Тяжёлый твик: поднимает Python-воркер и качает модель весов,
         // поэтому сам не включается — только галочкой.
         defaultOn: false,
-        // Клиентской части у твика нет: распознавание живёт в хост-половине
-        // (`tweaks/whisper-host.js`), и каркас обязан переживать пустые
-        // обработчики — галочка включает твик на хосте.
-        activate() {},
-        deactivate() {},
+        // Клиентская часть — кнопка загрузки модели с прогрессом (регион
+        // tweak-whisper выше); распознавание при этом живёт в хост-половине
+        // (`tweaks/whisper-host.js`).
+        activate(ctx, api) {
+          setupWhisper(ctx, api);
+        },
+        deactivate() {
+          teardownWhisper();
+        },
+        renderDetail() {
+          return React.createElement(WhisperPrepareButton);
+        },
       },
     };
 
