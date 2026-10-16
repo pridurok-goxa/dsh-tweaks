@@ -1955,9 +1955,13 @@ check('заголовок сессии рядом с лампой скрывае
   const css = fs.readFileSync(CLIENT, 'utf8');
   assert.match(
     css,
-    /header:has\(\[data-conversation-header-leading\]\) \[class\*="_titleCluster"\]\{display:none\}/,
-    'скрывается только кластер заголовка в шапке разговора',
+    /header:has\(\[data-conversation-header-leading\]\) nav\[class\*="_crumbs"\]\{display:none\}/,
+    'скрывается только цепочка заголовка сессии',
   );
+  // Кнопки шапки лежат в соседних блоках: селектор их не трогает.
+  assert.doesNotMatch(css, /_titleCluster"\]\{display:none\}/, 'внутренности кластера с кнопками не скрываются');
+  assert.doesNotMatch(css, /_headerActions"\]\{display:none\}/, 'кнопки «Agent Team» не скрываются');
+  assert.doesNotMatch(css, /_headerUtilities"\]\{display:none\}/, 'кнопки «Creator mode» не скрываются');
 
   // По умолчанию — включено: у лампы в шапке не остаётся чужого текста.
   const on = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });

@@ -1986,8 +1986,8 @@ window.__ModuleLoader__.load({
      * разговора. Заголовок — чужая разметка (его рисует сам DSH), слота для
      * него нет, поэтому он именно скрывается стилем по стабильным признакам:
      * `header`, внутри которого есть наш слот `data-conversation-header-leading`,
-     * и кластер заголовка `*_titleCluster`. Кнопки шапки (Agent Team, Creator
-     * mode, «…») не задеваются.
+     * и цепочка заголовка `nav * _crumbs`. Кнопки шапки (Agent Team, Creator
+     * mode, «…») лежат в соседних блоках и остаются на месте.
      */
     const LIGHT_HIDE_TITLE_ATTR = 'data-dsh-light-hide-title';
 
@@ -2726,7 +2726,10 @@ window.__ModuleLoader__.load({
       `.${LIGHT_CLASS}-select{max-width:200px;padding:2px 6px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:6px;`,
       'background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit}',
       `.${LIGHT_CLASS}-hint{margin:0;color:var(--dsw-alias-label-tertiary)}`,
-      `html[${LIGHT_HIDE_TITLE_ATTR}] header:has([data-conversation-header-leading]) [class*="_titleCluster"]{display:none}`,
+      // Скрывается только цепочка заголовка (nav.crumbs). Кнопки шапки живут
+      // рядом — «Agent Team» внутри того же кластера, «Creator mode» и «…»
+      // соседними блоками, поэтому их не задевает.
+      `html[${LIGHT_HIDE_TITLE_ATTR}] header:has([data-conversation-header-leading]) nav[class*="_crumbs"]{display:none}`,
       `@keyframes ${LIGHT_CLASS}-blink{0%{opacity:1}50%{opacity:.35}100%{opacity:1}}`,
       `@keyframes ${LIGHT_CLASS}-wave{0%{transform:scale(1);opacity:.9}70%{transform:scale(2.4);opacity:0}100%{transform:scale(2.4);opacity:0}}`,
       '@media (prefers-reduced-motion: reduce){'
