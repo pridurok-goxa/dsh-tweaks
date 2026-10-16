@@ -289,15 +289,7 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
   let zoomHostId = 'root';
 
   // Общий стиль: масштаб ставится на корень приложения, но наблюдать его удобно в одном месте.
-  /** Признаки на корне документа: светофор помечает там скрытие заголовка сессии. */
-  const documentAttributes = new Map();
-  const documentElement = {
-    style,
-    id: 'html',
-    setAttribute: (name, value) => documentAttributes.set(name, String(value)),
-    removeAttribute: (name) => documentAttributes.delete(name),
-    getAttribute: (name) => (documentAttributes.has(name) ? documentAttributes.get(name) : null),
-  };
+  const documentElement = { style, id: 'html' };
   const rootElement = { style, id: 'root' };
   const bodyChildren = [];
   const bodyElement = createElement('body');
@@ -575,8 +567,6 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     },
     /** Текущий масштаб, как его видит документ: носитель — body. */
     zoom: () => style.zoom,
-    /** Признак на корне документа: скрытие системного заголовка сессии. */
-    documentAttribute: (name) => documentElement.getAttribute(name),
     /** Масштаб в переменной, которую читает calc() попапов. */
     scaleVar: () => style['--dsh-ui-zoom'],
     /** Исходное вьюпортное значение свойства, сохранённое плагином. */
@@ -1887,22 +1877,6 @@ check('настройки твика предлагают режим индик�
   );
   assert.equal(selects[1].props.value, '20', 'выбранное предупреждение показано');
   assert.deepEqual(optionValues(selects[1]), ['10', '20', '30'], 'предупреждение настраивается на 10, 20 или 30 минут');
-  // Третий переключатель — скрытие системного заголовка сессии рядом с лампой.
-  const toggles = [];
-  const walkSwitches = (node) => {
-    if (node === null || node === undefined || typeof node !== 'object') return;
-    if (Array.isArray(node)) {
-      for (const item of node) walkSwitches(item);
-      return;
-    }
-    if (typeof node.type === 'function' && node.type.name === 'Switch' && String(node.props?.label ?? '') === 'light.setting.hideTitle') {
-      toggles.push(node);
-    }
-    walkSwitches(node.children);
-  };
-  walkSwitches(tree);
-  assert.equal(toggles.length, 1, 'переключатель скрытия заголовка есть в настройках');
-  assert.equal(toggles[0].props.checked, false, 'по умолчанию заголовок сессии на месте');
 });
 
 check('панель светофора открывается только по нажатию', () => {
@@ -1949,31 +1923,6 @@ check('подписи часов стоят под каждым кружком �
   assert.match(panel, /const shownHour = hover === null/, 'в покое подпись показывает текущий час');
   assert.doesNotMatch(panel, /showHourLabels/, 'подписи часов не зависят от варианта индикатора');
   assert.doesNotMatch(panel, /light\.currentSlot/, 'старого формата «сейчас» без диапазона нет');
-});
-
-check('заголовок сессии рядом с лампой скрывается настройкой устройства', () => {
-  const attr = 'data-dsh-light-hide-title';
-  const css = fs.readFileSync(CLIENT, 'utf8');
-  assert.match(
-    css,
-    /header:has\(\[data-conversation-header-leading\]\) nav\[class\*="_crumbs"\]\{display:none\}/,
-    'скрывается только цепочка заголовка сессии',
-  );
-  // Кнопки шапки лежат в соседних блоках: селектор их не трогает.
-  assert.doesNotMatch(css, /_titleCluster"\]\{display:none\}/, 'внутренности кластера с кнопками не скрываются');
-  assert.doesNotMatch(css, /_headerActions"\]\{display:none\}/, 'кнопки «Agent Team» не скрываются');
-  assert.doesNotMatch(css, /_headerUtilities"\]\{display:none\}/, 'кнопки «Creator mode» не скрываются');
-
-  // По умолчанию заголовок сессии на месте: признак не выставляется.
-  const plain = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
-  assert.equal(plain.documentAttribute(attr), null, 'по умолчанию заголовок не скрывается');
-
-  // Галочка включена — признак скрытия выставлен.
-  const hidden = loadPlugin({
-    flags: { zoom: true, contextMenu: true, trafficLight: true },
-    lightPrefs: { hideSessionTitle: true },
-  });
-  assert.equal(hidden.documentAttribute(attr), '', 'включённая настройка скрывает заголовок');
 });
 
 // Асинхронные проверки идут после обычных: их список собирается по ходу файла.

@@ -386,7 +386,6 @@ window.__ModuleLoader__.load({
         'light.setting.dock.timeOnly': 'Indicator and time',
         'light.setting.dock.label': 'Indicator, time and tariff',
         'light.setting.warning': 'Warning',
-        'light.setting.hideTitle': 'Hide the session title next to the lamp',
         'light.setting.warningValue': '{{minutes}} min before',
         'light.setting.hint': 'These settings live in this browser; each developer keeps their own',
         'light.tomorrow': 'tomorrow {{time}}',
@@ -435,7 +434,6 @@ window.__ModuleLoader__.load({
         'light.setting.dock.timeOnly': 'Индикатор и время',
         'light.setting.dock.label': 'Индикатор, время и тариф',
         'light.setting.warning': 'Предупреждение',
-        'light.setting.hideTitle': 'Скрывать заголовок сессии рядом с лампой',
         'light.setting.warningValue': 'за {{minutes}} мин',
         'light.setting.hint': 'Настройки хранятся в этом браузере: у каждого разработчика свои',
         'light.tomorrow': 'завтра {{time}}',
@@ -1981,18 +1979,6 @@ window.__ModuleLoader__.load({
       green: 'var(--dsw-alias-state-success-primary)',
     };
 
-    /**
-     * Признак на корне документа: скрывать системный заголовок сессии в шапке
-     * разговора. По умолчанию выключен — заголовок показывается как обычно;
-     * включается галочкой в настройках твика. Заголовок — чужая разметка (его
-     * рисует сам DSH), слота для него нет, поэтому он именно скрывается стилем
-     * по стабильным признакам:
-     * `header`, внутри которого есть наш слот `data-conversation-header-leading`,
-     * и цепочка заголовка `nav * _crumbs`. Кнопки шапки (Agent Team, Creator
-     * mode, «…») лежат в соседних блоках и остаются на месте.
-     */
-    const LIGHT_HIDE_TITLE_ATTR = 'data-dsh-light-hide-title';
-
     /** Префикс классов твика — как у меню по правой кнопке. */
     const LIGHT_CLASS = 'dsh-ui-light';
 
@@ -2034,7 +2020,6 @@ window.__ModuleLoader__.load({
             if (LIGHT_WARNING_CHOICES.includes(parsed.warningMinutes)) {
               prefs.warningMinutes = parsed.warningMinutes;
             }
-            if (typeof parsed.hideSessionTitle === 'boolean') prefs.hideSessionTitle = parsed.hideSessionTitle;
           }
           return prefs;
         } catch (_error) {
@@ -2685,14 +2670,6 @@ window.__ModuleLoader__.load({
             onChange: (value) => lightPrefs.set({ warningMinutes: Number(value) }),
           }),
         ),
-        React.createElement('label', { className: `${LIGHT_CLASS}-field` },
-          React.createElement('span', null, copy('light.setting.hideTitle')),
-          React.createElement(Switch, {
-            checked: prefs.hideSessionTitle === true,
-            label: copy('light.setting.hideTitle'),
-            onChange: (next) => lightPrefs.set({ hideSessionTitle: next }),
-          }),
-        ),
         React.createElement('p', { className: `${LIGHT_CLASS}-hint` }, copy('light.setting.hint')),
       );
     }
@@ -2728,10 +2705,6 @@ window.__ModuleLoader__.load({
       `.${LIGHT_CLASS}-select{max-width:200px;padding:2px 6px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:6px;`,
       'background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit}',
       `.${LIGHT_CLASS}-hint{margin:0;color:var(--dsw-alias-label-tertiary)}`,
-      // Скрывается только цепочка заголовка (nav.crumbs). Кнопки шапки живут
-      // рядом — «Agent Team» внутри того же кластера, «Creator mode» и «…»
-      // соседними блоками, поэтому их не задевает.
-      `html[${LIGHT_HIDE_TITLE_ATTR}] header:has([data-conversation-header-leading]) nav[class*="_crumbs"]{display:none}`,
       `@keyframes ${LIGHT_CLASS}-blink{0%{opacity:1}50%{opacity:.35}100%{opacity:1}}`,
       `@keyframes ${LIGHT_CLASS}-wave{0%{transform:scale(1);opacity:.9}70%{transform:scale(2.4);opacity:0}100%{transform:scale(2.4);opacity:0}}`,
       '@media (prefers-reduced-motion: reduce){'
@@ -2764,24 +2737,6 @@ window.__ModuleLoader__.load({
       style.textContent = LIGHT_STYLE_TEXT;
       document.head?.appendChild(style);
       own(() => style.remove());
-
-      // Скрывать ли системный заголовок сессии рядом с лампой — личная настройка.
-      const applyTitleVisibility = () => {
-        const root = document.documentElement;
-        if (root === null || root === undefined) return;
-        if (lightPrefs.get().hideSessionTitle === true) {
-          if (typeof root.setAttribute === 'function') root.setAttribute(LIGHT_HIDE_TITLE_ATTR, '');
-        } else if (typeof root.removeAttribute === 'function') {
-          root.removeAttribute(LIGHT_HIDE_TITLE_ATTR);
-        }
-      };
-      applyTitleVisibility();
-      own(lightPrefs.subscribe(applyTitleVisibility));
-      own(() => {
-        if (typeof document.documentElement?.removeAttribute === 'function') {
-          document.documentElement.removeAttribute(LIGHT_HIDE_TITLE_ATTR);
-        }
-      });
 
       let slots = undefined;
       try {
