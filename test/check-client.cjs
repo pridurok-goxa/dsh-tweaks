@@ -1805,15 +1805,38 @@ check('в шапке индикатор без текста, у нижнего �
   const header = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
   assert.deepEqual(indicatorTexts(renderSlot(headerRow(header))), [], 'в шапке только лампа, без подписей');
 
-  const expected = { lamp: 0, 'lamp-time': 1, 'lamp-time-label': 2 };
+  const expected = { lamp: 0, 'lamp-time': 1, time: 1, 'lamp-time-label': 2 };
   for (const [dockMode, count] of Object.entries(expected)) {
     const env = loadPlugin({
       flags: { zoom: true, contextMenu: true, trafficLight: true },
       lightPrefs: { dockMode },
     });
-    const texts = indicatorTexts(renderSlot(dockRow(env)));
+    const tree = renderSlot(dockRow(env));
+    const texts = indicatorTexts(tree);
     assert.equal(texts.length, count, `режим ${dockMode}: подписей рядом с лампой — ${count} (${texts.join(' | ')})`);
+    const lampText = [];
+    const walkNodes = (node) => {
+      if (node === null || node === undefined || typeof node !== 'object') return;
+      if (Array.isArray(node)) {
+        for (const item of node) walkNodes(item);
+        return;
+      }
+      if (String(node.props?.className ?? '').includes('-lamp')) lampText.push(node);
+      walkNodes(node.children);
+    };
+    walkNodes(tree);
+    assert.equal(
+      lampText.length === 0,
+      dockMode === 'time',
+      `режим ${dockMode}: ${dockMode === 'time' ? 'лампы нет, только время' : 'лампа на месте'}`,
+    );
   }
+
+  // Настройка по умолчанию — «Только время»: без сохранённого значения голая шкала времени.
+  const fresh = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
+  const freshTexts = indicatorTexts(renderSlot(dockRow(fresh)));
+  assert.equal(freshTexts.length, 1, 'по умолчанию показывается только отсчёт');
+  assert.match(freshTexts[0], /^\d+ ч \d{2} мин$/, 'по умолчанию — голое время, без «ещё» и адреса');
 });
 
 check('настройки твика предлагают режим индикатора и время предупреждения', () => {
@@ -1850,8 +1873,8 @@ check('настройки твика предлагают режим индик�
   assert.equal(selects[0].props.value, 'lamp', 'режим показан из настроек устройства');
   assert.deepEqual(
     optionValues(selects[0]),
-    ['lamp', 'lamp-time', 'lamp-time-label'],
-    'три режима нижнего индикатора',
+    ['lamp', 'lamp-time', 'time', 'lamp-time-label'],
+    'четыре варианта нижнего индикатора',
   );
   assert.equal(selects[1].props.value, '20', 'выбранное предупреждение показано');
   assert.deepEqual(optionValues(selects[1]), ['10', '20', '30'], 'предупреждение настраивается на 10, 20 или 30 минут');

@@ -384,6 +384,7 @@ window.__ModuleLoader__.load({
         'light.setting.dock': 'Bottom indicator',
         'light.setting.dock.lamp': 'Indicator only',
         'light.setting.dock.time': 'Indicator and time left',
+        'light.setting.dock.timeOnly': 'Time only',
         'light.setting.dock.label': 'Indicator, time and tariff label',
         'light.setting.warning': 'Warning',
         'light.setting.warningValue': '{{minutes}} min before',
@@ -432,6 +433,7 @@ window.__ModuleLoader__.load({
         'light.setting.dock': 'Нижний индикатор',
         'light.setting.dock.lamp': 'Только индикатор',
         'light.setting.dock.time': 'Индикатор и оставшееся время',
+        'light.setting.dock.timeOnly': 'Только время',
         'light.setting.dock.label': 'Индикатор, время и подпись о тарифе',
         'light.setting.warning': 'Предупреждение',
         'light.setting.warningValue': 'за {{minutes}} мин',
@@ -1986,7 +1988,7 @@ window.__ModuleLoader__.load({
     const LIGHT_PREFS_KEY = 'dsh.ui-light.settings.v1';
 
     /** Режимы нижнего индикатора, по возрастанию подробности. */
-    const LIGHT_DOCK_MODES = ['lamp', 'lamp-time', 'lamp-time-label'];
+    const LIGHT_DOCK_MODES = ['lamp', 'lamp-time', 'time', 'lamp-time-label'];
 
     /** Варианты предупреждения о приближении пика, в минутах. */
     const LIGHT_WARNING_CHOICES = [10, 20, 30];
@@ -2530,7 +2532,7 @@ window.__ModuleLoader__.load({
         ? t(lightLabelKey(status.light))
         : fillText(t(lightCountdownKey(status)), { time: formatTarget(target, now, t) });
       // В шапке индикатор всегда без текста; у нижнего режим выбирает разработчик.
-      const dockMode = variant === 'dock' ? prefs.dockMode ?? 'lamp-time' : 'lamp';
+      const dockMode = variant === 'dock' ? prefs.dockMode ?? 'time' : 'lamp';
       const dot = React.createElement('span', {
         className: `${LIGHT_CLASS}-lamp`,
         style: {
@@ -2554,18 +2556,27 @@ window.__ModuleLoader__.load({
             }),
           ]
         : null;
-      const content = [dot, waves];
+      const content = [];
+      // В варианте «только время» лампы нет — остаётся один отсчёт.
+      if (dockMode !== 'time') {
+        content.push(dot, waves);
+      }
       if (dockMode === 'lamp-time-label') {
         content.push(React.createElement('span', { key: 'label', className: `${LIGHT_CLASS}-label` }, t(lightLabelKey(status.light))));
       }
       if (dockMode !== 'lamp' && target !== null) {
-        // Адрес отсчёта виден сразу: «ещё 60 ч 12 мин · до пн 04:00».
-        content.push(React.createElement('span', { key: 'time', className: `${LIGHT_CLASS}-count` },
-          fillText(t('light.leftTo'), {
-            value: formatCountdownText(target - now, t),
-            time: formatTarget(target, now, t),
-          })));
+        // «Только время» — голый отсчёт; остальные варианты показывают и адрес:
+        // «ещё 60 ч 12 мин · до пн 04:00».
+        const text = dockMode === 'time'
+          ? formatCountdownText(target - now, t)
+          : fillText(t('light.leftTo'), {
+              value: formatCountdownText(target - now, t),
+              time: formatTarget(target, now, t),
+            });
+        content.push(React.createElement('span', { key: 'time', className: `${LIGHT_CLASS}-count` }, text));
       }
+      // Пустой кнопки быть не должно: без отсчёта возвращаем лампу.
+      if (content.length === 0) content.push(dot);
       return React.createElement(React.Fragment, null,
         React.createElement('button', {
           type: 'button',
@@ -2620,7 +2631,7 @@ window.__ModuleLoader__.load({
         value: String(option.value),
       }, option.label)));
 
-      const dockMode = prefs.dockMode ?? 'lamp-time';
+      const dockMode = prefs.dockMode ?? 'time';
       // Показываем действующее значение: личную настройку, а без неё — значение профиля.
       const profileWarning = lightHub.getPolicy().warningMinutes;
       const currentWarning = prefs.warningMinutes ?? profileWarning;
@@ -2643,6 +2654,7 @@ window.__ModuleLoader__.load({
             options: [
               { value: 'lamp', label: copy('light.setting.dock.lamp') },
               { value: 'lamp-time', label: copy('light.setting.dock.time') },
+              { value: 'time', label: copy('light.setting.dock.timeOnly') },
               { value: 'lamp-time-label', label: copy('light.setting.dock.label') },
             ],
             onChange: (value) => lightPrefs.set({ dockMode: value }),
