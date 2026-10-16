@@ -1902,7 +1902,7 @@ check('настройки твика предлагают режим индик�
   };
   walkSwitches(tree);
   assert.equal(toggles.length, 1, 'переключатель скрытия заголовка есть в настройках');
-  assert.equal(toggles[0].props.checked, true, 'по умолчанию заголовок сессии скрыт');
+  assert.equal(toggles[0].props.checked, false, 'по умолчанию заголовок сессии на месте');
 });
 
 check('панель светофора открывается только по нажатию', () => {
@@ -1964,16 +1964,16 @@ check('заголовок сессии рядом с лампой скрывае
   assert.doesNotMatch(css, /_headerActions"\]\{display:none\}/, 'кнопки «Agent Team» не скрываются');
   assert.doesNotMatch(css, /_headerUtilities"\]\{display:none\}/, 'кнопки «Creator mode» не скрываются');
 
-  // По умолчанию — включено: у лампы в шапке не остаётся чужого текста.
-  const on = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
-  assert.equal(on.documentAttribute(attr), '', 'признак скрытия выставлен по умолчанию');
+  // По умолчанию заголовок сессии на месте: признак не выставляется.
+  const plain = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
+  assert.equal(plain.documentAttribute(attr), null, 'по умолчанию заголовок не скрывается');
 
-  // Настройка выключена — признак снят, заголовок на месте.
-  const off = loadPlugin({
+  // Галочка включена — признак скрытия выставлен.
+  const hidden = loadPlugin({
     flags: { zoom: true, contextMenu: true, trafficLight: true },
-    lightPrefs: { hideSessionTitle: false },
+    lightPrefs: { hideSessionTitle: true },
   });
-  assert.equal(off.documentAttribute(attr), null, 'выключенная настройка признак не ставит');
+  assert.equal(hidden.documentAttribute(attr), '', 'включённая настройка скрывает заголовок');
 });
 
 // Асинхронные проверки идут после обычных: их список собирается по ходу файла.

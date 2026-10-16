@@ -1983,8 +1983,10 @@ window.__ModuleLoader__.load({
 
     /**
      * Признак на корне документа: скрывать системный заголовок сессии в шапке
-     * разговора. Заголовок — чужая разметка (его рисует сам DSH), слота для
-     * него нет, поэтому он именно скрывается стилем по стабильным признакам:
+     * разговора. По умолчанию выключен — заголовок показывается как обычно;
+     * включается галочкой в настройках твика. Заголовок — чужая разметка (его
+     * рисует сам DSH), слота для него нет, поэтому он именно скрывается стилем
+     * по стабильным признакам:
      * `header`, внутри которого есть наш слот `data-conversation-header-leading`,
      * и цепочка заголовка `nav * _crumbs`. Кнопки шапки (Agent Team, Creator
      * mode, «…») лежат в соседних блоках и остаются на месте.
@@ -2686,7 +2688,7 @@ window.__ModuleLoader__.load({
         React.createElement('label', { className: `${LIGHT_CLASS}-field` },
           React.createElement('span', null, copy('light.setting.hideTitle')),
           React.createElement(Switch, {
-            checked: prefs.hideSessionTitle !== false,
+            checked: prefs.hideSessionTitle === true,
             label: copy('light.setting.hideTitle'),
             onChange: (next) => lightPrefs.set({ hideSessionTitle: next }),
           }),
@@ -2767,7 +2769,7 @@ window.__ModuleLoader__.load({
       const applyTitleVisibility = () => {
         const root = document.documentElement;
         if (root === null || root === undefined) return;
-        if (lightPrefs.get().hideSessionTitle !== false) {
+        if (lightPrefs.get().hideSessionTitle === true) {
           if (typeof root.setAttribute === 'function') root.setAttribute(LIGHT_HIDE_TITLE_ATTR, '');
         } else if (typeof root.removeAttribute === 'function') {
           root.removeAttribute(LIGHT_HIDE_TITLE_ATTR);
