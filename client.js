@@ -2278,7 +2278,7 @@ window.__ModuleLoader__.load({
     }
 
     /** Ширина панели-тултипа в пикселях. */
-    const LIGHT_PANEL_WIDTH = 340;
+    const LIGHT_PANEL_WIDTH = 364;
 
     /**
      * Позиция панели-тултипа у якоря.
@@ -2349,24 +2349,20 @@ window.__ModuleLoader__.load({
           onMouseMove: onStripMove,
         }),
       ];
-      // Постоянно видимые подписи часов: те, которые открывают зелёный диапазон
-      // (после дорогого окна или с начала суток). По ним читается структура дня,
-      // и они не зависят от наведения курсора.
-      const greenRangeStarts = [];
+      // Подписи часов под каждым кружочком: видны постоянно и не зависят от
+      // наведения. Часы, открывающие зелёный диапазон (после дорогого окна или
+      // с начала суток), выделены жирнее — по ним читается структура дня.
       for (const slot of statuses) {
-        if (slot.peak) continue;
-        const previousPeak = slot.hour === 0 ? true : statuses[slot.hour - 1].peak;
-        if (previousPeak) greenRangeStarts.push(slot.hour);
-      }
-      for (const hour of greenRangeStarts) {
+        const startsGreen = !slot.peak && (slot.hour === 0 || statuses[slot.hour - 1].peak);
         children.push(React.createElement('text', {
-          key: `mark-${hour}`,
-          x: xOf(hour),
+          key: `mark-${slot.hour}`,
+          x: xOf(slot.hour),
           y: STRIP_HEIGHT - 4,
           textAnchor: 'middle',
-          fontSize: 9,
+          fontSize: 8.5,
+          fontWeight: startsGreen ? 600 : 400,
           style: { fill: 'var(--dsw-alias-label-secondary)', userSelect: 'none', pointerEvents: 'none' },
-        }, twoDigits(hour)));
+        }, twoDigits(slot.hour)));
       }
       // Кружочки часов: красный — дорого, зелёный — дёшево.
       for (const slot of statuses) {
@@ -2694,7 +2690,7 @@ window.__ModuleLoader__.load({
       `.${LIGHT_CLASS}-wave{box-sizing:border-box;position:absolute;inset:0;border-radius:999px;border-width:2px;border-style:solid;pointer-events:none;animation:${LIGHT_CLASS}-wave 2s ease-out infinite}`,
       `.${LIGHT_CLASS}-label{white-space:nowrap}`,
       `.${LIGHT_CLASS}-count{color:var(--dsw-alias-label-tertiary)}`,
-      `.${LIGHT_CLASS}-panel{box-sizing:border-box;position:fixed;z-index:2147483000;width:340px;padding:12px;`,
+      `.${LIGHT_CLASS}-panel{box-sizing:border-box;position:fixed;z-index:2147483000;width:364px;padding:12px;`,
       'border:0;border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-menu);',
       'backdrop-filter:var(--dsw-menu-backdrop-filter);-webkit-backdrop-filter:var(--dsw-menu-backdrop-filter);',
       '--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent);',
