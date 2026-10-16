@@ -2316,6 +2316,25 @@ window.__ModuleLoader__.load({
         const angle = ((hour + fraction) / 24) * 2 * Math.PI - Math.PI / 2;
         return [CLOCK_CENTER + radius * Math.cos(angle), CLOCK_CENTER + radius * Math.sin(angle)];
       };
+      /**
+       * Час под курсором: угол от центра, а не отдельные кружочки. Так зона
+       * наведения — весь циферблат, между кружочками нет пробелов, и подсветка
+       * не сбрасывается, пока курсор остаётся внутри.
+       * @param {object} event - событие движения мыши.
+       * @returns {void}
+       */
+      const onDialMove = (event) => {
+        const rect = typeof event?.currentTarget?.getBoundingClientRect === 'function'
+          ? event.currentTarget.getBoundingClientRect()
+          : null;
+        if (rect === null || !Number.isFinite(rect.width) || rect.width <= 0) return;
+        const scale = rect.width / CLOCK_SIZE;
+        const x = (event.clientX - rect.left) / scale - CLOCK_CENTER;
+        const y = (event.clientY - rect.top) / scale - CLOCK_CENTER;
+        // 0 — на 12 часах, дальше по часовой стрелке.
+        const turn = (Math.atan2(y, x) + Math.PI / 2 + 2 * Math.PI) % (2 * Math.PI);
+        setHover(Math.floor((turn / (2 * Math.PI)) * 24) % 24);
+      };
       const children = [];
       // Стрелка текущего времени.
       const [handX, handY] = pointOf(currentHour, (date.getMinutes() + date.getSeconds() / 60) / 60, CLOCK_RADIUS - 16);
@@ -2327,7 +2346,7 @@ window.__ModuleLoader__.load({
         y2: handY,
         strokeWidth: 1.5,
         strokeLinecap: 'round',
-        style: { stroke: 'var(--dsw-alias-label-primary)' },
+        style: { stroke: 'var(--dsw-alias-label-primary)', pointerEvents: 'none' },
       }));
       // Отметки 0/6/12/18 для ориентации.
       for (const hour of CLOCK_HOUR_MARKERS) {
@@ -2339,7 +2358,7 @@ window.__ModuleLoader__.load({
           textAnchor: 'middle',
           dominantBaseline: 'middle',
           fontSize: 9,
-          style: { fill: 'var(--dsw-alias-label-tertiary)', userSelect: 'none' },
+          style: { fill: 'var(--dsw-alias-label-tertiary)', userSelect: 'none', pointerEvents: 'none' },
         }, twoDigits(hour)));
       }
       // Кружочки часов; текущий час — крупнее и с ободком.
@@ -2361,19 +2380,17 @@ window.__ModuleLoader__.load({
             transition: 'r 120ms ease, opacity 120ms ease',
           },
         }));
-        // Широкая прозрачная зона наведения. Пробелы между кружочками не гасят
-        // подсветку: hover снимается только при уходе курсора с циферблата
-        // (onMouseLeave у самого SVG), поэтому циферблат не мигает яркостью.
-        children.push(React.createElement('circle', {
-          key: `hit-${slot.hour}`,
-          cx,
-          cy,
-          r: 9.5,
-          fill: 'transparent',
-          style: { cursor: 'pointer' },
-          onMouseEnter: () => setHover(slot.hour),
-        }));
       }
+      // Прозрачная подложка: зона наведения — весь циферблат, а не кружочки.
+      children.unshift(React.createElement('rect', {
+        key: 'dial',
+        x: 0,
+        y: 0,
+        width: CLOCK_SIZE,
+        height: CLOCK_SIZE,
+        fill: 'transparent',
+        onMouseMove: onDialMove,
+      }));
       return React.createElement('svg', {
         viewBox: `0 0 ${CLOCK_SIZE} ${CLOCK_SIZE}`,
         width: CLOCK_SIZE,
