@@ -2278,7 +2278,7 @@ window.__ModuleLoader__.load({
     }
 
     /** Ширина панели-тултипа в пикселях. */
-    const LIGHT_PANEL_WIDTH = 264;
+    const LIGHT_PANEL_WIDTH = 340;
 
     /**
      * Позиция панели-тултипа у якоря.
@@ -2406,11 +2406,41 @@ window.__ModuleLoader__.load({
       const { now, running } = useLightTick();
       const status = lightStatus(now);
       const [hover, setHover] = React.useState(null);
-      const [position, setPosition] = React.useState(panelPosition(anchorRef, null, variant === 'dock'));
+      const [position, setPosition] = React.useState(null);
       const panelRef = React.useRef(null);
+      /**
+       * Пересчитать позицию панели по её настоящим размерам.
+       *
+       * Панель сначала монтируется невидимой (visibility:hidden — размеры при
+       * этом измеримы), поэтому она появляется сразу на месте и не прыгает из
+       * предварительной позиции, посчитанной по предполагаемым размерам.
+       * @returns {void}
+       */
+      const measure = () => {
+        const next = panelPosition(anchorRef, panelRef, variant === 'dock');
+        setPosition((current) =>
+          current !== null && current.left === next.left && current.top === next.top ? current : next,
+        );
+      };
+      // Замер до первой отрисовки: React выполняет layout-эффект синхронно,
+      // поэтому кадр с неверной позицией не успевает попасть на экран.
+      const useLayout = React.useLayoutEffect ?? React.useEffect;
+      useLayout(() => {
+        measure();
+      }, []);
       React.useEffect(() => {
-        setPosition(panelPosition(anchorRef, panelRef, variant === 'dock'));
-      }, [now, variant, anchorRef]);
+        measure();
+      }, [now]);
+      React.useEffect(() => {
+        const onResize = () => measure();
+        window.addEventListener('resize', onResize);
+        // Прокрутка чата сдвигает якорь нижнего индикатора: панель едет следом.
+        document.addEventListener('scroll', onResize, true);
+        return () => {
+          window.removeEventListener('resize', onResize);
+          document.removeEventListener('scroll', onResize, true);
+        };
+      }, []);
       React.useEffect(() => {
         const onPointer = (event) => {
           const panel = panelRef.current;
@@ -2447,7 +2477,11 @@ window.__ModuleLoader__.load({
       return React.createElement('div', {
         ref: panelRef,
         className: `${LIGHT_CLASS}-panel`,
-        style: { left: `${position.left}px`, top: `${position.top}px` },
+        style: {
+          left: `${position === null ? 0 : position.left}px`,
+          top: `${position === null ? 0 : position.top}px`,
+          visibility: position === null ? 'hidden' : 'visible',
+        },
         role: 'dialog',
         'aria-label': t('light.clockTitle'),
         onMouseLeave: () => setHover(null),
