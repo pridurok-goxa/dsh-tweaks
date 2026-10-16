@@ -1882,7 +1882,7 @@ check('настройки твика предлагают режим индик�
   assert.equal(selects[0].props.value, 'lamp', 'режим показан из настроек устройства');
   assert.deepEqual(
     optionValues(selects[0]),
-    ['lamp', 'lamp-time', 'time', 'lamp-time-label'],
+    ['lamp', 'time', 'lamp-time', 'lamp-time-label'],
     'четыре варианта нижнего индикатора',
   );
   assert.equal(selects[1].props.value, '20', 'выбранное предупреждение показано');

@@ -1998,7 +1998,7 @@ window.__ModuleLoader__.load({
     const LIGHT_PREFS_KEY = 'dsh.ui-light.settings.v1';
 
     /** Режимы нижнего индикатора, по возрастанию подробности. */
-    const LIGHT_DOCK_MODES = ['lamp', 'lamp-time', 'time', 'lamp-time-label'];
+    const LIGHT_DOCK_MODES = ['lamp', 'time', 'lamp-time', 'lamp-time-label'];
 
     /** Варианты предупреждения о приближении пика, в минутах. */
     const LIGHT_WARNING_CHOICES = [10, 20, 30];
@@ -2665,8 +2665,8 @@ window.__ModuleLoader__.load({
             value: dockMode,
             options: [
               { value: 'lamp', label: copy('light.setting.dock.lamp') },
-              { value: 'lamp-time', label: copy('light.setting.dock.time') },
               { value: 'time', label: copy('light.setting.dock.timeOnly') },
+              { value: 'lamp-time', label: copy('light.setting.dock.time') },
               { value: 'lamp-time-label', label: copy('light.setting.dock.label') },
             ],
             onChange: (value) => lightPrefs.set({ dockMode: value }),
