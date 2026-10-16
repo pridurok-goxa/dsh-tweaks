@@ -1911,6 +1911,18 @@ check('шкала часов — горизонтальная полоска и�
   assert.match(strip, /onMouseMove/, 'час определяется по позиции курсора на всей полоске');
 });
 
+check('подписи часов под шкалой постоянны и стоят на начале зелёного диапазона', () => {
+  const css = fs.readFileSync(CLIENT, 'utf8');
+  const strip = css.slice(css.indexOf('function TrafficHourStrip'), css.indexOf('function TrafficClockPanel'));
+  assert.match(strip, /greenRangeStarts/, 'подписи считаются по началу зелёных диапазонов');
+  assert.doesNotMatch(strip, /STRIP_HOUR_MARKS/, 'фиксированных отметок 0/6/12/18 больше нет');
+  assert.doesNotMatch(strip, /hover === hour \?[^;]*opacity/, 'подписи не зависят от наведения');
+  // Подпись под шкалой и в покое, и при наведении — один формат: ничего не появляется.
+  const panel = css.slice(css.indexOf('function TrafficClockPanel'), css.indexOf('function TrafficLightIndicator'));
+  assert.match(panel, /const shownHour = hover === null/, 'в покое подпись показывает текущий час');
+  assert.doesNotMatch(panel, /light\.currentSlot/, 'старого формата «сейчас» без диапазона нет');
+});
+
 // Асинхронные проверки идут после обычных: их список собирается по ходу файла.
 Promise.all(
   asyncChecks.map(async ({ name, fn }) => {

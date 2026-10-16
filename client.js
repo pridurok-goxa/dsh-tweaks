@@ -378,7 +378,6 @@ window.__ModuleLoader__.load({
         'light.holidaysNote': 'Except Chinese public holidays',
         'light.timeZone': 'Current time zone: {{zone}}',
         'light.localTimeNote': 'Times are shown in your time zone',
-        'light.currentSlot': 'Now: {{time}}',
         'light.slotLabel': '{{time}} · {{label}}',
         'light.pausedHint': 'Automatic work is paused while the light is red',
         'light.setting.dock': 'Bottom indicator',
@@ -427,7 +426,6 @@ window.__ModuleLoader__.load({
         'light.holidaysNote': 'Кроме праздников КНР',
         'light.timeZone': 'Текущий часовой пояс: {{zone}}',
         'light.localTimeNote': 'Время — в вашем часовом поясе',
-        'light.currentSlot': 'Сейчас: {{time}}',
         'light.slotLabel': '{{time}} · {{label}}',
         'light.pausedHint': 'Автоматическая работа на паузе, пока горит красный',
         'light.setting.dock': 'Нижний индикатор',
@@ -2312,7 +2310,6 @@ window.__ModuleLoader__.load({
     const STRIP_PAD = 8;
     const STRIP_STEP = (STRIP_WIDTH - 2 * STRIP_PAD) / 23;
     const STRIP_Y = 20;
-    const STRIP_HOUR_MARKS = [0, 6, 12, 18];
 
     /**
      * Горизонтальная шкала суток: 24 кружочка от 0 до 24 часов в местном
@@ -2352,15 +2349,23 @@ window.__ModuleLoader__.load({
           onMouseMove: onStripMove,
         }),
       ];
-      // Отметки часов под шкалой для ориентации.
-      for (const hour of STRIP_HOUR_MARKS) {
+      // Постоянно видимые подписи часов: те, которые открывают зелёный диапазон
+      // (после дорогого окна или с начала суток). По ним читается структура дня,
+      // и они не зависят от наведения курсора.
+      const greenRangeStarts = [];
+      for (const slot of statuses) {
+        if (slot.peak) continue;
+        const previousPeak = slot.hour === 0 ? true : statuses[slot.hour - 1].peak;
+        if (previousPeak) greenRangeStarts.push(slot.hour);
+      }
+      for (const hour of greenRangeStarts) {
         children.push(React.createElement('text', {
           key: `mark-${hour}`,
           x: xOf(hour),
-          y: STRIP_HEIGHT - 5,
+          y: STRIP_HEIGHT - 4,
           textAnchor: 'middle',
           fontSize: 9,
-          style: { fill: 'var(--dsw-alias-label-tertiary)', userSelect: 'none', pointerEvents: 'none' },
+          style: { fill: 'var(--dsw-alias-label-secondary)', userSelect: 'none', pointerEvents: 'none' },
         }, twoDigits(hour)));
       }
       // Кружочки часов: красный — дорого, зелёный — дёшево.
@@ -2469,12 +2474,15 @@ window.__ModuleLoader__.load({
         .join(' · ');
       const countdown = target === null ? '' : formatCountdownText(target - now, t);
       const hourStatuses = todayHourStatuses(now);
-      const hovered = hover === null ? null : hourStatuses.find((slot) => slot.hour === hover) ?? null;
-      const slotLine = hovered === null
-        ? fillText(t('light.currentSlot'), { time: formatClock(now) })
+      // В покое подпись показывает текущий час, при наведении — час под курсором:
+      // формат один и тот же, поэтому при наведении ничего не «появляется».
+      const shownHour = hover === null ? new Date(now).getHours() : hover;
+      const shown = hourStatuses.find((slot) => slot.hour === shownHour) ?? null;
+      const slotLine = shown === null
+        ? t(lightLabelKey(status.light))
         : fillText(t('light.slotLabel'), {
-            time: `${twoDigits(hovered.hour)}:00–${twoDigits((hovered.hour + 1) % 24)}:00`,
-            label: t(hovered.peak ? 'light.peak' : 'light.offpeak'),
+            time: `${twoDigits(shown.hour)}:00–${twoDigits((shown.hour + 1) % 24)}:00`,
+            label: t(shown.peak ? 'light.peak' : 'light.offpeak'),
           });
       return React.createElement('div', {
         ref: panelRef,
