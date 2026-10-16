@@ -388,6 +388,9 @@ window.__ModuleLoader__.load({
         'light.setting.warning': 'Warning',
         'light.setting.warningValue': '{{minutes}} min before',
         'light.setting.hint': 'These settings live in this browser; each developer keeps their own',
+        'light.tomorrow': 'tomorrow {{time}}',
+        'light.left': '{{value}} left',
+        'light.switchLine': 'Tariff switch: {{time}} (in {{left}})',
         'form.hint': 'A check box turns the tweak on at once, without a restart.',
         'form.unavailable': 'Settings are unavailable: this deployment has no configuration service.',
         'form.readOnly': 'This deployment stores settings read-only.',
@@ -432,6 +435,9 @@ window.__ModuleLoader__.load({
         'light.setting.warning': 'Предупреждение',
         'light.setting.warningValue': 'за {{minutes}} мин',
         'light.setting.hint': 'Настройки хранятся в этом браузере: у каждого разработчика свои',
+        'light.tomorrow': 'завтра {{time}}',
+        'light.left': 'ещё {{value}}',
+        'light.switchLine': 'Смена тарифа: {{time}} (через {{left}})',
         'form.hint': 'Галочка включает твик сразу, без перезапуска.',
         'form.unavailable': 'Настройки недоступны: в этой сборке нет службы конфигурации.',
         'form.readOnly': 'Эта сборка хранит настройки только для чтения.',
@@ -2117,6 +2123,38 @@ window.__ModuleLoader__.load({
       return `${twoDigits(date.getHours())}:${twoDigits(date.getMinutes())}`;
     }
 
+    /**
+     * Подпись момента в местном времени с днём недели, когда он не сегодня:
+     * у отсчёта «60 ч» должен быть виден адрес — до какого дня и часа.
+     * @param {number} instantMs - целевой момент.
+     * @param {number} nowMs - текущий момент.
+     * @param {Function} t - переводчик словаря твика.
+     * @returns {string} подпись вида «09:00», «завтра 09:00» или «пн 09:00».
+     */
+    function formatTarget(instantMs, nowMs, t) {
+      const target = new Date(instantMs);
+      const now = new Date(nowMs);
+      const clock = formatClock(instantMs);
+      const sameDay =
+        target.getFullYear() === now.getFullYear() &&
+        target.getMonth() === now.getMonth() &&
+        target.getDate() === now.getDate();
+      if (sameDay) return clock;
+      const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+      const isTomorrow =
+        target.getFullYear() === tomorrow.getFullYear() &&
+        target.getMonth() === tomorrow.getMonth() &&
+        target.getDate() === tomorrow.getDate();
+      if (isTomorrow) return fillText(t('light.tomorrow'), { time: clock });
+      let weekday = '';
+      try {
+        weekday = target.toLocaleDateString(undefined, { weekday: 'short' });
+      } catch (_error) {
+        weekday = '';
+      }
+      return weekday === '' ? clock : `${weekday} ${clock}`;
+    }
+
     /** Часовой пояс браузера; без Intl — UTC. */
     function localTimeZone() {
       try {
@@ -2312,7 +2350,7 @@ window.__ModuleLoader__.load({
           cx,
           cy,
           r: isCurrent ? 8 : hover === slot.hour ? 6.5 : 5,
-          opacity: active ? 1 : 0.45,
+          opacity: active ? 1 : 0.4,
           strokeWidth: isCurrent ? 2 : 0,
           style: {
             fill: LIGHT_COLORS[slot.light],
@@ -2321,16 +2359,17 @@ window.__ModuleLoader__.load({
             transition: 'r 120ms ease, opacity 120ms ease',
           },
         }));
-        // Прозрачная зона наведения: попасть курсором в кружочек 5 px трудно.
+        // Широкая прозрачная зона наведения. Пробелы между кружочками не гасят
+        // подсветку: hover снимается только при уходе курсора с циферблата
+        // (onMouseLeave у самого SVG), поэтому циферблат не мигает яркостью.
         children.push(React.createElement('circle', {
           key: `hit-${slot.hour}`,
           cx,
           cy,
-          r: 9,
+          r: 9.5,
           fill: 'transparent',
           style: { cursor: 'pointer' },
           onMouseEnter: () => setHover(slot.hour),
-          onMouseLeave: () => setHover(null),
         }));
       }
       return React.createElement('svg', {
@@ -2339,6 +2378,9 @@ window.__ModuleLoader__.load({
         height: CLOCK_SIZE,
         style: { display: 'block', margin: '0 auto' },
         'aria-hidden': true,
+        // Подсветка снимается только на выходе с циферблата, а не на каждом
+        // кружочке: иначе на переходах между ними циферблат мигал яркостью.
+        onMouseLeave: () => setHover(null),
       }, children);
     }
 
@@ -2405,6 +2447,10 @@ window.__ModuleLoader__.load({
         React.createElement(TrafficClockChart, { now, hover, setHover }),
         React.createElement('div', { className: `${LIGHT_CLASS}-slot` }, slotLine),
         React.createElement('div', { className: `${LIGHT_CLASS}-rules` },
+          target === null
+            ? null
+            : React.createElement('div', { key: 'switch' },
+                fillText(t('light.switchLine'), { time: formatTarget(target, now, t), left: countdown })),
           React.createElement('div', { key: 'days' }, `${t('light.weekdays')} · ${windowsText}`),
           React.createElement('div', { key: 'holidays' }, t('light.holidaysNote')),
           React.createElement('div', { key: 'zone' }, fillText(t('light.timeZone'), { zone: localTimeZone() })),
@@ -2435,7 +2481,7 @@ window.__ModuleLoader__.load({
       const target = lightCountdownTarget(status);
       const label = target === null
         ? t(lightLabelKey(status.light))
-        : fillText(t(lightCountdownKey(status)), { time: formatClock(target) });
+        : fillText(t(lightCountdownKey(status)), { time: formatTarget(target, now, t) });
       // В шапке индикатор всегда без текста; у нижнего режим выбирает разработчик.
       const dockMode = variant === 'dock' ? prefs.dockMode ?? 'lamp-time' : 'lamp';
       const dot = React.createElement('span', {
@@ -2466,7 +2512,8 @@ window.__ModuleLoader__.load({
         content.push(React.createElement('span', { key: 'label', className: `${LIGHT_CLASS}-label` }, t(lightLabelKey(status.light))));
       }
       if (dockMode !== 'lamp' && target !== null) {
-        content.push(React.createElement('span', { key: 'time', className: `${LIGHT_CLASS}-count` }, formatCountdownText(target - now, t)));
+        content.push(React.createElement('span', { key: 'time', className: `${LIGHT_CLASS}-count` },
+          fillText(t('light.left'), { value: formatCountdownText(target - now, t) })));
       }
       return React.createElement(React.Fragment, null,
         React.createElement('button', {
@@ -2476,8 +2523,6 @@ window.__ModuleLoader__.load({
           'aria-label': label,
           'data-light': status.light,
           onClick: () => setOpen((value) => !value),
-          onMouseEnter: () => setOpen(true),
-          onFocus: () => setOpen(true),
         }, content),
         open
           ? React.createElement(TrafficClockPanel, { anchorRef, variant, onClose: () => setOpen(false) })
@@ -2533,7 +2578,7 @@ window.__ModuleLoader__.load({
         : [...LIGHT_WARNING_CHOICES, currentWarning].sort((left, right) => left - right);
       const preview = target === null
         ? copy(lightLabelKey(status.light))
-        : `${copy(lightLabelKey(status.light))} · ${fillText(copy(lightCountdownKey(status)), { time: formatClock(target) })}`;
+        : `${copy(lightLabelKey(status.light))} · ${fillText(copy(lightCountdownKey(status)), { time: formatTarget(target, now, lightTranslator) })}`;
 
       return React.createElement('div', { className: `${LIGHT_CLASS}-settings` },
         React.createElement('div', { className: `${LIGHT_CLASS}-detail` },
@@ -2579,10 +2624,12 @@ window.__ModuleLoader__.load({
       `.${LIGHT_CLASS}-label{white-space:nowrap}`,
       `.${LIGHT_CLASS}-count{color:var(--dsw-alias-label-tertiary)}`,
       `.${LIGHT_CLASS}-panel{box-sizing:border-box;position:fixed;z-index:2147483000;width:272px;padding:12px;`,
-      'border:0.5px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-overlay);',
-      'box-shadow:0 8px 28px rgba(0,0,0,.42);color:var(--dsw-alias-label-primary);font:12px/18px system-ui,sans-serif;',
-      'white-space:normal;overflow-wrap:anywhere}',
+      'border:0;border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-menu);',
+      'backdrop-filter:var(--dsw-menu-backdrop-filter);-webkit-backdrop-filter:var(--dsw-menu-backdrop-filter);',
+      '--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent);',
+      'color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;white-space:normal;overflow-wrap:anywhere}',
       `.${LIGHT_CLASS}-head{display:flex;align-items:center;gap:6px;margin-bottom:10px;font-weight:500}`,
+      `.${LIGHT_CLASS}-title{color:var(--dsw-alias-label-primary)}`,
       `.${LIGHT_CLASS}-head .${LIGHT_CLASS}-lamp{width:10px;height:10px}`,
       `.${LIGHT_CLASS}-head .${LIGHT_CLASS}-count{margin-left:auto;font-weight:400;white-space:nowrap}`,
       `.${LIGHT_CLASS}-slot{text-align:center;color:var(--dsw-alias-label-secondary);margin-top:6px}`,

@@ -1266,8 +1266,12 @@ check('разметка стилей ссылается на токены тем
     /background:var\(--dsw-alias-bg-overlay\)/,
     'фон меню — токен попапа, а не прозрачность',
   );
-  assert.doesNotMatch(css, /background:var\(--dsw-specific-menu\)/, 'нет токена из другой темы');
-  assert.doesNotMatch(css, /var\(--dsw-elevation-prominent\)/, 'нет токена тени из другой темы');
+  // Панель светофора повторяет системный попап («Token usage»/контекст):
+  // матовый полупрозрачный фон, блюр подложки и та же тень с обводкой.
+  assert.match(css, /background:var\(--dsw-specific-menu\)/, 'фон панели светофора — токен меню');
+  assert.match(css, /backdrop-filter:var\(--dsw-menu-backdrop-filter\)/, 'подложка панели размыта как у системного попапа');
+  assert.match(css, /box-shadow:var\(--dsw-elevation-prominent\)/, 'тень панели — системная');
+  assert.match(css, /border-radius:var\(--dsw-radius-lg\)/, 'скругление панели — системное');
 });
 
 check('индикатор несёт доступную подпись и не ловит клики', () => {
@@ -1851,6 +1855,18 @@ check('настройки твика предлагают режим индик�
   );
   assert.equal(selects[1].props.value, '20', 'выбранное предупреждение показано');
   assert.deepEqual(optionValues(selects[1]), ['10', '20', '30'], 'предупреждение настраивается на 10, 20 или 30 минут');
+});
+
+check('панель светофора открывается только по нажатию', () => {
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
+  const row = env.slotEntries.find((entry) => entry.name === 'conversation.header.leading');
+  const tree = renderSlot(row);
+  const button = tree.children[0];
+  assert.equal(button.type, 'button', 'индикатор — кнопка');
+  assert.equal(typeof button.props.onClick, 'function', 'нажатие переключает панель');
+  assert.equal(button.props.onMouseEnter, undefined, 'наведение панель не открывает');
+  assert.equal(button.props.onFocus, undefined, 'фокус панель не открывает');
+  assert.equal(tree.children[1], null, 'до нажатия панель закрыта');
 });
 
 // Асинхронные проверки идут после обычных: их список собирается по ходу файла.
