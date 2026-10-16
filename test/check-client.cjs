@@ -289,7 +289,15 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
   let zoomHostId = 'root';
 
   // Общий стиль: масштаб ставится на корень приложения, но наблюдать его удобно в одном месте.
-  const documentElement = { style, id: 'html' };
+  /** Признаки на корне документа: светофор помечает там скрытие заголовка сессии. */
+  const documentAttributes = new Map();
+  const documentElement = {
+    style,
+    id: 'html',
+    setAttribute: (name, value) => documentAttributes.set(name, String(value)),
+    removeAttribute: (name) => documentAttributes.delete(name),
+    getAttribute: (name) => (documentAttributes.has(name) ? documentAttributes.get(name) : null),
+  };
   const rootElement = { style, id: 'root' };
   const bodyChildren = [];
   const bodyElement = createElement('body');
@@ -567,6 +575,8 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     },
     /** Текущий масштаб, как его видит документ: носитель — body. */
     zoom: () => style.zoom,
+    /** Признак на корне документа: скрытие системного заголовка сессии. */
+    documentAttribute: (name) => documentElement.getAttribute(name),
     /** Масштаб в переменной, которую читает calc() попапов. */
     scaleVar: () => style['--dsh-ui-zoom'],
     /** Исходное вьюпортное значение свойства, сохранённое плагином. */
@@ -1878,6 +1888,22 @@ check('настройки твика предлагают режим индик�
   );
   assert.equal(selects[1].props.value, '20', 'выбранное предупреждение показано');
   assert.deepEqual(optionValues(selects[1]), ['10', '20', '30'], 'предупреждение настраивается на 10, 20 или 30 минут');
+  // Третий переключатель — скрытие системного заголовка сессии рядом с лампой.
+  const toggles = [];
+  const walkSwitches = (node) => {
+    if (node === null || node === undefined || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const item of node) walkSwitches(item);
+      return;
+    }
+    if (typeof node.type === 'function' && node.type.name === 'Switch' && String(node.props?.label ?? '') === 'light.setting.hideTitle') {
+      toggles.push(node);
+    }
+    walkSwitches(node.children);
+  };
+  walkSwitches(tree);
+  assert.equal(toggles.length, 1, 'переключатель скрытия заголовка есть в настройках');
+  assert.equal(toggles[0].props.checked, true, 'по умолчанию заголовок сессии скрыт');
 });
 
 check('панель светофора открывается только по нажатию', () => {
@@ -1924,6 +1950,27 @@ check('подписи часов стоят под каждым кружком �
   assert.match(panel, /const shownHour = hover === null/, 'в покое подпись показывает текущий час');
   assert.match(panel, /showHourLabels: variant !== 'header'/, 'у верхнего индикатора подписей часов нет');
   assert.doesNotMatch(panel, /light\.currentSlot/, 'старого формата «сейчас» без диапазона нет');
+});
+
+check('заголовок сессии рядом с лампой скрывается настройкой устройства', () => {
+  const attr = 'data-dsh-light-hide-title';
+  const css = fs.readFileSync(CLIENT, 'utf8');
+  assert.match(
+    css,
+    /header:has\(\[data-conversation-header-leading\]\) \[class\*="_titleCluster"\]\{display:none\}/,
+    'скрывается только кластер заголовка в шапке разговора',
+  );
+
+  // По умолчанию — включено: у лампы в шапке не остаётся чужого текста.
+  const on = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
+  assert.equal(on.documentAttribute(attr), '', 'признак скрытия выставлен по умолчанию');
+
+  // Настройка выключена — признак снят, заголовок на месте.
+  const off = loadPlugin({
+    flags: { zoom: true, contextMenu: true, trafficLight: true },
+    lightPrefs: { hideSessionTitle: false },
+  });
+  assert.equal(off.documentAttribute(attr), null, 'выключенная настройка признак не ставит');
 });
 
 // Асинхронные проверки идут после обычных: их список собирается по ходу файла.
