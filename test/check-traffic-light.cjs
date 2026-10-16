@@ -229,7 +229,8 @@ async function main() {
   assert.deepEqual(normalized.peakWindows, [[60, 120]], 'валидное окно применено, мусор отброшен');
   assert.deepEqual(normalized.holidays, ['2027-01-01', '2027-05-01'], 'праздники фильтруются по формату');
   assert.equal(normalized.warningMinutes, 15, 'предупреждение применено');
-  assert.deepEqual(policy.normalizePolicy({ trafficLightWarningMinutes: 9999 }).warningMinutes, 30, 'слишком долгое предупреждение — дефолт');
+  assert.deepEqual(policy.normalizePolicy({ trafficLightWarningMinutes: 9999 }).warningMinutes, 10, 'слишком долгое предупреждение — дефолт');
+  assert.equal(policy.DEFAULT_POLICY.warningMinutes, 10, 'предупреждение по умолчанию — 10 минут');
   assert.deepEqual(policy.normalizePolicy(null).peakWindows, p.peakWindows, 'пустая конфигурация — дефолты');
 
   // ---- 2) Копия политики в client.js --------------------------------------
@@ -348,6 +349,11 @@ async function main() {
     'trafficLightPauseAgents',
   ]) {
     assert.ok(indexSource.includes(`${field}: Schema.`), `в схеме Config есть поле ${field}`);
+  assert.match(
+    indexSource,
+    /trafficLightWarningMinutes: Schema\.number\(\)\.default\(10\)/,
+    'в схеме профиля предупреждение по умолчанию — 10 минут',
+  );
   }
   assert.ok(
     indexSource.includes("start: Schema.string().pattern(/^([01]\\d|2[0-3]):[0-5]\\d$/)"),

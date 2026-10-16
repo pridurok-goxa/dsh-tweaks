@@ -67,7 +67,7 @@ export const DEFAULT_POLICY = Object.freeze({
   /** Даты официальных праздников КНР в формате YYYY-MM-DD. */
   holidays: Object.freeze([...HOLIDAYS_2026]),
   /** Сколько минут до начала пика индикатор горит жёлтым. */
-  warningMinutes: 30,
+  warningMinutes: 10,
 });
 
 /** Дополнить число нулём до двух знаков. */

@@ -68,7 +68,7 @@ export const Config = Schema.object({
   // Окна пика — по Пекину (UTC+8), как их публикует DeepSeek; в интерфейсе
   // они показываются в местном времени разработчика.
   trafficLight: Schema.boolean().default(true).volatile(),
-  trafficLightWarningMinutes: Schema.number().default(30).volatile(),
+  trafficLightWarningMinutes: Schema.number().default(10).volatile(),
   trafficLightPeakWindows: Schema.array(
     Schema.object({
       start: Schema.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/),

@@ -123,7 +123,7 @@ window.__ModuleLoader__.load({
       /** Даты официальных праздников КНР в формате YYYY-MM-DD. */
       holidays: Object.freeze([...HOLIDAYS_2026]),
       /** Сколько минут до начала пика индикатор горит жёлтым. */
-      warningMinutes: 30,
+      warningMinutes: 10,
     });
 
     /** Дополнить число нулём до двух знаков. */
@@ -2639,7 +2639,10 @@ window.__ModuleLoader__.load({
         : [...LIGHT_WARNING_CHOICES, currentWarning].sort((left, right) => left - right);
       const preview = target === null
         ? copy(lightLabelKey(status.light))
-        : `${copy(lightLabelKey(status.light))} · ${fillText(copy(lightCountdownKey(status)), { time: formatTarget(target, now, lightTranslator) })}`;
+        : `${copy(lightLabelKey(status.light))} · ${fillText(copy('light.leftTo'), {
+            value: formatCountdownText(target - now, copy),
+            time: formatTarget(target, now, lightTranslator),
+          })}`;
 
       return React.createElement('div', { className: `${LIGHT_CLASS}-settings` },
         React.createElement('div', { className: `${LIGHT_CLASS}-detail` },
