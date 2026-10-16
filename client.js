@@ -390,6 +390,7 @@ window.__ModuleLoader__.load({
         'light.setting.hint': 'These settings live in this browser; each developer keeps their own',
         'light.tomorrow': 'tomorrow {{time}}',
         'light.left': '{{value}} left',
+        'light.leftTo': '{{value}} left · until {{time}}',
         'light.switchLine': 'Tariff switch: {{time}} (in {{left}})',
         'form.hint': 'A check box turns the tweak on at once, without a restart.',
         'form.unavailable': 'Settings are unavailable: this deployment has no configuration service.',
@@ -437,6 +438,7 @@ window.__ModuleLoader__.load({
         'light.setting.hint': 'Настройки хранятся в этом браузере: у каждого разработчика свои',
         'light.tomorrow': 'завтра {{time}}',
         'light.left': 'ещё {{value}}',
+        'light.leftTo': 'ещё {{value}} · до {{time}}',
         'light.switchLine': 'Смена тарифа: {{time}} (через {{left}})',
         'form.hint': 'Галочка включает твик сразу, без перезапуска.',
         'form.unavailable': 'Настройки недоступны: в этой сборке нет службы конфигурации.',
@@ -2512,8 +2514,12 @@ window.__ModuleLoader__.load({
         content.push(React.createElement('span', { key: 'label', className: `${LIGHT_CLASS}-label` }, t(lightLabelKey(status.light))));
       }
       if (dockMode !== 'lamp' && target !== null) {
+        // Адрес отсчёта виден сразу: «ещё 60 ч 12 мин · до пн 04:00».
         content.push(React.createElement('span', { key: 'time', className: `${LIGHT_CLASS}-count` },
-          fillText(t('light.left'), { value: formatCountdownText(target - now, t) })));
+          fillText(t('light.leftTo'), {
+            value: formatCountdownText(target - now, t),
+            time: formatTarget(target, now, t),
+          })));
       }
       return React.createElement(React.Fragment, null,
         React.createElement('button', {
