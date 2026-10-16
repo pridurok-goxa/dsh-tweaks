@@ -1814,6 +1814,7 @@ check('в шапке индикатор без текста, у нижнего �
 
   const header = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
   assert.deepEqual(indicatorTexts(renderSlot(headerRow(header))), [], 'в шапке только лампа, без подписей');
+  assert.ok(dockRow(header).entry.options.order < 0, 'в доке светофор идёт первым: порядок отрицательный');
 
   const expected = { lamp: 0, 'lamp-time': 1, time: 1, 'lamp-time-label': 2 };
   for (const [dockMode, count] of Object.entries(expected)) {

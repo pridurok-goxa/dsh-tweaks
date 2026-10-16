@@ -2797,8 +2797,10 @@ window.__ModuleLoader__.load({
           console.error('dsh-tweaks: индикатор светофора в шапке не подключён', error);
         }
         try {
+          // Отрицательный order ставит светофор первым в строке дока: у системных
+          // записей порядок 0, а сортировка идёт по возрастанию.
           own(slots.inject('conversation.composer.dock', () => slots.register(
-            { name: 'conversation.composer.dock', id: 'traffic-light', order: 0 },
+            { name: 'conversation.composer.dock', id: 'traffic-light', order: -1000 },
             (props) => React.createElement(TrafficLightIndicator, { ...props, variant: 'dock' }),
           )));
         } catch (error) {
