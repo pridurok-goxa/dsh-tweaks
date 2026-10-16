@@ -46,11 +46,15 @@ class Field {
   constructor(type, options) { this.type = type; this.options = options; }
   default(value) { return new Field(this.type, { ...this.options, default: value }); }
   volatile() { return new Field(this.type, { ...this.options, volatile: true }); }
+  pattern() { return new Field(this.type, { ...this.options, pattern: true }); }
 }
 export default {
   object(dict) { return new Field('object', { dict }); },
   boolean() { return new Field('boolean', {}); },
   union(values) { return new Field('union', { values }); },
+  number() { return new Field('number', {}); },
+  string() { return new Field('string', {}); },
+  array(inner) { return new Field('array', { inner }); },
 };
 `;
 

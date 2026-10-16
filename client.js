@@ -53,6 +53,259 @@ window.__ModuleLoader__.load({
             );
           };
 
+    /* region traffic-light-policy — автокопия tweaks/traffic-light-policy.js; править там, затем обновить здесь */
+    /**
+     * Правило тарифов DeepSeek API — единый источник для хост- и клиент-половин
+     * твика «светофор» (trafficLight) бандла dsh-tweaks.
+     *
+     * Этот файл — чистые функции без импортов и без глобалов, кроме `Date`:
+     *  1. его импортирует хост-половина (`traffic-light-host.js`);
+     *  2. его содержимое без ключевого слова `export` вшито в `client.js`
+     *     между маркерами `/* region traffic-light-policy *\/` — тест
+     *     `test/check-traffic-light.cjs` следит, что копии не разошлись.
+     *
+     * Действующее правило (сверено с официальной страницей цен
+     * https://api-docs.deepseek.com/quick_start/pricing, ред. 2026-09-10):
+     *   - пик (дорого, 100% цены): Пн–Пт 09:00–12:00 и 14:00–18:00 по Пекину
+     *     (UTC+8, без летнего времени), кроме официальных праздников КНР;
+     *   - всё остальное время — вне пика (50% цены): вечера, ночи, выходные
+     *     и праздники целиком.
+     * Окна — полуинтервалы [начало, конец): граница 12:00 уже вне пика,
+     * граница 14:00 — снова пик.
+     */
+
+    /** Миллисекунды в минуте и в сутках. */
+    const MINUTE_MS = 60_000;
+    const DAY_MS = 86_400_000;
+
+    /**
+     * Официальные праздники КНР 2026 года, попадающие на будни.
+     *
+     * Выходные и так целиком вне пика, поэтому субботы/воскресенья (и переносы
+     * рабочих дней на выходные) в списке не нужны.
+     */
+    const HOLIDAYS_2026 = [
+      '2026-01-01', // Новый год
+      '2026-01-02', // Новый год
+      '2026-02-16', // Китайский Новый год
+      '2026-02-17', // Китайский Новый год
+      '2026-02-18', // Китайский Новый год
+      '2026-02-19', // Китайский Новый год
+      '2026-02-20', // Китайский Новый год
+      '2026-02-23', // Китайский Новый год
+      '2026-04-06', // Цинмин
+      '2026-05-01', // День труда
+      '2026-05-04', // День труда
+      '2026-05-05', // День труда
+      '2026-06-19', // Праздник драконьих лодок
+      '2026-09-25', // Праздник середины осени
+      '2026-10-01', // День образования КНР
+      '2026-10-02', // День образования КНР
+      '2026-10-05', // День образования КНР
+      '2026-10-06', // День образования КНР
+      '2026-10-07', // День образования КНР
+    ];
+
+    /**
+     * Политика тарифов по умолчанию.
+     *
+     * Окна задаются по Пекину (UTC+8), потому что так их публикует DeepSeek;
+     * сдвиг фиксированный — летнего времени в Китае нет.
+     */
+    const DEFAULT_POLICY = Object.freeze({
+      /** Сдвиг Пекина от UTC в минутах. */
+      utcOffsetMinutes: 480,
+      /** Окна пиковой нагрузки: [начало, конец) в минутах от 00:00 по Пекину. */
+      peakWindows: Object.freeze([
+        Object.freeze([9 * 60, 12 * 60]), // 09:00–12:00
+        Object.freeze([14 * 60, 18 * 60]), // 14:00–18:00
+      ]),
+      /** Даты официальных праздников КНР в формате YYYY-MM-DD. */
+      holidays: Object.freeze([...HOLIDAYS_2026]),
+      /** Сколько минут до начала пика индикатор горит жёлтым. */
+      warningMinutes: 30,
+    });
+
+    /** Дополнить число нулём до двух знаков. */
+    function pad2(value) {
+      return value < 10 ? `0${value}` : `${value}`;
+    }
+
+    /**
+     * Разобрать пекинское время «HH:MM» в минуты суток.
+     * @param {string} value - строка времени.
+     * @returns {number | null} минуты от 00:00 либо null для неверного значения.
+     */
+    function parseClock(value) {
+      if (typeof value !== 'string') return null;
+      const match = /^([01]\d|2[0-3]):[0-5]\d$/.exec(value.trim());
+      if (match === null) return null;
+      const hours = Number(match[1]);
+      const minutes = Number(value.trim().slice(3, 5));
+      return hours * 60 + minutes;
+    }
+
+    /**
+     * Разложить мгновение на пекинские календарные поля.
+     * @param {number} instantMs - миллисекунды эпохи.
+     * @param {object} policy - политика тарифов.
+     * @returns {object} пекинские дата, время, день недели и границы суток.
+     */
+    function beijingParts(instantMs, policy = DEFAULT_POLICY) {
+      const offset = policy.utcOffsetMinutes * MINUTE_MS;
+      const shifted = new Date(instantMs + offset);
+      const year = shifted.getUTCFullYear();
+      const month = shifted.getUTCMonth() + 1;
+      const day = shifted.getUTCDate();
+      const hour = shifted.getUTCHours();
+      const minute = shifted.getUTCMinutes();
+      return {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        /** 0 = воскресенье … 6 = суббота. */
+        weekday: shifted.getUTCDay(),
+        minuteOfDay: hour * 60 + minute,
+        dateKey: `${year}-${pad2(month)}-${pad2(day)}`,
+        dayStartMs: Date.UTC(year, month - 1, day) - offset,
+      };
+    }
+
+    /** Кэш множеств праздников по объекту политики. */
+    const holidaySets = new WeakMap();
+
+    /**
+     * Множество дат-ключей праздников политики.
+     * @param {object} policy - политика тарифов.
+     * @returns {Set<string>} даты праздников.
+     */
+    function holidaySet(policy) {
+      let set = holidaySets.get(policy);
+      if (set === undefined) {
+        set = new Set(policy.holidays);
+        holidaySets.set(policy, set);
+      }
+      return set;
+    }
+
+    /**
+     * Тарифицируется ли мгновение по пиковой цене.
+     * @param {number} instantMs - миллисекунды эпохи.
+     * @param {object} policy - политика тарифов.
+     * @returns {boolean} true для буднего дня Пекина внутри окна пика без праздника.
+     */
+    function isPeakAt(instantMs, policy = DEFAULT_POLICY) {
+      const parts = beijingParts(instantMs, policy);
+      if (parts.weekday === 0 || parts.weekday === 6) return false;
+      if (holidaySet(policy).has(parts.dateKey)) return false;
+      for (const [start, end] of policy.peakWindows) {
+        if (parts.minuteOfDay >= start && parts.minuteOfDay < end) return true;
+      }
+      return false;
+    }
+
+    /**
+     * Ближайшее мгновение, в которое период тарифа меняется.
+     * @param {number} instantMs - миллисекунды эпохи.
+     * @param {object} policy - политика тарифов.
+     * @returns {number | null} следующая граница либо null (окон нет).
+     */
+    function nextSwitchAt(instantMs, policy = DEFAULT_POLICY) {
+      const current = isPeakAt(instantMs, policy);
+      const { dayStartMs } = beijingParts(instantMs, policy);
+      const candidates = [];
+      for (let day = 0; day < 21; day += 1) {
+        const base = dayStartMs + day * DAY_MS;
+        for (const [start, end] of policy.peakWindows) {
+          candidates.push(base + start * MINUTE_MS, base + end * MINUTE_MS);
+        }
+      }
+      candidates.sort((left, right) => left - right);
+      for (const at of candidates) {
+        if (at <= instantMs) continue;
+        if (isPeakAt(at, policy) !== current) return at;
+      }
+      return null;
+    }
+
+    /**
+     * Ближайшее начало пикового окна строго после мгновения.
+     * @param {number} instantMs - миллисекунды эпохи.
+     * @param {object} policy - политика тарифов.
+     * @returns {number | null} начало следующего пика либо null (окон нет).
+     */
+    function nextPeakStartAt(instantMs, policy = DEFAULT_POLICY) {
+      const { dayStartMs } = beijingParts(instantMs, policy);
+      const candidates = [];
+      for (let day = 0; day < 21; day += 1) {
+        const base = dayStartMs + day * DAY_MS;
+        for (const [start] of policy.peakWindows) {
+          candidates.push(base + start * MINUTE_MS);
+        }
+      }
+      candidates.sort((left, right) => left - right);
+      for (const at of candidates) {
+        if (at <= instantMs) continue;
+        if (isPeakAt(at, policy)) return at;
+      }
+      return null;
+    }
+
+    /**
+     * Цвет светофора в мгновение: красный в пик, жёлтый в окне предупреждения
+     * перед пиком, зелёный в остальное время.
+     * @param {number} instantMs - миллисекунды эпохи.
+     * @param {object} policy - политика тарифов.
+     * @returns {'red' | 'yellow' | 'green'} цвет светофора.
+     */
+    function lightAt(instantMs, policy = DEFAULT_POLICY) {
+      if (isPeakAt(instantMs, policy)) return 'red';
+      const next = nextPeakStartAt(instantMs, policy);
+      if (next !== null && next - instantMs <= policy.warningMinutes * MINUTE_MS) return 'yellow';
+      return 'green';
+    }
+
+    /**
+     * Собрать политику из значений конфигурации твика, откатившись к дефолтам.
+     *
+     * Принимает «плоскую» конфигурацию: обычный объект с полями
+     * `trafficLightPeakWindows` (массив `{ start, end }` по Пекину),
+     * `trafficLightHolidays` (массив дат YYYY-MM-DD) и
+     * `trafficLightWarningMinutes` (число). Неверные значения отбрасываются.
+     * @param {object} [config] - плоская конфигурация твика.
+     * @returns {object} нормализованная политика.
+     */
+    function normalizePolicy(config) {
+      const policy = {
+        utcOffsetMinutes: DEFAULT_POLICY.utcOffsetMinutes,
+        peakWindows: DEFAULT_POLICY.peakWindows,
+        holidays: DEFAULT_POLICY.holidays,
+        warningMinutes: DEFAULT_POLICY.warningMinutes,
+      };
+      if (Array.isArray(config?.trafficLightPeakWindows)) {
+        const parsed = [];
+        for (const window of config.trafficLightPeakWindows) {
+          const start = parseClock(window?.start);
+          const end = parseClock(window?.end);
+          if (start !== null && end !== null && end > start) parsed.push([start, end]);
+        }
+        if (parsed.length > 0) policy.peakWindows = parsed;
+      }
+      if (Array.isArray(config?.trafficLightHolidays)) {
+        policy.holidays = config.trafficLightHolidays.filter(
+          (value) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value),
+        );
+      }
+      const minutes = config?.trafficLightWarningMinutes;
+      if (Number.isFinite(minutes) && minutes >= 0 && minutes <= 180) {
+        policy.warningMinutes = minutes;
+      }
+      return policy;
+    }
+    /* endregion traffic-light-policy */
+
     /* #region zoom-model */
     /** Границы и шаг масштаба; 1 — исходный размер интерфейса. */
     const ZOOM_MIN = 0.5;
@@ -110,6 +363,22 @@ window.__ModuleLoader__.load({
         'tweak.zoom': 'Interface size',
         'tweak.contextMenu': 'Custom right-click menu',
         'tweak.whisper': 'Russian speech recognition',
+        'tweak.trafficLight': 'Peak-hours traffic light',
+        'light.offpeak': 'Off-peak price',
+        'light.peak': 'Peak price',
+        'light.warning': 'Peak approaching',
+        'light.untilGreen': 'Peak until {{time}}',
+        'light.untilRed': 'Peak starts at {{time}}',
+        'light.untilPeak': 'Off-peak until {{time}}',
+        'light.countdownH': '{{hours}} h {{minutes}} min',
+        'light.countdownM': '{{minutes}} min {{seconds}} s',
+        'light.countdownS': '{{seconds}} s',
+        'light.clockTitle': '24-hour price clock',
+        'light.weekdays': 'Mon–Fri',
+        'light.holidaysNote': 'except Chinese public holidays',
+        'light.currentSlot': 'Now: {{time}}',
+        'light.slotLabel': '{{time}} · {{label}}',
+        'light.pausedHint': 'Automatic work is paused while the light is red',
         'form.hint': 'A check box turns the tweak on at once, without a restart.',
         'form.unavailable': 'Settings are unavailable: this deployment has no configuration service.',
         'form.readOnly': 'This deployment stores settings read-only.',
@@ -129,6 +398,22 @@ window.__ModuleLoader__.load({
         'tweak.zoom': 'Масштаб интерфейса',
         'tweak.contextMenu': 'Своё меню по правой кнопке',
         'tweak.whisper': 'Распознавание русской речи',
+        'tweak.trafficLight': 'Светофор дорогих часов',
+        'light.offpeak': 'Льготный тариф',
+        'light.peak': 'Дорогой тариф',
+        'light.warning': 'Скоро пик',
+        'light.untilGreen': 'Пик до {{time}}',
+        'light.untilRed': 'Пик начнётся в {{time}}',
+        'light.untilPeak': 'Льготный тариф до {{time}}',
+        'light.countdownH': '{{hours}} ч {{minutes}} мин',
+        'light.countdownM': '{{minutes}} мин {{seconds}} с',
+        'light.countdownS': '{{seconds}} с',
+        'light.clockTitle': 'Часы тарифа на сутки',
+        'light.weekdays': 'Пн–Пт',
+        'light.holidaysNote': 'кроме праздников КНР',
+        'light.currentSlot': 'Сейчас: {{time}}',
+        'light.slotLabel': '{{time}} · {{label}}',
+        'light.pausedHint': 'Автоматическая работа на паузе, пока горит красный',
         'form.hint': 'Галочка включает твик сразу, без перезапуска.',
         'form.unavailable': 'Настройки недоступны: в этой сборке нет службы конфигурации.',
         'form.readOnly': 'Эта сборка хранит настройки только для чтения.',
@@ -1657,6 +1942,528 @@ window.__ModuleLoader__.load({
     }
     /* #endregion tweak-whisper */
 
+    /* #region tweak-traffic-light */
+    /** Период пересчёта индикатора: раз в секунду, чтобы тикал отсчёт. */
+    const LIGHT_TICK_MS = 1000;
+
+    /** Цвета лампы из токенов темы: красный — ошибка, жёлтый — предупреждение, зелёный — успех. */
+    const LIGHT_COLORS = {
+      red: 'var(--dsw-alias-state-error-primary)',
+      yellow: 'var(--dsw-alias-state-warn-primary)',
+      green: 'var(--dsw-alias-state-success-primary)',
+    };
+
+    /** Префикс классов твика — как у меню по правой кнопке. */
+    const LIGHT_CLASS = 'dsh-ui-light';
+
+    /** Контекст твика и переводчик: ставятся в setup, читаются компонентами. */
+    let lightContext = null;
+    let lightTranslator = (key) => key;
+
+    /** Общее состояние светофора: политика тарифов и подписчики. */
+    const lightHub = (() => {
+      let policy = { ...DEFAULT_POLICY };
+      const listeners = new Set();
+      return {
+        getPolicy: () => policy,
+        setConfig(value) {
+          policy = normalizePolicy(value);
+          for (const listener of listeners) listener();
+        },
+        subscribe(listener) {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+      };
+    })();
+
+    /**
+     * Статус светофора в мгновение.
+     * @param {number} instantMs - миллисекунды эпохи.
+     * @returns {object} цвет, границы переходов и отсчёт.
+     */
+    function lightStatus(instantMs) {
+      const policy = lightHub.getPolicy();
+      const light = lightAt(instantMs, policy);
+      const nextSwitch = nextSwitchAt(instantMs, policy);
+      const nextPeak = nextPeakStartAt(instantMs, policy);
+      return {
+        light,
+        nextSwitchAt: nextSwitch,
+        nextPeakStartAt: nextPeak,
+        msUntilSwitch: nextSwitch === null ? null : Math.max(0, nextSwitch - instantMs),
+      };
+    }
+
+    /** Дополнить число нулём до двух знаков. */
+    function twoDigits(value) {
+      return value < 10 ? `0${value}` : `${value}`;
+    }
+
+    /** Время суток в местном часовом поясе, «HH:MM». */
+    function formatClock(instantMs) {
+      const date = new Date(instantMs);
+      return `${twoDigits(date.getHours())}:${twoDigits(date.getMinutes())}`;
+    }
+
+    /** Часовой пояс браузера; без Intl — UTC. */
+    function localTimeZone() {
+      try {
+        if (typeof Intl === 'undefined' || typeof Intl.DateTimeFormat !== 'function') return 'UTC';
+        return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+      } catch (_error) {
+        return 'UTC';
+      }
+    }
+
+    /** Подпись окна пика в местном времени: «09:00–12:00». */
+    function localWindowLabel(window, policy, nowMs) {
+      const parts = beijingParts(nowMs, policy);
+      const startMs = parts.dayStartMs + window[0] * 60000;
+      const endMs = parts.dayStartMs + window[1] * 60000;
+      return `${formatClock(startMs)}–${formatClock(endMs)}`;
+    }
+
+    /** Цвета 24 местных часов сегодняшних суток по серединам часов. */
+    function todayHourStatuses(nowMs) {
+      const now = new Date(nowMs);
+      const base = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      const policy = lightHub.getPolicy();
+      const statuses = [];
+      for (let hour = 0; hour < 24; hour += 1) {
+        const instant = base + hour * 3600000 + 1800000;
+        statuses.push({ hour, light: lightAt(instant, policy) });
+      }
+      return statuses;
+    }
+
+    /** Ключ подписи цвета в словаре. */
+    function lightLabelKey(light) {
+      return light === 'red' ? 'light.peak' : light === 'yellow' ? 'light.warning' : 'light.offpeak';
+    }
+
+    /** Ключ подписи отсчёта до перехода в словаре. */
+    function lightCountdownKey(status) {
+      if (status.light === 'red') return 'light.untilGreen';
+      if (status.light === 'yellow') return 'light.untilRed';
+      return 'light.untilPeak';
+    }
+
+    /** Мгновение, до которого идёт отсчёт. */
+    function lightCountdownTarget(status) {
+      if (status.light === 'red') return status.nextSwitchAt;
+      return status.nextPeakStartAt;
+    }
+
+    /** Заменить {{ключи}} значениями. */
+    function fillText(template, values) {
+      let text = template;
+      for (const [key, value] of Object.entries(values)) {
+        text = text.split(`{{${key}}}`).join(String(value));
+      }
+      return text;
+    }
+
+    /** Отсчёт «X ч MM мин» / «M мин SS с» по словарю. */
+    function formatCountdownText(ms, t) {
+      const total = Math.max(0, Math.ceil(ms / 1000));
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      const seconds = total % 60;
+      if (hours > 0) return fillText(t('light.countdownH'), { hours, minutes: twoDigits(minutes) });
+      if (minutes > 0) return fillText(t('light.countdownM'), { minutes, seconds: twoDigits(seconds) });
+      return fillText(t('light.countdownS'), { seconds });
+    }
+
+    /**
+     * Хук состояния индикатора: тик раз в секунду, подписка на политику
+     * и признак «кто-то работает» из списка сессий.
+     * @returns {object} now — текущее время, running — есть ли работа.
+     */
+    function useLightTick() {
+      const [now, setNow] = React.useState(() => Date.now());
+      React.useEffect(() => {
+        if (typeof window === 'undefined' || typeof window.setInterval !== 'function') return undefined;
+        const timer = window.setInterval(() => setNow(Date.now()), LIGHT_TICK_MS);
+        return () => window.clearInterval(timer);
+      }, []);
+      const [revision, setRevision] = React.useState(0);
+      React.useEffect(() => lightHub.subscribe(() => setRevision((value) => value + 1)), []);
+      const [running, setRunning] = React.useState(false);
+      React.useEffect(() => {
+        let sessions = undefined;
+        try {
+          sessions = typeof lightContext?.get === 'function' ? lightContext.get('sessions') : undefined;
+        } catch (_error) {
+          sessions = undefined;
+        }
+        const list = sessions?.list;
+        if (list === undefined) {
+          setRunning(false);
+          return undefined;
+        }
+        const read = () => {
+          try {
+            const snapshot = list.getSnapshot?.();
+            const byId = snapshot?.byId ?? {};
+            return Object.keys(byId).some((id) => byId[id]?.running === true);
+          } catch (_error) {
+            return false;
+          }
+        };
+        setRunning(read());
+        if (typeof list.subscribe !== 'function') return undefined;
+        return list.subscribe(() => setRunning(read()));
+      }, []);
+      return { now, running, revision };
+    }
+
+    /** Ширина панели-тултипа в пикселях. */
+    const LIGHT_PANEL_WIDTH = 264;
+
+    /**
+     * Позиция панели-тултипа у якоря.
+     * @param {object} anchorRef - ref кнопки.
+     * @param {object} panelRef - ref панели.
+     * @param {boolean} preferUp - предпочитать положение над кнопкой.
+     * @returns {object} left/top вьюпортных пикселей.
+     */
+    function panelPosition(anchorRef, panelRef, preferUp) {
+      const rect = anchorRef?.current?.getBoundingClientRect?.();
+      const margin = 8;
+      if (rect === undefined) return { left: margin, top: margin };
+      const width = panelRef?.current?.offsetWidth ?? LIGHT_PANEL_WIDTH;
+      const height = panelRef?.current?.offsetHeight ?? 260;
+      const viewportWidth =
+        typeof window === 'undefined' || !Number.isFinite(window.innerWidth) ? 1024 : window.innerWidth;
+      const viewportHeight =
+        typeof window === 'undefined' || !Number.isFinite(window.innerHeight) ? 768 : window.innerHeight;
+      const left = Math.max(margin, Math.min(rect.left + rect.width / 2 - width / 2, viewportWidth - width - margin));
+      const top = preferUp
+        ? Math.max(margin, rect.top - height - margin)
+        : Math.min(rect.bottom + margin, viewportHeight - height - margin);
+      return { left, top };
+    }
+
+    /** Геометрия циферблата. */
+    const CLOCK_SIZE = 176;
+    const CLOCK_CENTER = CLOCK_SIZE / 2;
+    const CLOCK_RADIUS = 76;
+    const CLOCK_HOUR_MARKERS = [0, 6, 12, 18];
+
+    /**
+     * Интерактивный циферблат: 24 цветных кружочка по местным часам,
+     * стрелка текущего времени и подсветка текущего слота.
+     * @param {object} props - now, hover, setHover.
+     * @returns {object} SVG-циферблат.
+     */
+    function TrafficClockChart({ now, hover, setHover }) {
+      const statuses = todayHourStatuses(now);
+      const date = new Date(now);
+      const currentHour = date.getHours();
+      const pointOf = (hour, fraction, radius) => {
+        const angle = ((hour + fraction) / 24) * 2 * Math.PI - Math.PI / 2;
+        return [CLOCK_CENTER + radius * Math.cos(angle), CLOCK_CENTER + radius * Math.sin(angle)];
+      };
+      const children = [];
+      // Стрелка текущего времени.
+      const [handX, handY] = pointOf(currentHour, (date.getMinutes() + date.getSeconds() / 60) / 60, CLOCK_RADIUS - 16);
+      children.push(React.createElement('line', {
+        key: 'hand',
+        x1: CLOCK_CENTER,
+        y1: CLOCK_CENTER,
+        x2: handX,
+        y2: handY,
+        strokeWidth: 1.5,
+        strokeLinecap: 'round',
+        style: { stroke: 'var(--dsw-alias-label-primary)' },
+      }));
+      // Отметки 0/6/12/18 для ориентации.
+      for (const hour of CLOCK_HOUR_MARKERS) {
+        const [x, y] = pointOf(hour, 0, CLOCK_RADIUS + 11);
+        children.push(React.createElement('text', {
+          key: `mark-${hour}`,
+          x,
+          y,
+          textAnchor: 'middle',
+          dominantBaseline: 'middle',
+          fontSize: 9,
+          style: { fill: 'var(--dsw-alias-label-tertiary)', userSelect: 'none' },
+        }, twoDigits(hour)));
+      }
+      // Кружочки часов; текущий час — крупнее и с ободком.
+      for (const slot of statuses) {
+        const isCurrent = slot.hour === currentHour;
+        const active = hover === slot.hour || hover === null || isCurrent;
+        const [cx, cy] = pointOf(slot.hour, 0.5, CLOCK_RADIUS);
+        children.push(React.createElement('circle', {
+          key: `dot-${slot.hour}`,
+          cx,
+          cy,
+          r: isCurrent ? 5 : hover === slot.hour ? 4 : 3,
+          opacity: active ? 1 : 0.4,
+          strokeWidth: isCurrent ? 1.5 : 0,
+          style: {
+            fill: LIGHT_COLORS[slot.light],
+            stroke: isCurrent ? 'var(--dsw-alias-bg-overlay)' : 'none',
+            cursor: 'pointer',
+            transition: 'r 120ms ease, opacity 120ms ease',
+          },
+          onMouseEnter: () => setHover(slot.hour),
+          onMouseLeave: () => setHover(null),
+        }));
+      }
+      return React.createElement('svg', {
+        viewBox: `0 0 ${CLOCK_SIZE} ${CLOCK_SIZE}`,
+        width: CLOCK_SIZE,
+        height: CLOCK_SIZE,
+        style: { display: 'block', margin: '0 auto' },
+        'aria-hidden': true,
+      }, children);
+    }
+
+    /**
+     * Панель-тултип: статус, отсчёт, циферблат и правило тарифов.
+     * @param {object} props - anchorRef, variant, onClose.
+     * @returns {object} панель.
+     */
+    function TrafficClockPanel({ anchorRef, variant, onClose }) {
+      const { now, running } = useLightTick();
+      const status = lightStatus(now);
+      const [hover, setHover] = React.useState(null);
+      const [position, setPosition] = React.useState(() => panelPosition(anchorRef, null, variant === 'dock'));
+      const panelRef = React.useRef(null);
+      React.useEffect(() => {
+        setPosition(panelPosition(anchorRef, panelRef, variant === 'dock'));
+      }, [now, variant, anchorRef]);
+      React.useEffect(() => {
+        const onPointer = (event) => {
+          const panel = panelRef.current;
+          const anchor = anchorRef.current;
+          if (panel !== null && panel.contains(event.target)) return;
+          if (anchor !== null && anchor.contains(event.target)) return;
+          onClose();
+        };
+        const onKey = (event) => {
+          if (event.key === 'Escape') onClose();
+        };
+        document.addEventListener('pointerdown', onPointer, true);
+        document.addEventListener('keydown', onKey, true);
+        return () => {
+          document.removeEventListener('pointerdown', onPointer, true);
+          document.removeEventListener('keydown', onKey, true);
+        };
+      }, [anchorRef, onClose]);
+      const t = lightTranslator;
+      const target = lightCountdownTarget(status);
+      const policy = lightHub.getPolicy();
+      const windowsText = policy.peakWindows
+        .map((window) => localWindowLabel(window, policy, now))
+        .join(' · ');
+      const countdown = target === null ? '' : formatCountdownText(target - now, t);
+      const hourStatuses = todayHourStatuses(now);
+      const hovered = hover === null ? null : hourStatuses.find((slot) => slot.hour === hover) ?? null;
+      const slotLine = hovered === null
+        ? fillText(t('light.currentSlot'), { time: formatClock(now) })
+        : fillText(t('light.slotLabel'), {
+            time: `${twoDigits(hovered.hour)}:00–${twoDigits((hovered.hour + 1) % 24)}:00`,
+            label: t(lightLabelKey(hovered.light)),
+          });
+      return React.createElement('div', {
+        ref: panelRef,
+        className: `${LIGHT_CLASS}-panel`,
+        style: { left: `${position.left}px`, top: `${position.top}px` },
+        role: 'dialog',
+        'aria-label': t('light.clockTitle'),
+        onMouseLeave: () => setHover(null),
+      },
+        React.createElement('div', { className: `${LIGHT_CLASS}-head` },
+          React.createElement('span', { className: `${LIGHT_CLASS}-lamp`, style: { background: LIGHT_COLORS[status.light] } }),
+          React.createElement('span', null, t(lightLabelKey(status.light))),
+          countdown === '' ? null : React.createElement('span', { className: `${LIGHT_CLASS}-count` }, countdown),
+        ),
+        React.createElement(TrafficClockChart, { now, hover, setHover }),
+        React.createElement('div', { className: `${LIGHT_CLASS}-slot` }, slotLine),
+        React.createElement('div', { className: `${LIGHT_CLASS}-rule` },
+          `${t('light.weekdays')} · ${windowsText} · ${t('light.holidaysNote')} · ${localTimeZone()}`),
+        status.light === 'red' && running
+          ? React.createElement('div', { className: `${LIGHT_CLASS}-paused` }, t('light.pausedHint'))
+          : null,
+      );
+    }
+
+    /**
+     * Кнопка-светофор: зелёный вне пика, мигающий жёлтый перед пиком,
+     * красный в пик; на красном при работающих сессиях — волны вокруг лампы.
+     * @param {object} props - variant: 'header' | 'dock'.
+     * @returns {object} кнопка с панелью-тултипом.
+     */
+    function TrafficLightIndicator({ variant }) {
+      const { now, running } = useLightTick();
+      const status = lightStatus(now);
+      const [open, setOpen] = React.useState(false);
+      const anchorRef = React.useRef(null);
+      const t = lightTranslator;
+      const color = LIGHT_COLORS[status.light];
+      const blink = status.light === 'yellow';
+      const pulse = status.light === 'red' && running;
+      const target = lightCountdownTarget(status);
+      const label = target === null
+        ? t(lightLabelKey(status.light))
+        : fillText(t(lightCountdownKey(status)), { time: formatClock(target) });
+      const dot = React.createElement('span', {
+        className: `${LIGHT_CLASS}-lamp`,
+        style: {
+          background: color,
+          animation: blink ? `${LIGHT_CLASS}-blink 1s steps(2, start) infinite` : undefined,
+        },
+      });
+      const waves = pulse
+        ? [
+            React.createElement('span', {
+              key: 'wave-a',
+              className: `${LIGHT_CLASS}-wave`,
+              style: { borderColor: color },
+              'aria-hidden': true,
+            }),
+            React.createElement('span', {
+              key: 'wave-b',
+              className: `${LIGHT_CLASS}-wave`,
+              style: { borderColor: color, animationDelay: '1s' },
+              'aria-hidden': true,
+            }),
+          ]
+        : null;
+      const content = [dot, waves];
+      if (variant === 'dock') {
+        content.push(React.createElement('span', { key: 'label', className: `${LIGHT_CLASS}-label` },
+          t(lightLabelKey(status.light)),
+          target === null
+            ? null
+            : React.createElement('span', { className: `${LIGHT_CLASS}-count` }, ` · ${formatCountdownText(target - now, t)}`),
+        ));
+      }
+      return React.createElement(React.Fragment, null,
+        React.createElement('button', {
+          type: 'button',
+          ref: anchorRef,
+          className: `${LIGHT_CLASS}-button`,
+          'aria-label': label,
+          'data-light': status.light,
+          onClick: () => setOpen((value) => !value),
+          onMouseEnter: () => setOpen(true),
+          onFocus: () => setOpen(true),
+        }, content),
+        open
+          ? React.createElement(TrafficClockPanel, { anchorRef, variant, onClose: () => setOpen(false) })
+          : null,
+      );
+    }
+
+    /** Строка-превью на странице пакета рядом с галочкой твика. */
+    function TrafficLightDetail() {
+      const { now } = useLightTick();
+      const status = lightStatus(now);
+      const target = lightCountdownTarget(status);
+      const t = lightTranslator;
+      const text = target === null
+        ? t(lightLabelKey(status.light))
+        : `${t(lightLabelKey(status.light))} · ${fillText(t(lightCountdownKey(status)), { time: formatClock(target) })}`;
+      return React.createElement('div', { className: `${LIGHT_CLASS}-detail` },
+        React.createElement('span', { className: `${LIGHT_CLASS}-lamp`, style: { background: LIGHT_COLORS[status.light] } }),
+        React.createElement('span', null, text),
+      );
+    }
+
+    /** Стили твика: токены темы и префиксные классы, как у меню. */
+    const LIGHT_STYLE_TEXT = [
+      `.${LIGHT_CLASS}-button{box-sizing:border-box;flex:none;display:inline-flex;align-items:center;gap:6px;`,
+      'border:none;background:transparent;padding:3px;border-radius:999px;cursor:pointer;color:var(--dsw-alias-label-secondary);',
+      'font:12px/18px system-ui,sans-serif;font-variant-numeric:tabular-nums}',
+      `.${LIGHT_CLASS}-button:hover{background:var(--dsw-alias-interactive-bg-hover)}`,
+      `.${LIGHT_CLASS}-button:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:0}`,
+      `.${LIGHT_CLASS}-lamp{box-sizing:border-box;flex:none;width:16px;height:16px;border-radius:999px;display:block;position:relative;transition:background 250ms ease}`,
+      `.${LIGHT_CLASS}-wave{box-sizing:border-box;position:absolute;inset:0;border-radius:999px;border-width:2px;border-style:solid;pointer-events:none;animation:${LIGHT_CLASS}-wave 2s ease-out infinite}`,
+      `.${LIGHT_CLASS}-label{white-space:nowrap}`,
+      `.${LIGHT_CLASS}-count{color:var(--dsw-alias-label-tertiary)}`,
+      `.${LIGHT_CLASS}-panel{box-sizing:border-box;position:fixed;z-index:2147483000;width:264px;padding:12px;`,
+      'border:0.5px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-overlay);',
+      'box-shadow:0 8px 28px rgba(0,0,0,.42);color:var(--dsw-alias-label-primary);font:12px/18px system-ui,sans-serif}',
+      `.${LIGHT_CLASS}-head{display:flex;align-items:center;gap:6px;margin-bottom:10px;font-weight:500}`,
+      `.${LIGHT_CLASS}-head .${LIGHT_CLASS}-lamp{width:10px;height:10px}`,
+      `.${LIGHT_CLASS}-head .${LIGHT_CLASS}-count{margin-left:auto;font-weight:400}`,
+      `.${LIGHT_CLASS}-slot{text-align:center;color:var(--dsw-alias-label-secondary);margin-top:6px}`,
+      `.${LIGHT_CLASS}-rule{color:var(--dsw-alias-label-tertiary);margin-top:8px;text-align:center}`,
+      `.${LIGHT_CLASS}-paused{color:var(--dsw-alias-state-business-warning,var(--dsw-alias-label-secondary));margin-top:8px;text-align:center}`,
+      `.${LIGHT_CLASS}-detail{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary);font:12px/18px system-ui,sans-serif}`,
+      `.${LIGHT_CLASS}-detail .${LIGHT_CLASS}-lamp{width:10px;height:10px}`,
+      `@keyframes ${LIGHT_CLASS}-blink{0%{opacity:1}50%{opacity:.35}100%{opacity:1}}`,
+      `@keyframes ${LIGHT_CLASS}-wave{0%{transform:scale(1);opacity:.9}70%{transform:scale(2.4);opacity:0}100%{transform:scale(2.4);opacity:0}}`,
+      '@media (prefers-reduced-motion: reduce){'
+      + `.${LIGHT_CLASS}-wave{animation:none;display:none}.${LIGHT_CLASS}-lamp{animation:none!important}}`,
+    ].join('');
+
+    /**
+     * Включить твик: стили, подписка на политику из конфигурации,
+     * индикаторы в шапке разговора и под полем ввода.
+     *
+     * Снимок конфигурации твику отдаёт каркас (хук `refresh` в реестре TWEAKS):
+     * своя подписка на форму не нужна — она была бы второй подпиской на тот же
+     * документ, а окна политики приходят вместе с флагами.
+     * @param {object} ctx - клиентский контекст плагина.
+     * @param {object} api - регистратор очисток твика.
+     * @returns {void}
+     */
+    function setupTrafficLight(ctx, api) {
+      const own = typeof api?.own === 'function' ? api.own : () => {};
+      lightContext = ctx;
+      let locale = undefined;
+      try {
+        locale = typeof ctx?.get === 'function' ? ctx.get('locale') : undefined;
+      } catch (_error) {
+        locale = undefined;
+      }
+      lightTranslator = createTranslator(locale);
+
+      const style = document.createElement('style');
+      style.textContent = LIGHT_STYLE_TEXT;
+      document.head?.appendChild(style);
+      own(() => style.remove());
+
+      let slots = undefined;
+      try {
+        slots = typeof ctx?.get === 'function' ? ctx.get('slots') : undefined;
+      } catch (_error) {
+        slots = undefined;
+      }
+      if (typeof slots?.inject === 'function' && typeof slots?.register === 'function') {
+        try {
+          own(slots.inject('conversation.header.leading', () => slots.register(
+            { name: 'conversation.header.leading' },
+            (props) => React.createElement(TrafficLightIndicator, { ...props, variant: 'header' }),
+          )));
+        } catch (error) {
+          console.error('dsh-tweaks: индикатор светофора в шапке не подключён', error);
+        }
+        try {
+          own(slots.inject('conversation.composer.dock', () => slots.register(
+            { name: 'conversation.composer.dock', id: 'traffic-light', order: 0 },
+            (props) => React.createElement(TrafficLightIndicator, { ...props, variant: 'dock' }),
+          )));
+        } catch (error) {
+          console.error('dsh-tweaks: индикатор светофора под полем ввода не подключён', error);
+        }
+      }
+    }
+
+    /** Выключить твик: снять подписки и вернуть политику к дефолту. */
+    function teardownTrafficLight() {
+      lightContext = null;
+      lightTranslator = (key) => key;
+      lightHub.setConfig(null);
+    }
+    /* #endregion tweak-traffic-light */
+
     const TWEAKS = {
       zoom: {
         title: 'Масштаб интерфейса',
@@ -1694,6 +2501,27 @@ window.__ModuleLoader__.load({
         },
         renderDetail() {
           return React.createElement(WhisperPrepareButton);
+        },
+      },
+      trafficLight: {
+        title: 'Светофор дорогих часов',
+        titleKey: 'tweak.trafficLight',
+        // Лёгкий твик: индикатор в интерфейсе и пауза автоматической работы
+        // в хост-половине (`tweaks/traffic-light-host.js`).
+        defaultOn: true,
+        activate(ctx, api) {
+          setupTrafficLight(ctx, api);
+        },
+        deactivate() {
+          teardownTrafficLight();
+        },
+        // Каркас зовёт refresh на каждый снимок конфигурации: политика окон
+        // (peakWindows, праздники, предупреждение) строится из него.
+        refresh({ value }) {
+          lightHub.setConfig(value);
+        },
+        renderDetail() {
+          return React.createElement(TrafficLightDetail);
         },
       },
     };
@@ -1986,6 +2814,21 @@ window.__ModuleLoader__.load({
           for (const [id, on] of Object.entries(readFlags(controller))) {
             if (on) enableTweak(ctx, id, markReady);
             else disableTweak(id);
+          }
+          // Активные твики получают свежий снимок конфигурации: светофор
+          // строит по нему политику окон. Своя подписка твику не нужна —
+          // каркас и так слушает этот же документ.
+          const snapshot = controller?.getSnapshot?.();
+          const value =
+            snapshot?.status === 'ready' && typeof snapshot.value === 'object' && snapshot.value !== null
+              ? snapshot.value
+              : null;
+          for (const id of [...activeTweaks.keys()]) {
+            try {
+              TWEAKS[id].refresh?.({ value });
+            } catch (error) {
+              console.error(`dsh-tweaks: твик «${id}» не принял снимок конфигурации`, error);
+            }
           }
           // Отметка пишется и здесь, а не только на старте: по ней видно, какие
           // твики активны после каждой правки флагов.

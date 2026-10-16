@@ -19,6 +19,34 @@
 import Schema from '@deepseek-ai/schemastery';
 
 /**
+ * Официальные праздники КНР 2026 года, попадающие на будни — значение по
+ * умолчанию поля `trafficLightHolidays`. Список обязан совпадать с
+ * `HOLIDAYS_2026` из `tweaks/traffic-light-policy.js` (за этим следит
+ * `test/check-traffic-light.cjs`); там же — комментарий к каждой дате.
+ */
+const TRAFFIC_LIGHT_HOLIDAYS_2026 = [
+  '2026-01-01',
+  '2026-01-02',
+  '2026-02-16',
+  '2026-02-17',
+  '2026-02-18',
+  '2026-02-19',
+  '2026-02-20',
+  '2026-02-23',
+  '2026-04-06',
+  '2026-05-01',
+  '2026-05-04',
+  '2026-05-05',
+  '2026-06-19',
+  '2026-09-25',
+  '2026-10-01',
+  '2026-10-02',
+  '2026-10-05',
+  '2026-10-06',
+  '2026-10-07',
+];
+
+/**
  * Флаги твиков: имя поля — id твика в реестре TWEAKS (client.js).
  * `default(true)` сохраняет поведение пакета до появления флагов.
  */
@@ -36,6 +64,25 @@ export const Config = Schema.object({
   // (client.js), а не из схемы. Хранить признак в чужой записи профиля или в
   // файле нельзя: это наша настройка, и её видно в нашем же снимке конфигурации.
   whisperSelectionApplied: Schema.boolean().default(false).volatile(),
+  // Светофор дорогих часов DeepSeek: индикатор и пауза автоматической работы.
+  // Окна пика — по Пекину (UTC+8), как их публикует DeepSeek; в интерфейсе
+  // они показываются в местном времени разработчика.
+  trafficLight: Schema.boolean().default(true).volatile(),
+  trafficLightWarningMinutes: Schema.number().default(30).volatile(),
+  trafficLightPeakWindows: Schema.array(
+    Schema.object({
+      start: Schema.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/),
+      end: Schema.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/),
+    }),
+  )
+    .default([
+      { start: '09:00', end: '12:00' },
+      { start: '14:00', end: '18:00' },
+    ])
+    .volatile(),
+  trafficLightHolidays: Schema.array(Schema.string()).default(TRAFFIC_LIGHT_HOLIDAYS_2026).volatile(),
+  trafficLightPauseSchedules: Schema.boolean().default(true).volatile(),
+  trafficLightPauseAgents: Schema.boolean().default(true).volatile(),
 });
 
 /** Модуль хост-части твика «речь»: путь относительно нашего index.js. */
@@ -347,12 +394,110 @@ function attachWhisper(ctx, config) {
 }
 
 /**
- * Хост-половина бандла: твики интерфейса живут в браузере, а у твика «речь»
- * есть хост-часть — её поднимает и снимает этот apply по флагу `whisper`.
+ * Подключить хост-часть твика «светофор» (trafficLight).
+ *
+ * В отличие от «речи», перезапуск при смене значений не нужен: модуль твика
+ * держит состояние и принимает новую конфигурацию через `update`, поэтому
+ * удержанные на красном напоминания переживают правку политики. Модуль
+ * загружается динамически и в try/catch — как хост-часть «речи».
+ * @param {object} ctx - хост-контекст плагина.
+ * @param {unknown} config - конфигурация записи (volatile-поля — ссылки).
+ * @returns {void}
+ */
+function attachTrafficLight(ctx, config) {
+  /** Модуль хост-части твика «светофор». */
+  const TRAFFIC_LIGHT_HOST = './tweaks/traffic-light-host.js';
+
+  /** Загруженный модуль хост-части; null, пока он не загружен. */
+  let host = null;
+  /** Поднята ли хост-часть прямо сейчас. */
+  let enabled = false;
+  /** Очередь переключений: activate и deactivate не накладываются друг на друга. */
+  let queue = Promise.resolve();
+
+  /**
+   * Загрузить модуль хост-части.
+   * @returns {Promise<object | null>} модуль либо null, если он недоступен.
+   */
+  async function ensureHost() {
+    if (host !== null) return host;
+    try {
+      host = await import(TRAFFIC_LIGHT_HOST);
+      return host;
+    } catch (error) {
+      host = null;
+      warn(ctx, `dsh-tweaks: хост-часть твика «светофор» (${TRAFFIC_LIGHT_HOST}) недоступна, твик остаётся выключенным`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Привести хост-часть в соответствие флагам и политике.
+   * @returns {Promise<void>}
+   */
+  async function sync() {
+    const plain = flatten(config);
+    if (plain.trafficLight !== true) {
+      if (enabled) {
+        enabled = false;
+        await host?.deactivate?.();
+      }
+      return;
+    }
+    const module = await ensureHost();
+    if (module === null) return;
+    if (typeof module.activate !== 'function') {
+      warn(ctx, `dsh-tweaks: в хост-части твика «светофор» (${TRAFFIC_LIGHT_HOST}) нет activate`);
+      return;
+    }
+    if (!enabled) {
+      try {
+        module.activate(ctx, plain);
+        enabled = true;
+      } catch (error) {
+        warn(ctx, 'dsh-tweaks: твик «светофор» не включился', error);
+        await module.deactivate?.().catch(() => {});
+        enabled = false;
+        return;
+      }
+      return;
+    }
+    if (typeof module.update === 'function') module.update(plain);
+  }
+
+  /** Поставить переключение в очередь, не роняя его ошибкой. */
+  function schedule() {
+    queue = queue.then(sync).catch((error) => {
+      warn(ctx, 'dsh-tweaks: переключение твика «светофор» прервано', error);
+    });
+  }
+
+  schedule();
+  // Смена только volatile-полей не перезапускает плагин: DSH шлёт это событие
+  // владельцу записи, и по нему хост-часть подхватывает новые значения.
+  if (typeof ctx.on === 'function') ctx.on('loader/volatile-update', () => schedule());
+  // Выгрузка плагина обязана снять слушателей и вернуть удержанные напоминания.
+  const dispose = () => {
+    queue = queue
+      .then(() => (enabled ? host?.deactivate?.() : undefined))
+      .catch((error) => {
+        warn(ctx, 'dsh-tweaks: твик «светофор» не остановлен при выгрузке', error);
+      });
+    // Промис возвращается намеренно: выгрузка ждёт возврат удержанных напоминаний.
+    return queue;
+  };
+  if (typeof ctx.effect === 'function') ctx.effect(() => dispose);
+  else if (typeof ctx.on === 'function') ctx.on('dispose', dispose);
+}
+
+/**
+ * Хост-половина бандла: твики интерфейса живут в браузере, а у твиков «речь»
+ * и «светофор» есть хост-части — их поднимает и снимает этот apply по флагам.
  * @param {object} ctx - хост-контекст плагина.
  * @param {unknown} config - конфигурация записи из DSH.
  * @returns {void}
  */
 export function apply(ctx, config) {
   attachWhisper(ctx, config);
+  attachTrafficLight(ctx, config);
 }

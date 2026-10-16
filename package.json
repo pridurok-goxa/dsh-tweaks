@@ -1,9 +1,9 @@
 {
   "name": "dsh-tweaks",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
-  "description": "Твики DeepSeek Harness: масштаб интерфейса и своё меню по правой кнопке. Каждый включается галочкой на странице пакета.",
+  "description": "Твики DeepSeek Harness: масштаб интерфейса, своё меню по правой кнопке и светофор дорогих часов DeepSeek. Каждый включается галочкой на странице пакета.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -27,7 +27,8 @@
         "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-client-shortcuts",
         "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-client-ui-settings"
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-conversation"
       ]
     }
   },

@@ -920,7 +920,7 @@ check('без службы конфигурации работают дефол�
   const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
   assert.ok(entry, 'форма флагов всё равно зарегистрирована');
   const form = entry.entry.component({ ...entry.entry.options.inject(), view: 'page', t: (key) => key, translate: (key) => key });
-  assert.equal(form.children.filter((child) => child.props?.['data-tweak']).length, 3, 'показывает состояние всех твиков');
+  assert.equal(form.children.filter((child) => child.props?.['data-tweak']).length, 4, 'показывает состояние всех твиков');
   const texts = form.children.map((child) => child.children?.[0]).filter((text) => typeof text === 'string');
   assert.ok(texts.includes('form.unavailable'), `форма говорит о недоступности настроек (${texts.join(' | ')})`);
   for (const row of form.children.filter((child) => child.props?.['data-tweak'])) {
@@ -928,16 +928,16 @@ check('без службы конфигурации работают дефол�
   }
 });
 
-check('реестр знает три твика', () => {
+check('реестр знает четыре твика', () => {
   const env = loadPlugin();
   const ids = formRows(env).map((row) => row.props['data-tweak']);
-  assert.deepEqual(ids, ['zoom', 'contextMenu', 'whisper'], 'в реестре три твика: zoom, contextMenu, whisper');
+  assert.deepEqual(ids, ['zoom', 'contextMenu', 'whisper', 'trafficLight'], 'в реестре четыре твика: zoom, contextMenu, whisper, trafficLight');
 });
 
-check('форма рисует три галочки', () => {
-  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: true } });
+check('форма рисует четыре галочки', () => {
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: true, trafficLight: true } });
   const rows = formRows(env);
-  assert.equal(rows.length, 3, 'по галочке на каждый твик');
+  assert.equal(rows.length, 4, 'по галочке на каждый твик');
   for (const row of rows) {
     const id = row.props['data-tweak'];
     assert.equal(row.children.length, 2, `строка ${id}: подпись и переключатель`);
@@ -951,14 +951,14 @@ check('whisper по умолчанию выключен', () => {
   // Дефолты реестра работают, пока конфигурация не готова: тяжёлый твик не
   // включается сам — иначе он поднимал бы Python-воркер и качал модель весов.
   const env = loadPlugin({ configFormsAvailable: false });
-  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu'], 'активны только твики с defaultOn');
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight'], 'активны только твики с defaultOn');
   const row = formRows(env).find((child) => child.props['data-tweak'] === 'whisper');
   assert.equal(row.children[1].props.checked, false, 'галочка whisper снята');
 });
 
 check('включённый флаг вызывает клиентский activate, выключение снимает твик', () => {
   const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: false } });
-  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu'], 'пока флаг снят, твик не активен');
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight'], 'пока флаг снят, твик не активен');
   /** Ресурсы соседей и формы: переключение whisper их трогать не должно. */
   const resources = () => ({
     keydown: env.listenerCount('keydown'),
@@ -971,11 +971,11 @@ check('включённый флаг вызывает клиентский activ
   const before = resources();
 
   env.setFlags({ whisper: true });
-  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'whisper'], 'флаг включил твик без клиентского кода');
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight', 'whisper'], 'флаг включил твик без клиентского кода');
   assert.deepEqual(resources(), before, 'включение whisper не задело соседей');
 
   env.setFlags({ whisper: false });
-  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu'], 'выключение убрало твик из активных');
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight'], 'выключение убрало твик из активных');
   assert.deepEqual(resources(), before, 'выключение ничего не оставило висеть');
 });
 
@@ -1599,7 +1599,7 @@ checkAsync('форма пишет флаг операцией set с прочи�
   const injected = entry.entry.options.inject();
   const form = entry.entry.component({ ...injected, view: 'page', t: (key) => key, translate: (key) => key });
   const rows = form.children.filter((child) => child.props?.['data-tweak']);
-  assert.equal(rows.length, 3, 'по переключателю на твик');
+  assert.equal(rows.length, 4, 'по переключателю на твик');
   const zoomRow = rows.find((row) => row.props['data-tweak'] === 'zoom');
   const toggle = zoomRow.children[1];
   assert.equal(toggle.props.checked, true, 'галочка стоит по значению флага');
