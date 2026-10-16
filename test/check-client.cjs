@@ -24,12 +24,13 @@ function createStorage() {
 }
 
 /**
- * Мини-React: useState/useEffect достаточны, чтобы индикатор отработал.
- * Эффекты выполняются сразу и возвращают очистку в общий список.
+ * Мини-React: useState/useEffect/useRef/Fragment достаточно, чтобы индикатор
+ * отработал. Эффекты выполняются сразу и возвращают очистку в общий список.
  */
 function createReact(cleanups) {
   return {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+    Fragment: 'fragment',
     useState(initial) {
       const cell = { value: initial };
       return [
@@ -42,6 +43,9 @@ function createReact(cleanups) {
     useEffect(effect) {
       const cleanup = effect();
       if (typeof cleanup === 'function') cleanups.push(cleanup);
+    },
+    useRef(initial) {
+      return { current: initial ?? null };
     },
   };
 }
@@ -246,9 +250,11 @@ function createConfigForms({ flags, status, writable }) {
 }
 
 /** Собрать песочницу с плагином и вернуть наблюдаемые объекты. */
-function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, rejectCode = null, flags = { zoom: true, contextMenu: true }, configFormsAvailable = true, configStatus = 'ready', writable = true, speech = null, legacySpeech = null } = {}) {
+function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, rejectCode = null, flags = { zoom: true, contextMenu: true }, configFormsAvailable = true, configStatus = 'ready', writable = true, speech = null, legacySpeech = null, lightPrefs = null } = {}) {
   const storage = createStorage();
   if (stored !== null) storage.setItem('dsh.ui-zoom.v1', stored);
+  // Настройки светофора живут в браузере: тест задаёт их так же, как пользователь.
+  if (lightPrefs !== null) storage.setItem('dsh.ui-light.settings.v1', JSON.stringify(lightPrefs));
   /** Полоска изменения ширины панели: по ней плагин находит рамку интерфейса. */
   let frameHandle = handle;
   /** Все полоски: плагин ставит их по границам колонок. */
@@ -1748,6 +1754,103 @@ checkAsync('провайдер сообщил об ошибке подготов
   const tree = whisperDetail(env);
   assert.ok(detailText(tree).includes('download timed out'), 'причина из каталога показана');
   detailButton(tree, 'Повторить');
+});
+
+/**
+ * Отрисовать компонент слота в дерево элементов: мини-React не вызывает
+ * компоненты сам, поэтому функцию зовём вручную — так же, как это делает React.
+ * @param {object} row - запись слота из env.slotEntries.
+ * @param {object} [props] - свойства, которые передал бы слот.
+ * @returns {object} дерево элементов.
+ */
+function renderSlot(row, props = {}) {
+  assert.ok(row, 'компонент слота зарегистрирован');
+  const element = row.entry.component(props);
+  return typeof element.type === 'function' ? element.type(element.props) : element;
+}
+
+/**
+ * Тексты, которые индикатор выводит рядом с лампой (подписи и отсчёты).
+ * @param {object} node - дерево элементов.
+ * @returns {string[]} найденные тексты.
+ */
+function indicatorTexts(node) {
+  const texts = [];
+  const walk = (current) => {
+    if (current === null || current === undefined) return;
+    if (typeof current === 'string' || typeof current === 'number') {
+      texts.push(String(current));
+      return;
+    }
+    if (Array.isArray(current)) {
+      for (const item of current) walk(item);
+      return;
+    }
+    if (typeof current !== 'object') return;
+    walk(current.children);
+  };
+  walk(node);
+  return texts;
+}
+
+check('в шапке индикатор без текста, у нижнего режим из настроек устройства', () => {
+  const headerRow = (env) => env.slotEntries.find((row) => row.name === 'conversation.header.leading') ?? null;
+  const dockRow = (env) =>
+    env.slotEntries.find((row) => row.name === 'conversation.composer.dock' && row.entry.options.id === 'traffic-light') ?? null;
+
+  const header = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
+  assert.deepEqual(indicatorTexts(renderSlot(headerRow(header))), [], 'в шапке только лампа, без подписей');
+
+  const expected = { lamp: 0, 'lamp-time': 1, 'lamp-time-label': 2 };
+  for (const [dockMode, count] of Object.entries(expected)) {
+    const env = loadPlugin({
+      flags: { zoom: true, contextMenu: true, trafficLight: true },
+      lightPrefs: { dockMode },
+    });
+    const texts = indicatorTexts(renderSlot(dockRow(env)));
+    assert.equal(texts.length, count, `режим ${dockMode}: подписей рядом с лампой — ${count} (${texts.join(' | ')})`);
+  }
+});
+
+check('настройки твика предлагают режим индикатора и время предупреждения', () => {
+  const env = loadPlugin({
+    flags: { zoom: true, contextMenu: true, trafficLight: true },
+    lightPrefs: { dockMode: 'lamp', warningMinutes: 20 },
+  });
+  const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
+  const form = entry.entry.component({
+    ...entry.entry.options.inject(),
+    view: 'page',
+    t: (key) => key,
+    translate: (key) => key,
+  });
+  const detail = form.children
+    .map((child) => child?.children?.[0])
+    .find((child) => typeof child?.type === 'function' && child.type.name === 'TrafficLightSettings');
+  assert.ok(detail, 'у твика «светофор» есть блок настроек');
+  const tree = detail.type(detail.props);
+  const selects = [];
+  const walk = (node) => {
+    if (node === null || node === undefined || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item);
+      return;
+    }
+    if (node.type === 'select') selects.push(node);
+    walk(node.children);
+  };
+  walk(tree);
+  /** Значения опций выбора: мини-React складывает массив детей одним элементом. */
+  const optionValues = (select) => select.children.flat(Infinity).map((option) => option.props.value);
+  assert.equal(selects.length, 2, 'два выбора: нижний индикатор и предупреждение');
+  assert.equal(selects[0].props.value, 'lamp', 'режим показан из настроек устройства');
+  assert.deepEqual(
+    optionValues(selects[0]),
+    ['lamp', 'lamp-time', 'lamp-time-label'],
+    'три режима нижнего индикатора',
+  );
+  assert.equal(selects[1].props.value, '20', 'выбранное предупреждение показано');
+  assert.deepEqual(optionValues(selects[1]), ['10', '20', '30'], 'предупреждение настраивается на 10, 20 или 30 минут');
 });
 
 // Асинхронные проверки идут после обычных: их список собирается по ходу файла.

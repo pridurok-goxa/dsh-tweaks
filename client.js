@@ -364,21 +364,30 @@ window.__ModuleLoader__.load({
         'tweak.contextMenu': 'Custom right-click menu',
         'tweak.whisper': 'Russian speech recognition',
         'tweak.trafficLight': 'Peak-hours traffic light',
-        'light.offpeak': 'Off-peak price',
-        'light.peak': 'Peak price',
-        'light.warning': 'Peak approaching',
-        'light.untilGreen': 'Peak until {{time}}',
-        'light.untilRed': 'Peak starts at {{time}}',
-        'light.untilPeak': 'Off-peak until {{time}}',
+        'light.offpeak': 'Cheap hours',
+        'light.peak': 'Expensive hours',
+        'light.warning': 'Expensive hours soon',
+        'light.untilGreen': 'Expensive hours until {{time}}',
+        'light.untilRed': 'Expensive hours start at {{time}}',
+        'light.untilPeak': 'Cheap hours until {{time}}',
         'light.countdownH': '{{hours}} h {{minutes}} min',
         'light.countdownM': '{{minutes}} min {{seconds}} s',
         'light.countdownS': '{{seconds}} s',
         'light.clockTitle': '24-hour price clock',
         'light.weekdays': 'Mon–Fri',
-        'light.holidaysNote': 'except Chinese public holidays',
+        'light.holidaysNote': 'Except Chinese public holidays',
+        'light.timeZone': 'Current time zone: {{zone}}',
+        'light.localTimeNote': 'Times are shown in your time zone',
         'light.currentSlot': 'Now: {{time}}',
         'light.slotLabel': '{{time}} · {{label}}',
         'light.pausedHint': 'Automatic work is paused while the light is red',
+        'light.setting.dock': 'Bottom indicator',
+        'light.setting.dock.lamp': 'Indicator only',
+        'light.setting.dock.time': 'Indicator and time left',
+        'light.setting.dock.label': 'Indicator, time and tariff label',
+        'light.setting.warning': 'Warning',
+        'light.setting.warningValue': '{{minutes}} min before',
+        'light.setting.hint': 'These settings live in this browser; each developer keeps their own',
         'form.hint': 'A check box turns the tweak on at once, without a restart.',
         'form.unavailable': 'Settings are unavailable: this deployment has no configuration service.',
         'form.readOnly': 'This deployment stores settings read-only.',
@@ -399,21 +408,30 @@ window.__ModuleLoader__.load({
         'tweak.contextMenu': 'Своё меню по правой кнопке',
         'tweak.whisper': 'Распознавание русской речи',
         'tweak.trafficLight': 'Светофор дорогих часов',
-        'light.offpeak': 'Льготный тариф',
-        'light.peak': 'Дорогой тариф',
-        'light.warning': 'Скоро пик',
-        'light.untilGreen': 'Пик до {{time}}',
-        'light.untilRed': 'Пик начнётся в {{time}}',
-        'light.untilPeak': 'Льготный тариф до {{time}}',
+        'light.offpeak': 'Дешёвые часы',
+        'light.peak': 'Дорогие часы',
+        'light.warning': 'Скоро дорогие часы',
+        'light.untilGreen': 'Дорогие часы до {{time}}',
+        'light.untilRed': 'Дорогие часы начнутся в {{time}}',
+        'light.untilPeak': 'Дешёвые часы до {{time}}',
         'light.countdownH': '{{hours}} ч {{minutes}} мин',
         'light.countdownM': '{{minutes}} мин {{seconds}} с',
         'light.countdownS': '{{seconds}} с',
         'light.clockTitle': 'Часы тарифа на сутки',
         'light.weekdays': 'Пн–Пт',
-        'light.holidaysNote': 'кроме праздников КНР',
+        'light.holidaysNote': 'Кроме праздников КНР',
+        'light.timeZone': 'Текущий часовой пояс: {{zone}}',
+        'light.localTimeNote': 'Время — в вашем часовом поясе',
         'light.currentSlot': 'Сейчас: {{time}}',
         'light.slotLabel': '{{time}} · {{label}}',
         'light.pausedHint': 'Автоматическая работа на паузе, пока горит красный',
+        'light.setting.dock': 'Нижний индикатор',
+        'light.setting.dock.lamp': 'Только индикатор',
+        'light.setting.dock.time': 'Индикатор и оставшееся время',
+        'light.setting.dock.label': 'Индикатор, время и подпись о тарифе',
+        'light.setting.warning': 'Предупреждение',
+        'light.setting.warningValue': 'за {{minutes}} мин',
+        'light.setting.hint': 'Настройки хранятся в этом браузере: у каждого разработчика свои',
         'form.hint': 'Галочка включает твик сразу, без перезапуска.',
         'form.unavailable': 'Настройки недоступны: в этой сборке нет службы конфигурации.',
         'form.readOnly': 'Эта сборка хранит настройки только для чтения.',
@@ -1956,9 +1974,87 @@ window.__ModuleLoader__.load({
     /** Префикс классов твика — как у меню по правой кнопке. */
     const LIGHT_CLASS = 'dsh-ui-light';
 
+    /** Ключ пер-устройственных настроек твика (как у масштаба: своё значение на браузер). */
+    const LIGHT_PREFS_KEY = 'dsh.ui-light.settings.v1';
+
+    /** Режимы нижнего индикатора, по возрастанию подробности. */
+    const LIGHT_DOCK_MODES = ['lamp', 'lamp-time', 'lamp-time-label'];
+
+    /** Варианты предупреждения о приближении пика, в минутах. */
+    const LIGHT_WARNING_CHOICES = [10, 20, 30];
+
     /** Контекст твика и переводчик: ставятся в setup, читаются компонентами. */
     let lightContext = null;
     let lightTranslator = (key) => key;
+
+    /**
+     * Настройки твика на устройство: режим нижнего индикатора и время
+     * предупреждения. Хранятся в localStorage — они только про показ, поэтому
+     * у каждого разработчика свои и хост-половине не нужны.
+     */
+    const lightPrefs = (() => {
+      let storage = null;
+      try {
+        storage = window.localStorage;
+      } catch (_error) {
+        storage = null;
+      }
+      const listeners = new Set();
+
+      /** Прочитать сохранённые настройки, отбросив испорченные значения. */
+      function read() {
+        try {
+          const raw = storage?.getItem(LIGHT_PREFS_KEY);
+          const parsed = raw === null || raw === undefined ? null : JSON.parse(raw);
+          const prefs = {};
+          if (parsed !== null && typeof parsed === 'object') {
+            if (LIGHT_DOCK_MODES.includes(parsed.dockMode)) prefs.dockMode = parsed.dockMode;
+            if (LIGHT_WARNING_CHOICES.includes(parsed.warningMinutes)) {
+              prefs.warningMinutes = parsed.warningMinutes;
+            }
+          }
+          return prefs;
+        } catch (_error) {
+          return {};
+        }
+      }
+
+      let value = read();
+      return {
+        get: () => value,
+        /**
+         * Записать настройку и уведомить подписчиков.
+         * @param {object} patch - поля для записи (undefined снимает поле).
+         * @returns {object} применённые настройки.
+         */
+        set(patch) {
+          const next = { ...value };
+          for (const [key, field] of Object.entries(patch)) {
+            if (field === undefined) delete next[key];
+            else next[key] = field;
+          }
+          value = next;
+          try {
+            storage?.setItem(LIGHT_PREFS_KEY, JSON.stringify(next));
+          } catch (_error) {
+            /* приватный режим или запрет записи: настройка живёт до перезагрузки */
+          }
+          for (const listener of listeners) listener();
+          return value;
+        },
+        subscribe(listener) {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+      };
+    })();
+
+    /** Хук настроек устройства: снимок с подпиской на изменения. */
+    function useLightPrefs() {
+      const [prefs, setPrefs] = React.useState(lightPrefs.get());
+      React.useEffect(() => lightPrefs.subscribe(() => setPrefs(lightPrefs.get())), []);
+      return prefs;
+    }
 
     /** Общее состояние светофора: политика тарифов и подписчики. */
     const lightHub = (() => {
@@ -1978,12 +2074,27 @@ window.__ModuleLoader__.load({
     })();
 
     /**
+     * Политика с учётом настроек устройства.
+     *
+     * Время предупреждения влияет только на показ (хост-половина различает
+     * лишь красный и зелёный), поэтому личная настройка браузера перекрывает
+     * значение из конфигурации профиля.
+     * @returns {object} политика для расчёта индикатора.
+     */
+    function effectivePolicy() {
+      const policy = lightHub.getPolicy();
+      const minutes = lightPrefs.get().warningMinutes;
+      if (minutes === undefined) return policy;
+      return { ...policy, warningMinutes: minutes };
+    }
+
+    /**
      * Статус светофора в мгновение.
      * @param {number} instantMs - миллисекунды эпохи.
      * @returns {object} цвет, границы переходов и отсчёт.
      */
     function lightStatus(instantMs) {
-      const policy = lightHub.getPolicy();
+      const policy = effectivePolicy();
       const light = lightAt(instantMs, policy);
       const nextSwitch = nextSwitchAt(instantMs, policy);
       const nextPeak = nextPeakStartAt(instantMs, policy);
@@ -2028,7 +2139,7 @@ window.__ModuleLoader__.load({
     function todayHourStatuses(nowMs) {
       const now = new Date(nowMs);
       const base = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-      const policy = lightHub.getPolicy();
+      const policy = effectivePolicy();
       const statuses = [];
       for (let hour = 0; hour < 24; hour += 1) {
         const instant = base + hour * 3600000 + 1800000;
@@ -2081,7 +2192,7 @@ window.__ModuleLoader__.load({
      * @returns {object} now — текущее время, running — есть ли работа.
      */
     function useLightTick() {
-      const [now, setNow] = React.useState(() => Date.now());
+      const [now, setNow] = React.useState(Date.now());
       React.useEffect(() => {
         if (typeof window === 'undefined' || typeof window.setInterval !== 'function') return undefined;
         const timer = window.setInterval(() => setNow(Date.now()), LIGHT_TICK_MS);
@@ -2200,15 +2311,24 @@ window.__ModuleLoader__.load({
           key: `dot-${slot.hour}`,
           cx,
           cy,
-          r: isCurrent ? 5 : hover === slot.hour ? 4 : 3,
-          opacity: active ? 1 : 0.4,
-          strokeWidth: isCurrent ? 1.5 : 0,
+          r: isCurrent ? 8 : hover === slot.hour ? 6.5 : 5,
+          opacity: active ? 1 : 0.45,
+          strokeWidth: isCurrent ? 2 : 0,
           style: {
             fill: LIGHT_COLORS[slot.light],
             stroke: isCurrent ? 'var(--dsw-alias-bg-overlay)' : 'none',
-            cursor: 'pointer',
+            pointerEvents: 'none',
             transition: 'r 120ms ease, opacity 120ms ease',
           },
+        }));
+        // Прозрачная зона наведения: попасть курсором в кружочек 5 px трудно.
+        children.push(React.createElement('circle', {
+          key: `hit-${slot.hour}`,
+          cx,
+          cy,
+          r: 9,
+          fill: 'transparent',
+          style: { cursor: 'pointer' },
           onMouseEnter: () => setHover(slot.hour),
           onMouseLeave: () => setHover(null),
         }));
@@ -2231,7 +2351,7 @@ window.__ModuleLoader__.load({
       const { now, running } = useLightTick();
       const status = lightStatus(now);
       const [hover, setHover] = React.useState(null);
-      const [position, setPosition] = React.useState(() => panelPosition(anchorRef, null, variant === 'dock'));
+      const [position, setPosition] = React.useState(panelPosition(anchorRef, null, variant === 'dock'));
       const panelRef = React.useRef(null);
       React.useEffect(() => {
         setPosition(panelPosition(anchorRef, panelRef, variant === 'dock'));
@@ -2256,7 +2376,7 @@ window.__ModuleLoader__.load({
       }, [anchorRef, onClose]);
       const t = lightTranslator;
       const target = lightCountdownTarget(status);
-      const policy = lightHub.getPolicy();
+      const policy = effectivePolicy();
       const windowsText = policy.peakWindows
         .map((window) => localWindowLabel(window, policy, now))
         .join(' · ');
@@ -2279,13 +2399,17 @@ window.__ModuleLoader__.load({
       },
         React.createElement('div', { className: `${LIGHT_CLASS}-head` },
           React.createElement('span', { className: `${LIGHT_CLASS}-lamp`, style: { background: LIGHT_COLORS[status.light] } }),
-          React.createElement('span', null, t(lightLabelKey(status.light))),
+          React.createElement('span', { className: `${LIGHT_CLASS}-title` }, t(lightLabelKey(status.light))),
           countdown === '' ? null : React.createElement('span', { className: `${LIGHT_CLASS}-count` }, countdown),
         ),
         React.createElement(TrafficClockChart, { now, hover, setHover }),
         React.createElement('div', { className: `${LIGHT_CLASS}-slot` }, slotLine),
-        React.createElement('div', { className: `${LIGHT_CLASS}-rule` },
-          `${t('light.weekdays')} · ${windowsText} · ${t('light.holidaysNote')} · ${localTimeZone()}`),
+        React.createElement('div', { className: `${LIGHT_CLASS}-rules` },
+          React.createElement('div', { key: 'days' }, `${t('light.weekdays')} · ${windowsText}`),
+          React.createElement('div', { key: 'holidays' }, t('light.holidaysNote')),
+          React.createElement('div', { key: 'zone' }, fillText(t('light.timeZone'), { zone: localTimeZone() })),
+          React.createElement('div', { key: 'note', className: `${LIGHT_CLASS}-note` }, t('light.localTimeNote')),
+        ),
         status.light === 'red' && running
           ? React.createElement('div', { className: `${LIGHT_CLASS}-paused` }, t('light.pausedHint'))
           : null,
@@ -2300,6 +2424,7 @@ window.__ModuleLoader__.load({
      */
     function TrafficLightIndicator({ variant }) {
       const { now, running } = useLightTick();
+      const prefs = useLightPrefs();
       const status = lightStatus(now);
       const [open, setOpen] = React.useState(false);
       const anchorRef = React.useRef(null);
@@ -2311,6 +2436,8 @@ window.__ModuleLoader__.load({
       const label = target === null
         ? t(lightLabelKey(status.light))
         : fillText(t(lightCountdownKey(status)), { time: formatClock(target) });
+      // В шапке индикатор всегда без текста; у нижнего режим выбирает разработчик.
+      const dockMode = variant === 'dock' ? prefs.dockMode ?? 'lamp-time' : 'lamp';
       const dot = React.createElement('span', {
         className: `${LIGHT_CLASS}-lamp`,
         style: {
@@ -2335,13 +2462,11 @@ window.__ModuleLoader__.load({
           ]
         : null;
       const content = [dot, waves];
-      if (variant === 'dock') {
-        content.push(React.createElement('span', { key: 'label', className: `${LIGHT_CLASS}-label` },
-          t(lightLabelKey(status.light)),
-          target === null
-            ? null
-            : React.createElement('span', { className: `${LIGHT_CLASS}-count` }, ` · ${formatCountdownText(target - now, t)}`),
-        ));
+      if (dockMode === 'lamp-time-label') {
+        content.push(React.createElement('span', { key: 'label', className: `${LIGHT_CLASS}-label` }, t(lightLabelKey(status.light))));
+      }
+      if (dockMode !== 'lamp' && target !== null) {
+        content.push(React.createElement('span', { key: 'time', className: `${LIGHT_CLASS}-count` }, formatCountdownText(target - now, t)));
       }
       return React.createElement(React.Fragment, null,
         React.createElement('button', {
@@ -2360,18 +2485,85 @@ window.__ModuleLoader__.load({
       );
     }
 
-    /** Строка-превью на странице пакета рядом с галочкой твика. */
-    function TrafficLightDetail() {
+    /**
+     * Настройки твика на странице пакета: превью, режим нижнего индикатора и
+     * время предупреждения. Настройки хранятся в браузере, поэтому у каждого
+     * разработчика свои и попадают в интерфейс без перезапуска.
+     * @param {object} props - переводчики формы флагов (t, translate).
+     * @returns {object} превью и два выбора.
+     */
+    function TrafficLightSettings({ t, translate }) {
+      const prefs = useLightPrefs();
       const { now } = useLightTick();
       const status = lightStatus(now);
       const target = lightCountdownTarget(status);
-      const t = lightTranslator;
-      const text = target === null
-        ? t(lightLabelKey(status.light))
-        : `${t(lightLabelKey(status.light))} · ${fillText(t(lightCountdownKey(status)), { time: formatClock(target) })}`;
-      return React.createElement('div', { className: `${LIGHT_CLASS}-detail` },
-        React.createElement('span', { className: `${LIGHT_CLASS}-lamp`, style: { background: LIGHT_COLORS[status.light] } }),
-        React.createElement('span', null, text),
+
+      /**
+       * Подпись по ключу словаря: сначала штатный переводчик, затем словарь твика.
+       * @param {string} key - ключ словаря.
+       * @param {object} [values] - подстановки в шаблон.
+       * @returns {string} подпись.
+       */
+      const copy = (key, values) => {
+        const translated = typeof t === 'function' ? t(key) : key;
+        const text = translated !== key ? translated : typeof translate === 'function' ? translate(key) : key;
+        return values === undefined ? text : fillText(text, values);
+      };
+
+      /**
+       * Выпадающий список настройки.
+       * @param {object} options - value, options и onChange.
+       * @returns {object} элемент select.
+       */
+      const choice = ({ value, options, onChange }) => React.createElement('select', {
+        className: `${LIGHT_CLASS}-select`,
+        value: String(value),
+        onChange: (event) => onChange(event.target.value),
+      }, options.map((option) => React.createElement('option', {
+        key: String(option.value),
+        value: String(option.value),
+      }, option.label)));
+
+      const dockMode = prefs.dockMode ?? 'lamp-time';
+      // Показываем действующее значение: личную настройку, а без неё — значение профиля.
+      const profileWarning = lightHub.getPolicy().warningMinutes;
+      const currentWarning = prefs.warningMinutes ?? profileWarning;
+      const warningChoices = LIGHT_WARNING_CHOICES.includes(currentWarning)
+        ? LIGHT_WARNING_CHOICES
+        : [...LIGHT_WARNING_CHOICES, currentWarning].sort((left, right) => left - right);
+      const preview = target === null
+        ? copy(lightLabelKey(status.light))
+        : `${copy(lightLabelKey(status.light))} · ${fillText(copy(lightCountdownKey(status)), { time: formatClock(target) })}`;
+
+      return React.createElement('div', { className: `${LIGHT_CLASS}-settings` },
+        React.createElement('div', { className: `${LIGHT_CLASS}-detail` },
+          React.createElement('span', { className: `${LIGHT_CLASS}-lamp`, style: { background: LIGHT_COLORS[status.light] } }),
+          React.createElement('span', null, preview),
+        ),
+        React.createElement('label', { className: `${LIGHT_CLASS}-field` },
+          React.createElement('span', null, copy('light.setting.dock')),
+          choice({
+            value: dockMode,
+            options: [
+              { value: 'lamp', label: copy('light.setting.dock.lamp') },
+              { value: 'lamp-time', label: copy('light.setting.dock.time') },
+              { value: 'lamp-time-label', label: copy('light.setting.dock.label') },
+            ],
+            onChange: (value) => lightPrefs.set({ dockMode: value }),
+          }),
+        ),
+        React.createElement('label', { className: `${LIGHT_CLASS}-field` },
+          React.createElement('span', null, copy('light.setting.warning')),
+          choice({
+            value: currentWarning,
+            options: warningChoices.map((minutes) => ({
+              value: minutes,
+              label: fillText(copy('light.setting.warningValue'), { minutes }),
+            })),
+            onChange: (value) => lightPrefs.set({ warningMinutes: Number(value) }),
+          }),
+        ),
+        React.createElement('p', { className: `${LIGHT_CLASS}-hint` }, copy('light.setting.hint')),
       );
     }
 
@@ -2386,17 +2578,24 @@ window.__ModuleLoader__.load({
       `.${LIGHT_CLASS}-wave{box-sizing:border-box;position:absolute;inset:0;border-radius:999px;border-width:2px;border-style:solid;pointer-events:none;animation:${LIGHT_CLASS}-wave 2s ease-out infinite}`,
       `.${LIGHT_CLASS}-label{white-space:nowrap}`,
       `.${LIGHT_CLASS}-count{color:var(--dsw-alias-label-tertiary)}`,
-      `.${LIGHT_CLASS}-panel{box-sizing:border-box;position:fixed;z-index:2147483000;width:264px;padding:12px;`,
+      `.${LIGHT_CLASS}-panel{box-sizing:border-box;position:fixed;z-index:2147483000;width:272px;padding:12px;`,
       'border:0.5px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-overlay);',
-      'box-shadow:0 8px 28px rgba(0,0,0,.42);color:var(--dsw-alias-label-primary);font:12px/18px system-ui,sans-serif}',
+      'box-shadow:0 8px 28px rgba(0,0,0,.42);color:var(--dsw-alias-label-primary);font:12px/18px system-ui,sans-serif;',
+      'white-space:normal;overflow-wrap:anywhere}',
       `.${LIGHT_CLASS}-head{display:flex;align-items:center;gap:6px;margin-bottom:10px;font-weight:500}`,
       `.${LIGHT_CLASS}-head .${LIGHT_CLASS}-lamp{width:10px;height:10px}`,
-      `.${LIGHT_CLASS}-head .${LIGHT_CLASS}-count{margin-left:auto;font-weight:400}`,
+      `.${LIGHT_CLASS}-head .${LIGHT_CLASS}-count{margin-left:auto;font-weight:400;white-space:nowrap}`,
       `.${LIGHT_CLASS}-slot{text-align:center;color:var(--dsw-alias-label-secondary);margin-top:6px}`,
-      `.${LIGHT_CLASS}-rule{color:var(--dsw-alias-label-tertiary);margin-top:8px;text-align:center}`,
+      `.${LIGHT_CLASS}-rules{color:var(--dsw-alias-label-tertiary);margin-top:10px;text-align:center;line-height:17px;display:flex;flex-direction:column;gap:2px}`,
+      `.${LIGHT_CLASS}-note{opacity:.8}`,
       `.${LIGHT_CLASS}-paused{color:var(--dsw-alias-state-business-warning,var(--dsw-alias-label-secondary));margin-top:8px;text-align:center}`,
       `.${LIGHT_CLASS}-detail{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary);font:12px/18px system-ui,sans-serif}`,
       `.${LIGHT_CLASS}-detail .${LIGHT_CLASS}-lamp{width:10px;height:10px}`,
+      `.${LIGHT_CLASS}-settings{display:flex;flex-direction:column;gap:8px;color:var(--dsw-alias-label-secondary);font:12px/18px system-ui,sans-serif}`,
+      `.${LIGHT_CLASS}-field{display:flex;align-items:center;justify-content:space-between;gap:10px}`,
+      `.${LIGHT_CLASS}-select{max-width:200px;padding:2px 6px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:6px;`,
+      'background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit}',
+      `.${LIGHT_CLASS}-hint{margin:0;color:var(--dsw-alias-label-tertiary)}`,
       `@keyframes ${LIGHT_CLASS}-blink{0%{opacity:1}50%{opacity:.35}100%{opacity:1}}`,
       `@keyframes ${LIGHT_CLASS}-wave{0%{transform:scale(1);opacity:.9}70%{transform:scale(2.4);opacity:0}100%{transform:scale(2.4);opacity:0}}`,
       '@media (prefers-reduced-motion: reduce){'
@@ -2520,8 +2719,8 @@ window.__ModuleLoader__.load({
         refresh({ value }) {
           lightHub.setConfig(value);
         },
-        renderDetail() {
-          return React.createElement(TrafficLightDetail);
+        renderDetail(props) {
+          return React.createElement(TrafficLightSettings, props);
         },
       },
     };
@@ -2707,7 +2906,7 @@ window.__ModuleLoader__.load({
         // Твик может показать рядом со своим переключателем дополнительную строку:
         // например, «речь» — кнопку загрузки модели с прогрессом.
         if (checked && typeof tweak.renderDetail === 'function') {
-          rows.push(React.createElement('div', { key: `${id}-detail` }, tweak.renderDetail()));
+          rows.push(React.createElement('div', { key: `${id}-detail` }, tweak.renderDetail({ controller, t, translate })));
         }
       }
       const notices = [React.createElement('p', { key: 'hint', style: FORM_NOTICE_STYLE }, copy('form.hint'))];
