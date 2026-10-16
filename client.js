@@ -2315,10 +2315,10 @@ window.__ModuleLoader__.load({
      * Горизонтальная шкала суток: 24 кружочка от 0 до 24 часов в местном
      * времени. Красные — дорогие часы, зелёные — дешёвые, включая выходные и
      * праздники целиком. Жёлтых кружочков на шкале нет.
-     * @param {object} props - now, hover, setHover.
+     * @param {object} props - now, hover, setHover, showHourLabels (подписи часов).
      * @returns {object} SVG-шкала.
      */
-    function TrafficHourStrip({ now, hover, setHover }) {
+    function TrafficHourStrip({ now, hover, setHover, showHourLabels }) {
       const statuses = todayHourStatuses(now);
       const currentHour = new Date(now).getHours();
       const xOf = (hour) => STRIP_PAD + hour * STRIP_STEP;
@@ -2352,7 +2352,8 @@ window.__ModuleLoader__.load({
       // Подписи часов под каждым кружочком: видны постоянно и не зависят от
       // наведения. Часы, открывающие зелёный диапазон (после дорогого окна или
       // с начала суток), выделены жирнее — по ним читается структура дня.
-      for (const slot of statuses) {
+      // У верхнего индикатора подписей нет: он остаётся голой шкалой.
+      for (const slot of showHourLabels === false ? [] : statuses) {
         const startsGreen = !slot.peak && (slot.hour === 0 || statuses[slot.hour - 1].peak);
         children.push(React.createElement('text', {
           key: `mark-${slot.hour}`,
@@ -2497,7 +2498,7 @@ window.__ModuleLoader__.load({
           React.createElement('span', { className: `${LIGHT_CLASS}-title` }, t(lightLabelKey(status.light))),
           countdown === '' ? null : React.createElement('span', { className: `${LIGHT_CLASS}-count` }, countdown),
         ),
-        React.createElement(TrafficHourStrip, { now, hover, setHover }),
+        React.createElement(TrafficHourStrip, { now, hover, setHover, showHourLabels: variant !== 'header' }),
         React.createElement('div', { className: `${LIGHT_CLASS}-slot` }, slotLine),
         React.createElement('div', { className: `${LIGHT_CLASS}-rules` },
           target === null
