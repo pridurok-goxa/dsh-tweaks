@@ -1835,18 +1835,16 @@ check('в шапке индикатор без текста, у нижнего �
       walkNodes(node.children);
     };
     walkNodes(tree);
-    assert.equal(
-      lampText.length === 0,
-      dockMode === 'time',
-      `режим ${dockMode}: ${dockMode === 'time' ? 'лампы нет, только время' : 'лампа на месте'}`,
-    );
+    assert.equal(lampText.length, 1, `режим ${dockMode}: лампа на месте`);
   }
 
-  // Настройка по умолчанию — «Только время»: без сохранённого значения голая шкала времени.
+  // Настройка по умолчанию — «Только время»: лампа и голый отсчёт без «ещё» и адреса.
   const fresh = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
-  const freshTexts = indicatorTexts(renderSlot(dockRow(fresh)));
+  const freshTree = renderSlot(dockRow(fresh));
+  const freshTexts = indicatorTexts(freshTree);
   assert.equal(freshTexts.length, 1, 'по умолчанию показывается только отсчёт');
   assert.match(freshTexts[0], /^\d+ ч \d{2} мин$/, 'по умолчанию — голое время, без «ещё» и адреса');
+  assert.match(JSON.stringify(freshTree), /-lamp/, 'в варианте «только время» лампа тоже показывается');
 });
 
 check('настройки твика предлагают режим индикатора и время предупреждения', () => {

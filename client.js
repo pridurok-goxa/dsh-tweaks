@@ -2574,17 +2574,13 @@ window.__ModuleLoader__.load({
             }),
           ]
         : null;
-      const content = [];
-      // В варианте «только время» лампы нет — остаётся один отсчёт.
-      if (dockMode !== 'time') {
-        content.push(dot, waves);
-      }
+      const content = [dot, waves];
       if (dockMode === 'lamp-time-label') {
         content.push(React.createElement('span', { key: 'label', className: `${LIGHT_CLASS}-label` }, t(lightLabelKey(status.light))));
       }
       if (dockMode !== 'lamp' && target !== null) {
-        // «Только время» — голый отсчёт; остальные варианты показывают и адрес:
-        // «ещё 60 ч 12 мин · до пн 04:00».
+        // Вариант «только время» — лампа и голый отсчёт; остальные показывают
+        // ещё и адрес: «ещё 60 ч 12 мин · до пн 04:00».
         const text = dockMode === 'time'
           ? formatCountdownText(target - now, t)
           : fillText(t('light.leftTo'), {
@@ -2593,8 +2589,6 @@ window.__ModuleLoader__.load({
             });
         content.push(React.createElement('span', { key: 'time', className: `${LIGHT_CLASS}-count` }, text));
       }
-      // Пустой кнопки быть не должно: без отсчёта возвращаем лампу.
-      if (content.length === 0) content.push(dot);
       return React.createElement(React.Fragment, null,
         React.createElement('button', {
           type: 'button',
