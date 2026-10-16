@@ -2175,7 +2175,15 @@ window.__ModuleLoader__.load({
       return `${formatClock(startMs)}–${formatClock(endMs)}`;
     }
 
-    /** Цвета 24 местных часов сегодняшних суток по серединам часов. */
+    /**
+     * Статусы 24 местных часов сегодняшних суток по серединам часов.
+     *
+     * Считается именно пик, а не цвет светофора: на шкале нет жёлтых кружочков —
+     * жёлтым мигает только лампа, предупреждая о приближении дорогого времени.
+     * Выходные и праздники целиком не пик, поэтому вся полоска зелёная.
+     * @param {number} nowMs - текущий момент.
+     * @returns {Array<{hour: number, peak: boolean}>} статусы часов.
+     */
     function todayHourStatuses(nowMs) {
       const now = new Date(nowMs);
       const base = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -2183,7 +2191,7 @@ window.__ModuleLoader__.load({
       const statuses = [];
       for (let hour = 0; hour < 24; hour += 1) {
         const instant = base + hour * 3600000 + 1800000;
-        statuses.push({ hour, light: lightAt(instant, policy) });
+        statuses.push({ hour, peak: isPeakAt(instant, policy) });
       }
       return statuses;
     }
@@ -2296,109 +2304,95 @@ window.__ModuleLoader__.load({
       return { left, top };
     }
 
-    /** Геометрия циферблата. */
-    const CLOCK_SIZE = 176;
-    const CLOCK_CENTER = CLOCK_SIZE / 2;
-    const CLOCK_RADIUS = 76;
-    const CLOCK_HOUR_MARKERS = [0, 6, 12, 18];
+    /** Геометрия горизонтальной шкалы часов: 24 кружочка от 0 до 24. */
+    const STRIP_WIDTH = 316;
+    const STRIP_HEIGHT = 46;
+    const STRIP_PAD = 8;
+    const STRIP_STEP = (STRIP_WIDTH - 2 * STRIP_PAD) / 23;
+    const STRIP_Y = 20;
+    const STRIP_HOUR_MARKS = [0, 6, 12, 18];
 
     /**
-     * Интерактивный циферблат: 24 цветных кружочка по местным часам,
-     * стрелка текущего времени и подсветка текущего слота.
+     * Горизонтальная шкала суток: 24 кружочка от 0 до 24 часов в местном
+     * времени. Красные — дорогие часы, зелёные — дешёвые, включая выходные и
+     * праздники целиком. Жёлтых кружочков на шкале нет.
      * @param {object} props - now, hover, setHover.
-     * @returns {object} SVG-циферблат.
+     * @returns {object} SVG-шкала.
      */
-    function TrafficClockChart({ now, hover, setHover }) {
+    function TrafficHourStrip({ now, hover, setHover }) {
       const statuses = todayHourStatuses(now);
-      const date = new Date(now);
-      const currentHour = date.getHours();
-      const pointOf = (hour, fraction, radius) => {
-        const angle = ((hour + fraction) / 24) * 2 * Math.PI - Math.PI / 2;
-        return [CLOCK_CENTER + radius * Math.cos(angle), CLOCK_CENTER + radius * Math.sin(angle)];
-      };
+      const currentHour = new Date(now).getHours();
+      const xOf = (hour) => STRIP_PAD + hour * STRIP_STEP;
       /**
-       * Час под курсором: угол от центра, а не отдельные кружочки. Так зона
-       * наведения — весь циферблат, между кружочками нет пробелов, и подсветка
-       * не сбрасывается, пока курсор остаётся внутри.
+       * Час под курсором: ближайший кружок к позиции указателя. Зона наведения —
+       * вся шкала, поэтому между кружочками нет пробелов и подсветка не мигает.
        * @param {object} event - событие движения мыши.
        * @returns {void}
        */
-      const onDialMove = (event) => {
+      const onStripMove = (event) => {
         const rect = typeof event?.currentTarget?.getBoundingClientRect === 'function'
           ? event.currentTarget.getBoundingClientRect()
           : null;
         if (rect === null || !Number.isFinite(rect.width) || rect.width <= 0) return;
-        const scale = rect.width / CLOCK_SIZE;
-        const x = (event.clientX - rect.left) / scale - CLOCK_CENTER;
-        const y = (event.clientY - rect.top) / scale - CLOCK_CENTER;
-        // 0 — на 12 часах, дальше по часовой стрелке.
-        const turn = (Math.atan2(y, x) + Math.PI / 2 + 2 * Math.PI) % (2 * Math.PI);
-        setHover(Math.floor((turn / (2 * Math.PI)) * 24) % 24);
+        const scale = rect.width / STRIP_WIDTH;
+        const x = (event.clientX - rect.left) / scale - STRIP_PAD;
+        setHover(Math.max(0, Math.min(23, Math.round(x / STRIP_STEP))));
       };
-      const children = [];
-      // Стрелка текущего времени.
-      const [handX, handY] = pointOf(currentHour, (date.getMinutes() + date.getSeconds() / 60) / 60, CLOCK_RADIUS - 16);
-      children.push(React.createElement('line', {
-        key: 'hand',
-        x1: CLOCK_CENTER,
-        y1: CLOCK_CENTER,
-        x2: handX,
-        y2: handY,
-        strokeWidth: 1.5,
-        strokeLinecap: 'round',
-        style: { stroke: 'var(--dsw-alias-label-primary)', pointerEvents: 'none' },
-      }));
-      // Отметки 0/6/12/18 для ориентации.
-      for (const hour of CLOCK_HOUR_MARKERS) {
-        const [x, y] = pointOf(hour, 0, CLOCK_RADIUS + 11);
+      const children = [
+        // Прозрачная подложка: она и есть зона наведения на всю шкалу.
+        React.createElement('rect', {
+          key: 'strip',
+          x: 0,
+          y: 0,
+          width: STRIP_WIDTH,
+          height: STRIP_HEIGHT,
+          fill: 'transparent',
+          onMouseMove: onStripMove,
+        }),
+      ];
+      // Отметки часов под шкалой для ориентации.
+      for (const hour of STRIP_HOUR_MARKS) {
         children.push(React.createElement('text', {
           key: `mark-${hour}`,
-          x,
-          y,
+          x: xOf(hour),
+          y: STRIP_HEIGHT - 5,
           textAnchor: 'middle',
-          dominantBaseline: 'middle',
           fontSize: 9,
           style: { fill: 'var(--dsw-alias-label-tertiary)', userSelect: 'none', pointerEvents: 'none' },
         }, twoDigits(hour)));
       }
-      // Кружочки часов; текущий час — крупнее и с ободком.
+      // Кружочки часов: красный — дорого, зелёный — дёшево.
       for (const slot of statuses) {
         const isCurrent = slot.hour === currentHour;
         const active = hover === slot.hour || hover === null || isCurrent;
-        const [cx, cy] = pointOf(slot.hour, 0.5, CLOCK_RADIUS);
         children.push(React.createElement('circle', {
           key: `dot-${slot.hour}`,
-          cx,
-          cy,
-          r: isCurrent ? 8 : hover === slot.hour ? 6.5 : 5,
+          cx: xOf(slot.hour),
+          cy: STRIP_Y,
+          r: isCurrent ? 6.5 : hover === slot.hour ? 6 : 4.6,
           opacity: active ? 1 : 0.4,
           strokeWidth: isCurrent ? 2 : 0,
           style: {
-            fill: LIGHT_COLORS[slot.light],
+            fill: slot.peak ? LIGHT_COLORS.red : LIGHT_COLORS.green,
             stroke: isCurrent ? 'var(--dsw-alias-bg-overlay)' : 'none',
             pointerEvents: 'none',
             transition: 'r 120ms ease, opacity 120ms ease',
           },
         }));
       }
-      // Прозрачная подложка: зона наведения — весь циферблат, а не кружочки.
-      children.unshift(React.createElement('rect', {
-        key: 'dial',
-        x: 0,
-        y: 0,
-        width: CLOCK_SIZE,
-        height: CLOCK_SIZE,
-        fill: 'transparent',
-        onMouseMove: onDialMove,
+      // Указатель «сейчас» над текущим часом.
+      children.push(React.createElement('path', {
+        key: 'now',
+        d: `M ${xOf(currentHour) - 3.5} ${STRIP_Y - 11} L ${xOf(currentHour) + 3.5} ${STRIP_Y - 11} L ${xOf(currentHour)} ${STRIP_Y - 5.5} Z`,
+        style: { fill: 'var(--dsw-alias-label-primary)', pointerEvents: 'none' },
       }));
       return React.createElement('svg', {
-        viewBox: `0 0 ${CLOCK_SIZE} ${CLOCK_SIZE}`,
-        width: CLOCK_SIZE,
-        height: CLOCK_SIZE,
-        style: { display: 'block', margin: '0 auto' },
+        viewBox: `0 0 ${STRIP_WIDTH} ${STRIP_HEIGHT}`,
+        width: '100%',
+        height: STRIP_HEIGHT,
+        style: { display: 'block' },
         'aria-hidden': true,
-        // Подсветка снимается только на выходе с циферблата, а не на каждом
-        // кружочке: иначе на переходах между ними циферблат мигал яркостью.
+        // Подсветка снимается только при уходе курсора со шкалы.
         onMouseLeave: () => setHover(null),
       }, children);
     }
@@ -2448,7 +2442,7 @@ window.__ModuleLoader__.load({
         ? fillText(t('light.currentSlot'), { time: formatClock(now) })
         : fillText(t('light.slotLabel'), {
             time: `${twoDigits(hovered.hour)}:00–${twoDigits((hovered.hour + 1) % 24)}:00`,
-            label: t(lightLabelKey(hovered.light)),
+            label: t(hovered.peak ? 'light.peak' : 'light.offpeak'),
           });
       return React.createElement('div', {
         ref: panelRef,
@@ -2463,7 +2457,7 @@ window.__ModuleLoader__.load({
           React.createElement('span', { className: `${LIGHT_CLASS}-title` }, t(lightLabelKey(status.light))),
           countdown === '' ? null : React.createElement('span', { className: `${LIGHT_CLASS}-count` }, countdown),
         ),
-        React.createElement(TrafficClockChart, { now, hover, setHover }),
+        React.createElement(TrafficHourStrip, { now, hover, setHover }),
         React.createElement('div', { className: `${LIGHT_CLASS}-slot` }, slotLine),
         React.createElement('div', { className: `${LIGHT_CLASS}-rules` },
           target === null
@@ -2646,7 +2640,7 @@ window.__ModuleLoader__.load({
       `.${LIGHT_CLASS}-wave{box-sizing:border-box;position:absolute;inset:0;border-radius:999px;border-width:2px;border-style:solid;pointer-events:none;animation:${LIGHT_CLASS}-wave 2s ease-out infinite}`,
       `.${LIGHT_CLASS}-label{white-space:nowrap}`,
       `.${LIGHT_CLASS}-count{color:var(--dsw-alias-label-tertiary)}`,
-      `.${LIGHT_CLASS}-panel{box-sizing:border-box;position:fixed;z-index:2147483000;width:272px;padding:12px;`,
+      `.${LIGHT_CLASS}-panel{box-sizing:border-box;position:fixed;z-index:2147483000;width:340px;padding:12px;`,
       'border:0;border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-menu);',
       'backdrop-filter:var(--dsw-menu-backdrop-filter);-webkit-backdrop-filter:var(--dsw-menu-backdrop-filter);',
       '--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent);',

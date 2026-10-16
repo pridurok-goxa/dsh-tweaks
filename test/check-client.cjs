@@ -1869,6 +1869,25 @@ check('панель светофора открывается только по 
   assert.equal(tree.children[1], null, 'до нажатия панель закрыта');
 });
 
+check('шкала часов — горизонтальная полоска из красных и зелёных кружочков', () => {
+  const css = fs.readFileSync(CLIENT, 'utf8');
+  const stripStart = css.indexOf('function TrafficHourStrip');
+  const stripEnd = css.indexOf('function TrafficClockPanel');
+  assert.ok(stripStart > 0 && stripEnd > stripStart, 'шкала собрана отдельным компонентом');
+  const strip = css.slice(stripStart, stripEnd);
+  const statuses = css.slice(css.indexOf('function todayHourStatuses'), css.indexOf('function lightLabelKey'));
+  assert.match(statuses, /hour < 24; hour \+= 1/, 'на шкале 24 часа');
+  assert.match(statuses, /isPeakAt\(/, 'статус часа — пик или не пик');
+  assert.doesNotMatch(strip, /lightAt\(/, 'на шкале нет жёлтого: берётся пик, а не цвет светофора');
+  assert.match(strip, /LIGHT_COLORS\.red/, 'дорогие часы — красные');
+  assert.match(strip, /LIGHT_COLORS\.green/, 'дешёвые часы — зелёные');
+  assert.doesNotMatch(strip, /LIGHT_COLORS\.yellow/, 'жёлтых кружочков на шкале нет');
+  const sizes = /const STRIP_WIDTH = (\d+);[\s\S]*?const STRIP_HEIGHT = (\d+);/.exec(css);
+  assert.ok(sizes !== null, 'геометрия полоски объявлена');
+  assert.ok(Number(sizes[1]) > Number(sizes[2]), 'полоска шире, чем выше: она горизонтальная');
+  assert.match(strip, /onMouseMove/, 'час определяется по позиции курсора на всей полоске');
+});
+
 // Асинхронные проверки идут после обычных: их список собирается по ходу файла.
 Promise.all(
   asyncChecks.map(async ({ name, fn }) => {
