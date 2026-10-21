@@ -364,6 +364,12 @@ window.__ModuleLoader__.load({
         'tweak.contextMenu': 'Custom right-click menu',
         'tweak.whisper': 'Russian speech recognition',
         'tweak.trafficLight': 'Peak-hours traffic light',
+        'tweak.imageModelFallback': 'Send images with a vision model',
+        'imageFallback.text': 'This model does not support images. Send this message with a model that does.',
+        'imageFallback.actionPrefix': 'Send with',
+        'imageFallback.busy': 'Switching model…',
+        'imageFallback.errorPrefix': 'Model switch failed:',
+        'imageFallback.dismiss': 'Dismiss',
         'light.offpeak': 'Cheap hours',
         'light.peak': 'Expensive hours',
         'light.warning': 'Expensive hours soon',
@@ -412,6 +418,12 @@ window.__ModuleLoader__.load({
         'tweak.contextMenu': 'Своё меню по правой кнопке',
         'tweak.whisper': 'Распознавание русской речи',
         'tweak.trafficLight': 'Светофор дорогих часов',
+        'tweak.imageModelFallback': 'Отправка картинок через модель со зрением',
+        'imageFallback.text': 'Эта модель не видит изображения. Отправить сообщение моделью, которая их видит?',
+        'imageFallback.actionPrefix': 'Отправить с',
+        'imageFallback.busy': 'Меняю модель…',
+        'imageFallback.errorPrefix': 'Не удалось сменить модель:',
+        'imageFallback.dismiss': 'Скрыть',
         'light.offpeak': 'Дешёвые часы',
         'light.peak': 'Дорогие часы',
         'light.warning': 'Скоро дорогие часы',
@@ -2539,29 +2551,35 @@ window.__ModuleLoader__.load({
       // В шапке индикатор всегда без текста; у нижнего режим выбирает разработчик.
       const dockMode = variant === 'dock' ? prefs.dockMode ?? 'time' : 'lamp';
       const dot = React.createElement('span', {
+        key: 'lamp',
         className: `${LIGHT_CLASS}-lamp`,
         style: {
           background: color,
-          animation: blink ? `${LIGHT_CLASS}-blink 1s steps(2, start) infinite` : undefined,
+          // На красном при работающих сессиях лампа дышит в такт волне.
+          animation: blink
+            ? `${LIGHT_CLASS}-blink 1s steps(2, start) infinite`
+            : pulse
+              ? `${LIGHT_CLASS}-pulse 2s ease-in-out infinite`
+              : undefined,
         },
       });
-      const waves = pulse
-        ? [
-            React.createElement('span', {
-              key: 'wave-a',
+      // Волна живёт в тесном контейнере лампы: её радиус ограничен 2.6 диаметра,
+      // а не растягивается на кнопку или экран (у кнопки нет position:relative).
+      const lampNode = React.createElement('span', {
+        key: 'lamp-wrap',
+        className: `${LIGHT_CLASS}-lamp-wrap`,
+      },
+        dot,
+        pulse
+          ? React.createElement('span', {
+              key: 'wave',
               className: `${LIGHT_CLASS}-wave`,
               style: { borderColor: color },
               'aria-hidden': true,
-            }),
-            React.createElement('span', {
-              key: 'wave-b',
-              className: `${LIGHT_CLASS}-wave`,
-              style: { borderColor: color, animationDelay: '1s' },
-              'aria-hidden': true,
-            }),
-          ]
-        : null;
-      const content = [dot, waves];
+            })
+          : null,
+      );
+      const content = [lampNode];
       if (dockMode === 'lamp-time-label') {
         content.push(React.createElement('span', { key: 'label', className: `${LIGHT_CLASS}-label` }, t(lightLabelKey(status.light))));
       }
@@ -2684,8 +2702,10 @@ window.__ModuleLoader__.load({
       'font:12px/18px system-ui,sans-serif;font-variant-numeric:tabular-nums}',
       `.${LIGHT_CLASS}-button:hover{background:var(--dsw-alias-interactive-bg-hover)}`,
       `.${LIGHT_CLASS}-button:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:0}`,
-      `.${LIGHT_CLASS}-lamp{box-sizing:border-box;flex:none;width:16px;height:16px;border-radius:999px;display:block;position:relative;transition:background 250ms ease}`,
-      `.${LIGHT_CLASS}-wave{box-sizing:border-box;position:absolute;inset:0;border-radius:999px;border-width:2px;border-style:solid;pointer-events:none;animation:${LIGHT_CLASS}-wave 2s ease-out infinite}`,
+      `.${LIGHT_CLASS}-lamp-wrap{position:relative;display:inline-flex;flex:none;width:16px;height:16px;align-items:center;justify-content:center}`,
+      `.${LIGHT_CLASS}-lamp{box-sizing:border-box;flex:none;width:16px;height:16px;border-radius:999px;display:block;transition:background 250ms ease}`,
+      `.${LIGHT_CLASS}-wave{box-sizing:border-box;position:absolute;inset:0;border-radius:999px;border:1.5px solid;`,
+      `pointer-events:none;opacity:0;animation:${LIGHT_CLASS}-wave 2s ease-out infinite}`,
       `.${LIGHT_CLASS}-label{white-space:nowrap}`,
       `.${LIGHT_CLASS}-count{color:var(--dsw-alias-label-tertiary)}`,
       `.${LIGHT_CLASS}-panel{box-sizing:border-box;position:fixed;z-index:2147483000;width:364px;padding:12px;`,
@@ -2709,7 +2729,11 @@ window.__ModuleLoader__.load({
       'background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit}',
       `.${LIGHT_CLASS}-hint{margin:0;color:var(--dsw-alias-label-tertiary)}`,
       `@keyframes ${LIGHT_CLASS}-blink{0%{opacity:1}50%{opacity:.35}100%{opacity:1}}`,
-      `@keyframes ${LIGHT_CLASS}-wave{0%{transform:scale(1);opacity:.9}70%{transform:scale(2.4);opacity:0}100%{transform:scale(2.4);opacity:0}}`,
+      // Такт 2 секунды: лампа уменьшена, плавно растёт до своего нормального
+      // размера к 60% цикла — в этот момент от её края уходит волна, — затем
+      // снова уменьшается, и такт повторяется.
+      `@keyframes ${LIGHT_CLASS}-pulse{0%{transform:scale(.85);opacity:.8}60%{transform:scale(1);opacity:1}100%{transform:scale(.85);opacity:.8}}`,
+      `@keyframes ${LIGHT_CLASS}-wave{0%,55%{transform:scale(1);opacity:0}62%{opacity:.5}100%{transform:scale(2.6);opacity:0}}`,
       '@media (prefers-reduced-motion: reduce){'
       + `.${LIGHT_CLASS}-wave{animation:none;display:none}.${LIGHT_CLASS}-lamp{animation:none!important}}`,
     ].join('');
@@ -2777,6 +2801,197 @@ window.__ModuleLoader__.load({
     }
     /* #endregion tweak-traffic-light */
 
+    /* #region tweak-image-model-fallback */
+
+    /**
+     * Куда переключать модель, если выбранная не видит картинки.
+     *
+     * Значения приходят из Config (index.js) через `refresh` каркаса: поле
+     * `imageFallbackProvider` / `imageFallbackModel` / `imageFallbackLabel`.
+     * Дефолты совпадают с раскладкой профиля: DeepSeek Account + DeepSeek-V41-Flash.
+     */
+    const imageFallbackConfig = {
+      provider: 'deepseek-account',
+      model: 'deepseek-flash',
+      label: 'Flash',
+    };
+
+    /** Стиль плашки: только токены темы, поэтому она следует светлой и тёмной схеме. */
+    const IMAGE_FALLBACK_STYLE_TEXT =
+      '.dsh-tweaks-imf{box-sizing:border-box;display:flex;align-items:center;gap:8px;width:100%;' +
+      'padding:8px 12px;margin:0 0 8px;border:0.5px solid var(--dsw-alias-border-l2);' +
+      'border-radius:12px;background:var(--dsw-alias-bg-overlay);' +
+      'color:var(--dsw-alias-label-primary);font:400 13px/18px system-ui,sans-serif}' +
+      '.dsh-tweaks-imf-text{flex:1 1 auto;min-width:0}' +
+      '.dsh-tweaks-imf-action{flex:none;cursor:pointer;padding:4px 10px;border-radius:8px;' +
+      'border:0.5px solid var(--dsw-alias-border-l2);background:transparent;' +
+      'color:var(--dsw-alias-label-primary);font:500 13px/18px system-ui,sans-serif}' +
+      '.dsh-tweaks-imf-action:disabled{opacity:.6;cursor:default}' +
+      '.dsh-tweaks-imf-close{flex:none;cursor:pointer;padding:2px 4px;border:0;background:transparent;' +
+      'color:inherit;opacity:.7;font:400 16px/1 system-ui,sans-serif}' +
+      '.dsh-tweaks-imf-close:hover{opacity:1}';
+
+    /**
+     * Выбранная модель сессии из проекции `modelSelection`.
+     * @param {unknown} value - снимок проекции или undefined.
+     * @returns {object | null} текущий выбор (provider/model/reasoningEffort).
+     */
+    function currentModelSelection(value) {
+      if (value === undefined || value === null || typeof value !== 'object') return null;
+      const next = value.next ?? value.lastUsed ?? null;
+      return next !== null && typeof next === 'object' ? next : null;
+    }
+
+    /**
+     * Плашка над полем ввода: ошибка «модель не видит изображения» + кнопка
+     * повторной отправки моделью со зрением.
+     *
+     * Появляется только когда сервер отверг отправку с причиной
+     * MODEL_DOES_NOT_SUPPORT_IMAGES: к этому моменту неудавшаяся отправка уже
+     * восстановлена в поле ввода (текст и вложения), поэтому кнопка меняет
+     * модель и повторяет ту же отправку через публичный `inputActions.submit()`.
+     *
+     * @param {object} props - слот-пропсы дока и внедрённое окружение (host).
+     * @returns {object | null} элемент плашки либо null, когда показывать нечего.
+     */
+    function ImageModelFallback(props) {
+      const host = props?.host ?? {};
+      const t = typeof host.t === 'function' ? host.t : (key) => key;
+      const sessionId = props?.sessionId;
+      const useSession = props?.useSession;
+      const useInput = props?.useInput;
+      const useProjection = props?.useProjection;
+      const inputActions = props?.inputActions;
+      const promptError = typeof useSession === 'function' ? useSession((snapshot) => snapshot.promptError) ?? null : null;
+      const input = typeof useInput === 'function' ? useInput((state) => state) : undefined;
+      const selection =
+        typeof useProjection === 'function'
+          ? useProjection('modelSelection', currentModelSelection)
+          : null;
+      const [dismissed, setDismissed] = React.useState(null);
+      const [busy, setBusy] = React.useState(false);
+      const [failure, setFailure] = React.useState(null);
+      // Новый отказ (или его сброс) — плашка начинается с чистого состояния.
+      React.useEffect(() => {
+        setBusy(false);
+        setFailure(null);
+      }, [promptError]);
+      const reason = promptError?.error?.details?.reason;
+      const supported = reason === 'MODEL_DOES_NOT_SUPPORT_IMAGES';
+      const draft = typeof input?.draft === 'string' ? input.draft : '';
+      const attachmentCount = Array.isArray(input?.attachmentIds) ? input.attachmentIds.length : 0;
+      const hasContent = draft.trim() !== '' || attachmentCount > 0;
+      const hidden = !supported || promptError === dismissed || !hasContent;
+      if (hidden) return null;
+      const target = imageFallbackConfig;
+      /**
+       * Сменить модель и повторить отправку восстановленного черновика.
+       * @returns {Promise<void>} завершение операции.
+       */
+      const apply = async () => {
+        if (busy) return;
+        setBusy(true);
+        setFailure(null);
+        try {
+          const ctx = host.ctx;
+          const remote = typeof ctx?.get === 'function' ? ctx.get('remote') : undefined;
+          const selectModel = remote?.session?.selectModel;
+          if (typeof selectModel !== 'function') throw new Error('remote session API is unavailable');
+          if (sessionId === undefined) throw new Error('session identity is unavailable');
+          const request = { sessionId, provider: target.provider, model: target.model };
+          const effort = selection?.reasoningEffort;
+          if (typeof effort === 'string' && effort !== '') request.reasoningEffort = effort;
+          const result = await selectModel(request);
+          if (result === undefined || result === null || result.ok !== true) {
+            const error = result?.error;
+            throw new Error(
+              typeof error?.message === 'string' && error.message !== ''
+                ? `${error.message} (${String(error.code ?? 'error')})`
+                : 'selectModel failed',
+            );
+          }
+          if (typeof inputActions?.submit === 'function') inputActions.submit();
+        } catch (error) {
+          setFailure(error instanceof Error ? error.message : String(error));
+        } finally {
+          setBusy(false);
+        }
+      };
+      return React.createElement(
+        'div',
+        { className: 'dsh-tweaks-imf', role: 'status' },
+        React.createElement(
+          'span',
+          { className: 'dsh-tweaks-imf-text' },
+          failure === null ? t('imageFallback.text') : `${t('imageFallback.errorPrefix')} ${failure}`,
+        ),
+        React.createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-tweaks-imf-action',
+            disabled: busy,
+            onClick: apply,
+          },
+          busy ? t('imageFallback.busy') : `${t('imageFallback.actionPrefix')} ${target.label}`,
+        ),
+        React.createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-tweaks-imf-close',
+            'aria-label': t('imageFallback.dismiss'),
+            title: t('imageFallback.dismiss'),
+            onClick: () => setDismissed(promptError),
+          },
+          '×',
+        ),
+      );
+    }
+
+    /**
+     * Включить твик: плашка в доке над полем ввода.
+     * @param {object} ctx - клиентский контекст плагина.
+     * @param {object} api - регистратор очисток твика.
+     * @returns {void}
+     */
+    function setupImageModelFallback(ctx, api) {
+      const own = typeof api?.own === 'function' ? api.own : () => {};
+      let locale = undefined;
+      try {
+        locale = typeof ctx?.get === 'function' ? ctx.get('locale') : undefined;
+      } catch (_error) {
+        locale = undefined;
+      }
+      const translate = createTranslator(locale);
+      const style = document.createElement('style');
+      style.textContent = IMAGE_FALLBACK_STYLE_TEXT;
+      document.head?.appendChild(style);
+      own(() => style.remove());
+      let slots = undefined;
+      try {
+        slots = typeof ctx?.get === 'function' ? ctx.get('slots') : undefined;
+      } catch (_error) {
+        slots = undefined;
+      }
+      if (typeof slots?.inject !== 'function' || typeof slots?.register !== 'function') return;
+      own(
+        slots.inject('conversation.input.dock', () =>
+          slots.register(
+            { name: 'conversation.input.dock', id: 'image-model-fallback', order: 100 },
+            (props) => React.createElement(ImageModelFallback, { ...props, host: { ctx, t: translate } }),
+          ),
+        ),
+      );
+    }
+
+    /** Выключить твик: ресурсы (стиль и слот) снимает реестр через own(). */
+    function teardownImageModelFallback() {
+      // Собственных подписок нет: стиль и слот живут в очистках твика.
+    }
+
+    /* #endregion tweak-image-model-fallback */
+
     const TWEAKS = {
       zoom: {
         title: 'Масштаб интерфейса',
@@ -2835,6 +3050,30 @@ window.__ModuleLoader__.load({
         },
         renderDetail(props) {
           return React.createElement(TrafficLightSettings, props);
+        },
+      },
+      imageModelFallback: {
+        title: 'Кнопка «отправить с Flash» для картинок',
+        titleKey: 'tweak.imageModelFallback',
+        // Лёгкий твик: плашка в доке над полем ввода, когда выбранная модель
+        // не видит изображения. Модель-замена настраивается полями Config.
+        defaultOn: true,
+        activate(ctx, api) {
+          setupImageModelFallback(ctx, api);
+        },
+        deactivate() {
+          teardownImageModelFallback();
+        },
+        // Каркас зовёт refresh на каждый снимок конфигурации: из него берём
+        // провайдера, модель и подпись кнопки.
+        refresh({ value }) {
+          const source = value !== null && typeof value === 'object' ? value : {};
+          const provider = typeof source.imageFallbackProvider === 'string' && source.imageFallbackProvider !== '' ? source.imageFallbackProvider : 'deepseek-account';
+          const model = typeof source.imageFallbackModel === 'string' && source.imageFallbackModel !== '' ? source.imageFallbackModel : 'deepseek-flash';
+          const label = typeof source.imageFallbackLabel === 'string' && source.imageFallbackLabel !== '' ? source.imageFallbackLabel : 'Flash';
+          imageFallbackConfig.provider = provider;
+          imageFallbackConfig.model = model;
+          imageFallbackConfig.label = label;
         },
       },
     };

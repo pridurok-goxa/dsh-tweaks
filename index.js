@@ -83,6 +83,14 @@ export const Config = Schema.object({
   trafficLightHolidays: Schema.array(Schema.string()).default(TRAFFIC_LIGHT_HOLIDAYS_2026).volatile(),
   trafficLightPauseSchedules: Schema.boolean().default(true).volatile(),
   trafficLightPauseAgents: Schema.boolean().default(true).volatile(),
+  // Плашка над полем ввода: если модель не видит картинки, предложить
+  // отправить сообщение моделью со зрением. Провайдер, модель и подпись
+  // кнопки — служебные поля (галочки у них нет): их читает клиент через
+  // refresh, а форма строится из реестра TWEAKS.
+  imageModelFallback: Schema.boolean().default(true).volatile(),
+  imageFallbackProvider: Schema.string().default('deepseek-account').volatile(),
+  imageFallbackModel: Schema.string().default('deepseek-flash').volatile(),
+  imageFallbackLabel: Schema.string().default('Flash').volatile(),
 });
 
 /** Модуль хост-части твика «речь»: путь относительно нашего index.js. */

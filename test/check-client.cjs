@@ -285,6 +285,14 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
    * `remote.<namespace>`, а не свойствами этого объекта.
    */
   const remoteFace = { $mount: () => Promise.resolve(() => {}), $stream: () => ({}) };
+  /** Запросы смены модели, которые твик «отправить с Flash» отправил в Remote-шину. */
+  const remoteSelects = [];
+  remoteFace.session = {
+    selectModel: (request) => {
+      remoteSelects.push(request);
+      return Promise.resolve({ ok: true, value: undefined });
+    },
+  };
   /** Куда плагин вешает масштаб: корень приложения, как в настоящей странице. */
   let zoomHostId = 'root';
 
@@ -530,6 +538,7 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     registeredCommands,
     disposeListeners,
     reactCleanups,
+    remoteSelects,
     /** Сколько обработчиков этого типа висит на window. */
     listenerCount: (type) => (listeners.get(type) ?? []).length,
     /** Изменить флаги конфигурации и уведомить плагин (как служба конфигурации). */
@@ -926,7 +935,7 @@ check('без службы конфигурации работают дефол�
   const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
   assert.ok(entry, 'форма флагов всё равно зарегистрирована');
   const form = entry.entry.component({ ...entry.entry.options.inject(), view: 'page', t: (key) => key, translate: (key) => key });
-  assert.equal(form.children.filter((child) => child.props?.['data-tweak']).length, 4, 'показывает состояние всех твиков');
+  assert.equal(form.children.filter((child) => child.props?.['data-tweak']).length, 5, 'показывает состояние всех твиков');
   const texts = form.children.map((child) => child.children?.[0]).filter((text) => typeof text === 'string');
   assert.ok(texts.includes('form.unavailable'), `форма говорит о недоступности настроек (${texts.join(' | ')})`);
   for (const row of form.children.filter((child) => child.props?.['data-tweak'])) {
@@ -934,16 +943,20 @@ check('без службы конфигурации работают дефол�
   }
 });
 
-check('реестр знает четыре твика', () => {
+check('реестр знает пять твиков', () => {
   const env = loadPlugin();
   const ids = formRows(env).map((row) => row.props['data-tweak']);
-  assert.deepEqual(ids, ['zoom', 'contextMenu', 'whisper', 'trafficLight'], 'в реестре четыре твика: zoom, contextMenu, whisper, trafficLight');
+  assert.deepEqual(
+    ids,
+    ['zoom', 'contextMenu', 'whisper', 'trafficLight', 'imageModelFallback'],
+    'в реестре пять твиков: zoom, contextMenu, whisper, trafficLight, imageModelFallback',
+  );
 });
 
-check('форма рисует четыре галочки', () => {
-  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: true, trafficLight: true } });
+check('форма рисует пять галочек', () => {
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: true, trafficLight: true, imageModelFallback: true } });
   const rows = formRows(env);
-  assert.equal(rows.length, 4, 'по галочке на каждый твик');
+  assert.equal(rows.length, 5, 'по галочке на каждый твик');
   for (const row of rows) {
     const id = row.props['data-tweak'];
     assert.equal(row.children.length, 2, `строка ${id}: подпись и переключатель`);
@@ -957,14 +970,14 @@ check('whisper по умолчанию выключен', () => {
   // Дефолты реестра работают, пока конфигурация не готова: тяжёлый твик не
   // включается сам — иначе он поднимал бы Python-воркер и качал модель весов.
   const env = loadPlugin({ configFormsAvailable: false });
-  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight'], 'активны только твики с defaultOn');
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight', 'imageModelFallback'], 'активны только твики с defaultOn');
   const row = formRows(env).find((child) => child.props['data-tweak'] === 'whisper');
   assert.equal(row.children[1].props.checked, false, 'галочка whisper снята');
 });
 
 check('включённый флаг вызывает клиентский activate, выключение снимает твик', () => {
   const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: false } });
-  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight'], 'пока флаг снят, твик не активен');
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight', 'imageModelFallback'], 'пока флаг снят, твик не активен');
   /** Ресурсы соседей и формы: переключение whisper их трогать не должно. */
   const resources = () => ({
     keydown: env.listenerCount('keydown'),
@@ -977,11 +990,11 @@ check('включённый флаг вызывает клиентский activ
   const before = resources();
 
   env.setFlags({ whisper: true });
-  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight', 'whisper'], 'флаг включил твик без клиентского кода');
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight', 'imageModelFallback', 'whisper'], 'флаг включил твик без клиентского кода');
   assert.deepEqual(resources(), before, 'включение whisper не задело соседей');
 
   env.setFlags({ whisper: false });
-  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight'], 'выключение убрало твик из активных');
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight', 'imageModelFallback'], 'выключение убрало твик из активных');
   assert.deepEqual(resources(), before, 'выключение ничего не оставило висеть');
 });
 
@@ -1609,7 +1622,11 @@ checkAsync('форма пишет флаг операцией set с прочи�
   const injected = entry.entry.options.inject();
   const form = entry.entry.component({ ...injected, view: 'page', t: (key) => key, translate: (key) => key });
   const rows = form.children.filter((child) => child.props?.['data-tweak']);
-  assert.equal(rows.length, 4, 'по переключателю на твик');
+  assert.equal(rows.length, 5, 'по переключателю на твик');
+  assert.ok(
+    rows.some((row) => row.props['data-tweak'] === 'imageModelFallback'),
+    'в форме есть твик «отправить с Flash»',
+  );
   const zoomRow = rows.find((row) => row.props['data-tweak'] === 'zoom');
   const toggle = zoomRow.children[1];
   assert.equal(toggle.props.checked, true, 'галочка стоит по значению флага');
@@ -1637,6 +1654,79 @@ checkAsync('форма блокирует запись там, где докум
 check('плагин объявляет службу конфигурации и ждёт её', () => {
   const env = loadPlugin();
   assert.deepEqual(plain(env.plugin.inject), ['configForms'], 'каркас объявляет зависимость от configForms');
+});
+
+checkAsync('кнопка «отправить с Flash» меняет модель и повторяет отправку', async () => {
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, imageModelFallback: true } });
+  const row = env.slotEntries.find(
+    (entry) => entry.name === 'conversation.input.dock' && entry.entry.options.id === 'image-model-fallback',
+  );
+  assert.ok(row, 'твик регистрирует плашку в доке над полем ввода');
+  const submitted = [];
+  const unsupported = {
+    op: 'send',
+    error: {
+      code: 'session/attachment-invalid',
+      message: 'Model "deepseek-v4-pro" does not support image input.',
+      details: { reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES' },
+    },
+  };
+  const baseProps = {
+    sessionId: 'session-test',
+    useSession: (selector) => selector({ promptError: unsupported }),
+    useInput: (selector) => selector({ phase: 'plain', draft: 'скриншот', attachmentIds: ['img-1'] }),
+    useProjection: (key, selector) =>
+      key === 'modelSelection' && typeof selector === 'function'
+        ? selector({ next: { provider: 'deepseek-account', model: 'deepseek-v4-pro', reasoningEffort: 'max' }, lastUsed: null })
+        : undefined,
+    inputActions: {
+      submit: () => {
+        submitted.push('submit');
+      },
+    },
+  };
+  /** Отрисовать зарегистрированный компонент так, как это делает рендерер слотов. */
+  const render = (props) => {
+    const wrapper = row.entry.component(props);
+    return wrapper.type(wrapper.props);
+  };
+  /** Первая кнопка в дереве плашки. */
+  const firstButton = (node) => {
+    if (node === null || typeof node !== 'object') return null;
+    if (node.type === 'button') return node;
+    for (const child of node.children ?? []) {
+      const found = firstButton(child);
+      if (found !== null) return found;
+    }
+    return null;
+  };
+
+  const quiet = render({ ...baseProps, useSession: (selector) => selector({ promptError: null }) });
+  assert.equal(quiet, null, 'без отказа модели плашка не показывается');
+
+  const draftEmpty = render({
+    ...baseProps,
+    useInput: (selector) => selector({ phase: 'plain', draft: '', attachmentIds: [] }),
+  });
+  assert.equal(draftEmpty, null, 'без восстановленного черновика повторять нечего');
+
+  const tree = render(baseProps);
+  assert.ok(tree, 'причина MODEL_DOES_NOT_SUPPORT_IMAGES показывает плашку');
+  const action = firstButton(tree);
+  assert.ok(action, 'в плашке есть кнопка');
+  assert.match(String((action.children ?? []).join('')), /Flash/, 'кнопка называет модель-замену');
+  await action.props.onClick();
+  assert.deepEqual(
+    plain(env.remoteSelects.at(-1)),
+    {
+      sessionId: 'session-test',
+      provider: 'deepseek-account',
+      model: 'deepseek-flash',
+      reasoningEffort: 'max',
+    },
+    'смена модели уходит в Remote-шину и сохраняет уровень рассуждений',
+  );
+  assert.deepEqual(submitted, ['submit'], 'после смены модели отправка повторяется');
 });
 
 checkAsync('шов распознавания ищется по ключу remote.speech, а не по имени хост-сервиса', async () => {
@@ -1822,7 +1912,7 @@ check('в шапке индикатор без текста, у нижнего �
         for (const item of node) walkNodes(item);
         return;
       }
-      if (String(node.props?.className ?? '').includes('-lamp')) lampText.push(node);
+      if (String(node.props?.className ?? '').split(/\s+/).includes('dsh-ui-light-lamp')) lampText.push(node);
       walkNodes(node.children);
     };
     walkNodes(tree);
@@ -1923,6 +2013,27 @@ check('подписи часов стоят под каждым кружком �
   assert.match(panel, /const shownHour = hover === null/, 'в покое подпись показывает текущий час');
   assert.doesNotMatch(panel, /showHourLabels/, 'подписи часов не зависят от варианта индикатора');
   assert.doesNotMatch(panel, /light\.currentSlot/, 'старого формата «сейчас» без диапазона нет');
+});
+
+check('волны ограничены лампой и синхронны с её пульсацией', () => {
+  const css = fs.readFileSync(CLIENT, 'utf8');
+  // Волна позиционируется в тесном контейнере лампы, а не в кнопке (у кнопки
+  // нет position:relative — иначе волна улетала на весь экран).
+  assert.match(css, /-lamp-wrap\{position:relative[^}]*width:16px;height:16px/, 'контейнер лампы задаёт малый радиус');
+  assert.match(css, /-wave\{[^}]*position:absolute;inset:0[^}]*border:1\.5px solid/, 'волна занимает только контейнер лампы');
+  // В исходнике имена классов подставлены через ${LIGHT_CLASS} — сравниваем с этой формой.
+  assert.ok(
+    css.includes('${LIGHT_CLASS}-pulse{0%{transform:scale(.85);opacity:.8}60%{transform:scale(1);opacity:1}'),
+    'лампа дышит от меньшего размера до нормального',
+  );
+  assert.ok(
+    css.includes('${LIGHT_CLASS}-wave{0%,55%{transform:scale(1);opacity:0}62%{opacity:.5}100%{transform:scale(2.6);opacity:0}}'),
+    'волна уходит на пике роста и мягко гаснет на 2.6 диаметра',
+  );
+  const indicator = css.slice(css.indexOf('function TrafficLightIndicator'), css.indexOf('function TrafficLightSettings'));
+  assert.match(indicator, /-lamp-wrap/, 'разметка собирает контейнер лампы');
+  assert.match(indicator, /key: 'wave'/, 'волна — ребёнок контейнера лампы, а не кнопки');
+  assert.doesNotMatch(indicator, /wave-a|wave-b/, 'двух разлетающихся колец из кнопки больше нет');
 });
 
 // Асинхронные проверки идут после обычных: их список собирается по ходу файла.
