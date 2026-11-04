@@ -104,10 +104,10 @@ function createAgent(id) {
       for (const listener of [...(listeners.get(event) ?? [])]) listener(payload);
     },
     /** Отправить waterfall-событие pre-step и вернуть решение. */
-    async preStep(messages) {
+    async preStep(messages, stepNumber = 1) {
       let decision = null;
       for (const listener of [...(listeners.get('agent/pre-step') ?? [])]) {
-        decision = await listener({ messages }, async () => ({ kind: 'enter', messages }));
+        decision = await listener({ messages, step: stepNumber }, async () => ({ kind: 'enter', messages }));
       }
       return decision;
     },
@@ -318,6 +318,77 @@ async function main() {
     await childB.preStep([{ id: 'm4', source: { kind: 'subagent' } }]);
     const childCall = await ctx.driveLlmStream({}, [{ type: 'usage', usage: { inputTokens: 3, outputTokens: 3 } }]);
     assert.equal(childCall.length, 1, 'субагент ручного родителя на красном не блокируется');
+
+    // 3.4а) Служебные вставки не делают шаг ручным: расписание в красном
+    // окне ждёт зелёного, хотя в батче есть runtime-context и time-context.
+    const scheduleAgent = createAgent('session-schedule');
+    ctx.emit('agent/created', { agent: scheduleAgent.agent });
+    ctx.setInitiator('session-schedule');
+    await scheduleAgent.preStep([
+      { id: 'ctx-runtime', source: { kind: 'runtime-context' } },
+      { id: 'ctx-time', source: { kind: 'time-context' } },
+      { id: 'm-schedule', source: { kind: 'schedule' } },
+    ]);
+    const scheduleCall = ctx.driveLlmStream({}, [{ type: 'usage', usage: { inputTokens: 4, outputTokens: 4 } }]);
+    let scheduleDone = false;
+    scheduleCall.then(() => {
+      scheduleDone = true;
+    });
+    await settle();
+    assert.equal(scheduleDone, false, 'автоматический шаг с вставками контекста стоит на красном');
+
+    // Продолжение того же хода: в батче только служебные вставки — режим
+    // шага наследуется от начала хода, пауза продолжается.
+    await scheduleAgent.preStep([
+      { id: 'ctx-runtime-2', source: { kind: 'runtime-context' } },
+      { id: 'ctx-time-2', source: { kind: 'time-context' } },
+    ], 2);
+    const continued = ctx.driveLlmStream({}, [{ type: 'usage', usage: { inputTokens: 5, outputTokens: 5 } }]);
+    let continuedDone = false;
+    continued.then(() => {
+      continuedDone = true;
+    });
+    await settle();
+    assert.equal(continuedDone, false, 'продолжение автоматического хода тоже ждёт зелёного');
+
+    // Ручной шаг со служебными вставками не блокируется.
+    await scheduleAgent.preStep([
+      { id: 'ctx-runtime-3', source: { kind: 'runtime-context' } },
+      { id: 'm-user', source: { kind: 'user' } },
+    ]);
+    const manualWithContext = await ctx.driveLlmStream({}, [{ type: 'usage', usage: { inputTokens: 6, outputTokens: 6 } }]);
+    assert.equal(manualWithContext.length, 1, 'ручной шаг со вставками контекста не блокируется');
+
+    // Зелёный отпускает и ожидавшие автоматические вызовы.
+    update(greenConfig);
+    await settle();
+    assert.equal(scheduleDone, true, 'на зелёном автоматический шаг пошёл');
+    assert.equal(continuedDone, true, 'на зелёном продолжился и второй шаг');
+
+    // Пустой ход (доставку изъяли, wake-латч открыл ход) на красном
+    // отклоняется: батч из одних служебных вставок не тратит токены.
+    update(defaultConfig);
+    await settle();
+    const wakeAgent = createAgent('session-wake');
+    ctx.emit('agent/created', { agent: wakeAgent.agent });
+    const rejected = await wakeAgent.preStep([
+      { id: 'ctx-wake-runtime', source: { kind: 'runtime-context' } },
+      { id: 'ctx-wake-time', source: { kind: 'time-context' } },
+    ], 1);
+    assert.equal(rejected?.kind, 'reject', 'пустой ход на красном отклонён');
+
+    // На зелёном такой же ход не отклоняется — режим показывает честное «дальше».
+    update(greenConfig);
+    await settle();
+    const allowed = await wakeAgent.preStep([
+      { id: 'ctx-wake-runtime-2', source: { kind: 'runtime-context' } },
+      { id: 'ctx-wake-time-2', source: { kind: 'time-context' } },
+    ], 1);
+    assert.equal(allowed?.kind, 'enter', 'на зелёном пустой ход не отклоняется');
+
+    // Возвращаем красный: проверка выгрузки ниже снова ждёт удержание.
+    update(defaultConfig);
+    await settle();
 
     // 3.5) Выгрузка: ожидающие отпущены, удержанное роздано.
     const heldAgain = createAgent('session-c');

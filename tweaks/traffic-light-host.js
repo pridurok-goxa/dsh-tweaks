@@ -40,9 +40,36 @@ import { lightAt, normalizePolicy } from './traffic-light-policy.js';
 const REFRESH_MS = 15_000;
 
 /** Источники сообщений, которые всегда считаются автоматическими. */
-const AUTOMATIC_KINDS = new Set(['schedule', 'goal', 'child', 'subagent-settled', 'agent-message']);
+const AUTOMATIC_KINDS = new Set([
+  'schedule',
+  'goal',
+  'tool-goal',
+  'child',
+  'subagent-settled',
+  'agent-message',
+  'team-message',
+]);
 /** Источники сообщений, которые всегда считаются пользовательскими. */
-const USER_KINDS = new Set(['user', 'user-approval', 'user-question-reply', 'plan-mode', 'ptc-mode', 'fallback']);
+const USER_KINDS = new Set(['user', 'parent', 'user-approval', 'user-question-reply', 'plan-mode', 'ptc-mode', 'fallback']);
+/**
+ * Служебные вставки в батч шага: контекст времени и рантайма, каталог скилов,
+ * инструкции, напоминания о повторе инструментов и уведомления о работах.
+ *
+ * Их подмешивают сам цикл агента и другие плагины, поэтому к решению «ручная
+ * работа или автоматическая» они отношения не имеют. Без этого списка каждый
+ * шаг выглядел пользовательским: цикл добавляет `runtime-context` в каждый батч,
+ * а `time-context` — почти в каждый, и пауза на красном не включалась ни разу.
+ */
+const NEUTRAL_KINDS = new Set([
+  'time-context',
+  'runtime-context',
+  'skill-catalog',
+  'agent-instructions',
+  'repeat-tool-reminder',
+  'tool-jobs',
+  'model-selection',
+  'compact-checkpoint',
+]);
 
 /** Одно активное состояние хост-половины. */
 let runtime = null;
@@ -87,6 +114,7 @@ function log(message, error) {
 function classifyMessage(message, autoMode) {
   const kind = message?.source?.kind;
   if (typeof kind !== 'string' || kind === '') return 'user';
+  if (NEUTRAL_KINDS.has(kind)) return 'neutral';
   if (USER_KINDS.has(kind)) return 'user';
   if (AUTOMATIC_KINDS.has(kind)) return 'auto';
   if (kind === 'parent' || kind === 'subagent') return autoMode ? 'auto' : 'user';
@@ -94,18 +122,28 @@ function classifyMessage(message, autoMode) {
 }
 
 /**
- * Классификация батча шага: автоматический, только если все сообщения
- * автоматические. Пустой батч — пользовательский.
+ * Классификация батча шага.
+ *
+ * Служебные вставки игнорируются: решение принимают только сообщения-триггеры.
+ * Если после них в батче ничего не осталось, шаг продолжает режим текущего хода
+ * (`null`) — первый шаг хода всегда несёт триггер, которым ход начали, а
+ * вставки контекста приходят на каждом следующем шаге.
  * @param {Array<object>} messages - сообщения батча.
  * @param {boolean} autoMode - режим сессии.
- * @returns {'auto' | 'user'} класс батча.
+ * @returns {'auto' | 'user' | null} класс батча либо null — наследовать режим хода.
  */
 function classifyBatch(messages, autoMode) {
-  if (!Array.isArray(messages) || messages.length === 0) return 'user';
+  if (!Array.isArray(messages) || messages.length === 0) return null;
+  let triggers = 0;
+  let automatic = 0;
   for (const message of messages) {
-    if (classifyMessage(message, autoMode) !== 'auto') return 'user';
+    const kind = classifyMessage(message, autoMode);
+    if (kind === 'neutral') continue;
+    triggers += 1;
+    if (kind === 'auto') automatic += 1;
   }
-  return 'auto';
+  if (triggers === 0) return null;
+  return automatic === triggers ? 'auto' : 'user';
 }
 
 /**
@@ -248,7 +286,21 @@ export function activate(ctx, config) {
           const off = [];
           off.push(agent.ctx.on('agent/pre-step', (step, next) => {
             const batch = classifyBatch(step?.messages, runtime.autoMode.get(agent.id) === true);
-            runtime.stepAutomatic.set(agent.id, batch === 'auto');
+            if (
+              batch === null &&
+              step?.step === 1 &&
+              runtime.light === 'red' &&
+              runtime.pauseAgents === true
+            ) {
+              // Ход открылся без собственного ввода: доставку расписания на
+              // красном мы изъяли, а wake-латч всё равно завёл ход. Любой
+              // модельный вызов здесь — пустая трата дорогих токенов, поэтому
+              // отклоняем шаг (в батче только служебные вставки, терять нечего).
+              log(`trafficLight: пустой ход сессии ${agent.id} отклонён на красном`);
+              return Promise.resolve({ kind: 'reject' });
+            }
+            // null — батч из одних служебных вставок: режим хода не меняем.
+            if (batch !== null) runtime.stepAutomatic.set(agent.id, batch === 'auto');
             return next();
           }));
           off.push(agent.ctx.on('agent/inbox/inserted', (payload) => {
