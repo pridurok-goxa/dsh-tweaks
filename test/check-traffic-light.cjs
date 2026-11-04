@@ -17,6 +17,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
+// Файловый лог и памятка удержанного пишутся во временный каталог: тест не
+// трогает состояние настоящего профиля.
+process.env.DSH_HOME = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'dsh-tweaks-test-'));
+
 const ROOT = path.join(__dirname, '..');
 const POLICY_PATH = path.join(ROOT, 'tweaks', 'traffic-light-policy.js');
 const HOST_PATH = path.join(ROOT, 'tweaks', 'traffic-light-host.js');
@@ -130,6 +134,7 @@ function createHostContext() {
     resolved.push(sessionId);
     return { error: { code: 'session/not-found' } };
   };
+  const hidden = new Set();
   const services = {
     agents: {
       currentInitiator: () => state.initiator,
@@ -152,7 +157,15 @@ function createHostContext() {
       resolveImpl = fn;
     },
     get(name) {
-      return services[name];
+      return hidden.has(name) ? undefined : services[name];
+    },
+    /** Спрятать службу: ctx.get вернёт undefined — как до её применения. */
+    hideService(name) {
+      hidden.add(name);
+    },
+    /** Показать службу обратно. */
+    showService(name) {
+      hidden.delete(name);
     },
     on(event, listener) {
       const list = rootListeners.get(event) ?? [];
@@ -405,6 +418,42 @@ async function main() {
     );
     // Повторная деактивация безопасна.
     await deactivate();
+
+    // 3.6) Служба сессий поднялась позже: удержанное не теряется, а доезжает
+    // повторной доставкой на следующем пересчёте зелёного света.
+    const lateCtx = createHostContext();
+    lateCtx.hideService('sessionController');
+    activate(lateCtx, defaultConfig);
+    const lateAgent = createAgent('session-late');
+    lateCtx.emit('agent/created', { agent: lateAgent.agent });
+    lateAgent.emit('agent/inbox/inserted', { message: { id: 'msg-late', source: { kind: 'schedule' } } });
+    assert.deepEqual(lateAgent.calls.removed, ['msg-late'], 'расписание удержано без службы сессий');
+    const followedLate = [];
+    lateCtx.setResolveAgent(async () => ({ agent: { followup: (message) => followedLate.push(message.id) } }));
+    update(greenConfig);
+    await settle();
+    assert.deepEqual(followedLate, [], 'без службы сессий доставка отложена');
+    lateCtx.showService('sessionController');
+    update(greenConfig);
+    await settle();
+    assert.deepEqual(followedLate, ['msg-late'], 'служба появилась — напоминание доехало');
+    await deactivate();
+
+    // 3.7) Памятка с диска после перезапуска: возвращается на зелёном.
+    const stateFile = path.join(process.env.DSH_HOME, 'dsh-tweaks', 'held.json');
+    fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+    fs.writeFileSync(
+      stateFile,
+      JSON.stringify([['session-restored', [{ id: 'msg-restored', source: { kind: 'schedule' } }]]]),
+    );
+    const restoredCtx = createHostContext();
+    const followedRestored = [];
+    restoredCtx.setResolveAgent(async () => ({ agent: { followup: (message) => followedRestored.push(message.id) } }));
+    activate(restoredCtx, greenConfig);
+    await settle();
+    assert.deepEqual(followedRestored, ['msg-restored'], 'памятка с диска доставлена на зелёном');
+    assert.ok(!fs.existsSync(stateFile), 'памятка очищена после доставки');
+    await deactivate();
   } finally {
     Date.now = realNow;
   }
@@ -435,7 +484,9 @@ async function main() {
   const indexHolidays = [...holidaysMatch[0].matchAll(/'(\d{4}-\d{2}-\d{2})'/g)].map((match) => match[1]);
   assert.deepEqual(indexHolidays, policy.HOLIDAYS_2026, 'список праздников в схеме совпадает с политикой');
 
-  console.log('check-traffic-light: ok');
+  fs.rmSync(process.env.DSH_HOME, { recursive: true, force: true });
+
+console.log('check-traffic-light: ok');
 }
 
 main().catch((error) => {

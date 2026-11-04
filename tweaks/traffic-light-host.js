@@ -1,3 +1,6 @@
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 /**
  * Хост-половина твика «светофор» (trafficLight) бандла dsh-tweaks.
  *
@@ -10,7 +13,12 @@
  *  3. На красном приостанавливает автоматические шаги агентов и субагентов
  *     на ближайшем модельном вызове (`llm/stream`): вызов ждёт зелёного.
  *     Ручные сообщения разработчика не блокируются — на красном можно
- *     работать, дорогое время лишь не тратится фоном.
+ *     работать, дорогое время лишь не тратится фоном. Пустой ход после
+ *     изъятого расписания отклоняется, чтобы не платить за него.
+ *
+ * Удержанное переживает перезапуск DSH: памятка в `$DSH_HOME/dsh-tweaks/held.json`
+ * (доставка повторяется на зелёном, до 8 попыток), события пишутся в
+ * `$DSH_HOME/dsh-tweaks/traffic-light.log` — journal владельцу недоступен.
  *
  * Классификация шага: батч автоматический ⇔ все сообщения автоматические.
  *   - пользовательские источники: user, parent (стиринг родителя),
@@ -71,6 +79,9 @@ const NEUTRAL_KINDS = new Set([
   'compact-checkpoint',
 ]);
 
+/** Сколько раз пробуем вернуть удержанное напоминание, прежде чем признать потерю. */
+const HELD_ATTEMPTS = 8;
+
 /** Одно активное состояние хост-половины. */
 let runtime = null;
 
@@ -89,12 +100,41 @@ function serviceOf(ctx, name) {
 }
 
 /**
+ * Служба сессий: доставать при использовании — при активации её может ещё не быть.
+ * @param {object | null} state - состояние хост-половины.
+ * @returns {*} служба либо undefined.
+ */
+function sessionControllerOf(state) {
+  if (state === null || state === undefined) return undefined;
+  const cached = state.sessionController;
+  if (cached !== undefined && cached !== null) return cached;
+  const live = serviceOf(state.ctx, 'sessionController');
+  if (live !== undefined && live !== null) state.sessionController = live;
+  return live;
+}
+
+/**
+ * Служба агентов: тоже достаётся при использовании, а не при активации.
+ * @param {object | null} state - состояние хост-половины.
+ * @returns {*} служба либо undefined.
+ */
+function agentsOf(state) {
+  if (state === null || state === undefined) return undefined;
+  const cached = state.agents;
+  if (cached !== undefined && cached !== null) return cached;
+  const live = serviceOf(state.ctx, 'agents');
+  if (live !== undefined && live !== null) state.agents = live;
+  return live;
+}
+
+/**
  * Записать сообщение в лог DSH; без логгера — тихо.
  * @param {string} message - текст сообщения.
  * @param {unknown} [error] - причина, если есть.
  * @returns {void}
  */
 function log(message, error) {
+  appendLogFile(message, error);
   const logger = runtime?.logger;
   if (logger === undefined || logger === null) return;
   try {
@@ -102,6 +142,69 @@ function log(message, error) {
     else logger.warn(message, error);
   } catch (_error) {
     /* логгер сломан: молчим */
+  }
+}
+
+/**
+ * Каталог файлов твика в домашней папке DSH; без DSH_HOME — null.
+ * @returns {string | null} каталог либо null.
+ */
+function stateDir() {
+  const home = typeof process === 'object' ? process?.env?.DSH_HOME : undefined;
+  return typeof home === 'string' && home !== '' ? join(home, 'dsh-tweaks') : null;
+}
+
+/**
+ * Дописать строку в файл лога твика; без каталога и при ошибках — тихо.
+ * @param {string} message - текст.
+ * @param {unknown} [error] - причина.
+ * @returns {void}
+ */
+function appendLogFile(message, error) {
+  const dir = stateDir();
+  if (dir === null) return;
+  try {
+    mkdirSync(dir, { recursive: true });
+    const line = `${new Date().toISOString()} ${message}${error === undefined ? '' : ` | ${String(error)}`}\n`;
+    appendFileSync(join(dir, 'traffic-light.log'), line);
+  } catch (_error) {
+    /* диск недоступен: молчим */
+  }
+}
+
+/**
+ * Прочитать памятку удержанных напоминаний после перезапуска.
+ * @returns {Array<[string, Array<object>]>} пары «сессия → сообщения».
+ */
+function loadHeldFile() {
+  const dir = stateDir();
+  if (dir === null) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, 'held.json'), 'utf8'));
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((entry) => Array.isArray(entry) && typeof entry[0] === 'string' && Array.isArray(entry[1]))
+      .map((entry) => [entry[0], entry[1]]);
+  } catch (_error) {
+    return [];
+  }
+}
+
+/**
+ * Сохранить памятку удержанных напоминаний.
+ * @param {Map<string, Array<object>>} held - удержанные сообщения.
+ * @returns {void}
+ */
+function saveHeldFile(held) {
+  const dir = stateDir();
+  if (dir === null) return;
+  try {
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, 'held.json');
+    if (held.size === 0) rmSync(file, { force: true });
+    else writeFileSync(file, JSON.stringify([...held.entries()]));
+  } catch (_error) {
+    /* диск недоступен: держим только в памяти */
   }
 }
 
@@ -189,27 +292,40 @@ function untilGreen(signal) {
  */
 async function redeliverHeld(state = runtime) {
   if (state === null) return;
-  const controller = state.sessionController;
-  const held = [...state.held.entries()];
-  state.held.clear();
-  if (held.length === 0) return;
+  if (state.held.size === 0) {
+    saveHeldFile(state.held);
+    return;
+  }
+  const controller = sessionControllerOf(state);
   if (controller === undefined || typeof controller.resolveAgent !== 'function') {
     log('trafficLight: удержанные напоминания не вернуть — нет службы sessionController');
     return;
   }
-  for (const [sessionId, messages] of held) {
+  for (const [sessionId, messages] of [...state.held.entries()]) {
+    const attempts = (state.heldAttempts.get(sessionId) ?? 0) + 1;
+    state.heldAttempts.set(sessionId, attempts);
+    if (attempts > HELD_ATTEMPTS) {
+      state.held.delete(sessionId);
+      state.heldAttempts.delete(sessionId);
+      log(`trafficLight: удержанные напоминания сессии ${sessionId} потеряны`);
+      continue;
+    }
     try {
       const resolved = await controller.resolveAgent(sessionId);
       if (resolved === null || resolved === undefined || 'error' in resolved) {
-        log(`trafficLight: удержанное напоминание для сессии ${sessionId} потеряно`);
+        // Сессию не вернуть прямо сейчас — попробуем на следующем пересчёте.
+        log(`trafficLight: напоминание сессии ${sessionId} ждёт повтора`);
         continue;
       }
       for (const message of messages) resolved.agent.followup(message);
+      state.held.delete(sessionId);
+      state.heldAttempts.delete(sessionId);
       log(`trafficLight: удержанные напоминания сессии ${sessionId} возвращены`);
     } catch (error) {
       log(`trafficLight: не удалось вернуть напоминания сессии ${sessionId}`, error);
     }
   }
+  saveHeldFile(state.held);
 }
 
 /**
@@ -230,6 +346,7 @@ function holdScheduleMessage(agent, message) {
   const list = runtime.held.get(agent.id) ?? [];
   list.push(message);
   runtime.held.set(agent.id, list);
+  saveHeldFile(runtime.held);
   log(`trafficLight: напоминание «${message.id}» удержано до конца пика`);
 }
 
@@ -240,14 +357,15 @@ function holdScheduleMessage(agent, message) {
 function refresh() {
   if (runtime === null) return;
   const next = lightAt(Date.now(), runtime.policy);
-  if (next === runtime.light) return;
-  const previous = runtime.light;
-  runtime.light = next;
-  log(`trafficLight: ${previous} → ${next}`);
-  if (previous === 'red') {
-    for (const waiter of [...runtime.waiters]) waiter.done();
-    void redeliverHeld();
+  if (next !== runtime.light) {
+    const previous = runtime.light;
+    runtime.light = next;
+    log(`trafficLight: ${previous} → ${next}`);
+    if (previous === 'red') for (const waiter of [...runtime.waiters]) waiter.done();
   }
+  // Недоставленное (служба сессий не готова, сессия занята) повторяем на каждом
+  // пересчёте, пока свет зелёный: удержанное не должно пропасть из-за гонки.
+  if (runtime.light === 'green' && runtime.held.size > 0) void redeliverHeld();
 }
 
 /**
@@ -264,7 +382,8 @@ export function activate(ctx, config) {
     light: 'green',
     pauseAgents: config?.trafficLightPauseAgents !== false,
     pauseSchedules: config?.trafficLightPauseSchedules !== false,
-    held: new Map(),
+    held: new Map(loadHeldFile()),
+    heldAttempts: new Map(),
     stepAutomatic: new Map(),
     autoMode: new Map(),
     waiters: new Set(),
@@ -355,7 +474,7 @@ export function activate(ctx, config) {
       }
       let id = '';
       try {
-        id = String(runtime.agents?.currentInitiator?.()?.id ?? '');
+        id = String(agentsOf(runtime)?.currentInitiator?.()?.id ?? '');
       } catch (_error) {
         id = '';
       }
