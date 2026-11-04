@@ -250,7 +250,7 @@ function createConfigForms({ flags, status, writable }) {
 }
 
 /** Собрать песочницу с плагином и вернуть наблюдаемые объекты. */
-function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, rejectCode = null, flags = { zoom: true, contextMenu: true }, configFormsAvailable = true, configStatus = 'ready', writable = true, speech = null, legacySpeech = null, lightPrefs = null } = {}) {
+function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, rejectCode = null, flags = { zoom: true, contextMenu: true }, configFormsAvailable = true, configStatus = 'ready', writable = true, speech = null, legacySpeech = null, lightPrefs = null, fixedNow = null } = {}) {
   const storage = createStorage();
   if (stored !== null) storage.setItem('dsh.ui-zoom.v1', stored);
   // Настройки светофора живут в браузере: тест задаёт их так же, как пользователь.
@@ -297,7 +297,15 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
   let zoomHostId = 'root';
 
   // Общий стиль: масштаб ставится на корень приложения, но наблюдать его удобно в одном месте.
-  const documentElement = { style, id: 'html' };
+  /** Признаки на корне документа: светофор помечает там красный свет. */
+  const documentAttributes = new Map();
+  const documentElement = {
+    style,
+    id: 'html',
+    setAttribute: (name, value) => documentAttributes.set(name, String(value)),
+    removeAttribute: (name) => documentAttributes.delete(name),
+    getAttribute: (name) => (documentAttributes.has(name) ? documentAttributes.get(name) : null),
+  };
   const rootElement = { style, id: 'root' };
   const bodyChildren = [];
   const bodyElement = createElement('body');
@@ -508,6 +516,15 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
       throw new Error(`unexpected require: ${name}`);
     },
   };
+  // Заморозка часов: детерминированные проверки красного/зелёного света.
+  if (fixedNow !== null) {
+    const RealDate = Date;
+    sandbox.Date = class extends RealDate {
+      static now() {
+        return fixedNow;
+      }
+    };
+  }
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(CLIENT, 'utf8'), sandbox, { filename: CLIENT });
@@ -576,6 +593,8 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     },
     /** Текущий масштаб, как его видит документ: носитель — body. */
     zoom: () => style.zoom,
+    /** Признак на корне документа: красный свет светофора. */
+    documentAttribute: (name) => documentElement.getAttribute(name),
     /** Масштаб в переменной, которую читает calc() попапов. */
     scaleVar: () => style['--dsh-ui-zoom'],
     /** Исходное вьюпортное значение свойства, сохранённое плагином. */
@@ -2034,6 +2053,41 @@ check('волны ограничены лампой и синхронны с е�
   assert.match(indicator, /-lamp-wrap/, 'разметка собирает контейнер лампы');
   assert.match(indicator, /key: 'wave'/, 'волна — ребёнок контейнера лампы, а не кнопки');
   assert.doesNotMatch(indicator, /wave-a|wave-b/, 'двух разлетающихся колец из кнопки больше нет');
+});
+
+check('на красном свете индикатор работы сессий краснеет и пульсирует', () => {
+  const css = fs.readFileSync(CLIENT, 'utf8');
+  assert.ok(
+    css.includes('html[${LIGHT_RED_ATTR}] [class*="_sessionRow"] svg[data-state="ongoing"]{'),
+    'правило целится в индикатор работы строки сессии',
+  );
+  assert.ok(css.includes('color:var(--dsw-alias-state-error-primary)'), 'спиннер красится токеном ошибки');
+  assert.ok(css.includes('${LIGHT_CLASS}-pulse 2s ease-in-out infinite}'), 'спиннер пульсирует в такт лампам');
+
+  // Замораживаем часы: среда 10:00 по Пекину — красное окно.
+  const peak = Date.UTC(2026, 9, 14, 2, 0);
+  const redEnv = loadPlugin({
+    flags: {
+      zoom: true,
+      contextMenu: true,
+      trafficLight: true,
+      trafficLightPeakWindows: [{ start: '00:00', end: '23:59' }],
+      trafficLightWarningMinutes: 0,
+    },
+    fixedNow: peak,
+  });
+  const redRow = redEnv.slotEntries.find((entry) => entry.name === 'conversation.header.leading');
+  renderSlot(redRow);
+  assert.equal(redEnv.documentAttribute('data-dsh-light-red'), '', 'на красном признак выставлен на корне');
+
+  // Тот же момент вне окна пика — зелёный, признак снят.
+  const greenEnv = loadPlugin({
+    flags: { zoom: true, contextMenu: true, trafficLight: true },
+    fixedNow: Date.UTC(2026, 9, 14, 17, 0),
+  });
+  const greenRow = greenEnv.slotEntries.find((entry) => entry.name === 'conversation.header.leading');
+  renderSlot(greenRow);
+  assert.equal(greenEnv.documentAttribute('data-dsh-light-red'), null, 'на зелёном признак отсутствует');
 });
 
 // Асинхронные проверки идут после обычных: их список собирается по ходу файла.

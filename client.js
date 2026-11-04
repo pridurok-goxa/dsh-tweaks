@@ -1991,6 +1991,13 @@ window.__ModuleLoader__.load({
       green: 'var(--dsw-alias-state-success-primary)',
     };
 
+    /**
+     * Признак красного света на корне документа: по нему красятся в красный
+     * и пульсируют вместе с лампой индикаторы работы в списке сессий
+     * (`StateDot` приложения с `data-state="ongoing"`).
+     */
+    const LIGHT_RED_ATTR = 'data-dsh-light-red';
+
     /** Префикс классов твика — как у меню по правой кнопке. */
     const LIGHT_CLASS = 'dsh-ui-light';
 
@@ -2543,6 +2550,19 @@ window.__ModuleLoader__.load({
       const t = lightTranslator;
       const color = LIGHT_COLORS[status.light];
       const blink = status.light === 'yellow';
+      // Индикаторы работы сессий в сайдбаре краснеют и пульсируют вместе с лампой.
+      React.useEffect(() => {
+        const root = document.documentElement;
+        if (root === undefined || root === null) return undefined;
+        if (status.light === 'red') {
+          if (typeof root.setAttribute === 'function') root.setAttribute(LIGHT_RED_ATTR, '');
+        } else if (typeof root.removeAttribute === 'function') {
+          root.removeAttribute(LIGHT_RED_ATTR);
+        }
+        return () => {
+          if (typeof root.removeAttribute === 'function') root.removeAttribute(LIGHT_RED_ATTR);
+        };
+      }, [status.light]);
       const pulse = status.light === 'red' && running;
       const target = lightCountdownTarget(status);
       const label = target === null
@@ -2734,6 +2754,11 @@ window.__ModuleLoader__.load({
       // снова уменьшается, и такт повторяется.
       `@keyframes ${LIGHT_CLASS}-pulse{0%{transform:scale(.85);opacity:.8}60%{transform:scale(1);opacity:1}100%{transform:scale(.85);opacity:.8}}`,
       `@keyframes ${LIGHT_CLASS}-wave{0%,55%{transform:scale(1);opacity:0}62%{opacity:.5}100%{transform:scale(2.6);opacity:0}}`,
+      // Индикатор работы в списке сессий (StateDot с data-state="ongoing"):
+      // на красном свете — красный и пульсирует в такт лампам.
+      `html[${LIGHT_RED_ATTR}] [class*="_sessionRow"] svg[data-state="ongoing"]{`,
+      'color:var(--dsw-alias-state-error-primary);',
+      `animation:${LIGHT_CLASS}-pulse 2s ease-in-out infinite}`,
       '@media (prefers-reduced-motion: reduce){'
       + `.${LIGHT_CLASS}-wave{animation:none;display:none}.${LIGHT_CLASS}-lamp{animation:none!important}}`,
     ].join('');
