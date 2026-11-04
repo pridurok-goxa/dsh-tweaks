@@ -250,7 +250,7 @@ function createConfigForms({ flags, status, writable }) {
 }
 
 /** Собрать песочницу с плагином и вернуть наблюдаемые объекты. */
-function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, rejectCode = null, flags = { zoom: true, contextMenu: true }, configFormsAvailable = true, configStatus = 'ready', writable = true, speech = null, legacySpeech = null, lightPrefs = null, fixedNow = null } = {}) {
+function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, frame = null, seat = null, rejectCode = null, flags = { zoom: true, contextMenu: true }, configFormsAvailable = true, configStatus = 'ready', writable = true, speech = null, legacySpeech = null, lightPrefs = null, fixedNow = null } = {}) {
   const storage = createStorage();
   if (stored !== null) storage.setItem('dsh.ui-zoom.v1', stored);
   // Настройки светофора живут в браузере: тест задаёт их так же, как пользователь.
@@ -261,6 +261,9 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
   const handlesMock = handles ?? (handle === null ? [] : [handle]);
   /** Колонки раскладки: их границы и берёт плагин. */
   const columnsMock = columns ?? {};
+  /** Рамка приложения и открытая правая панель: их и правит свободный размер. */
+  const frameMock = frame ?? null;
+  const seatMock = seat ?? null;
   /** Текущее выделение: плагин показывает по нему копирование вне поля ввода. */
   let selectionText = '';
   /** Служба конфигурации: снимок флагов твиков и очередь записей. */
@@ -337,9 +340,16 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     // Полоски изменения ширины и колонки раскладки — по ним плагин выравнивает полоски.
     querySelector: (selector) => {
       const text = String(selector);
-      if (text.includes('data-side')) return handlesMock[0] ?? null;
+      if (text.includes('_frame')) return frameMock;
       if (text.includes('_sidebarCol')) return columnsMock.sidebar ?? null;
       if (text.includes('data-rightbar-col')) return columnsMock.rightbar ?? null;
+      if (text.includes('data-sidebar-right-open')) return seatMock;
+      if (text.includes('data-rightbar-fullscreen')) return null;
+      if (text.includes('data-side')) {
+        const match = /data-side="([a-z]+)"/.exec(text);
+        if (match !== null) return handlesMock.find((item) => item.dataset.side === match[1]) ?? null;
+        return handlesMock[0] ?? null;
+      }
       return null;
     },
     querySelectorAll: (selector) => (String(selector).includes('data-side') ? handlesMock : []),
@@ -597,6 +607,8 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     documentAttribute: (name) => documentElement.getAttribute(name),
     /** Масштаб в переменной, которую читает calc() попапов. */
     scaleVar: () => style['--dsh-ui-zoom'],
+    /** Значение из localStorage, как его видит приложение. */
+    windowStorage: (key) => storage.getItem(key),
     /** Исходное вьюпортное значение свойства, сохранённое плагином. */
     source: (node, prop) => node.style[`--dsh-ui-zoom-src-${prop}`],
     /**
@@ -616,6 +628,10 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     PointerEvent: FakePointerEvent,
     /** Нажать клавишу: вызвать обработчик storage-события. */
     fireStorage: (key) => lastListener('storage')?.({ key }),
+    /** Вызвать слушателя window — так браузер доставляет событие. */
+    fireWindow: (type, event) => {
+      for (const listener of [...(listeners.get(type) ?? [])]) listener(event);
+    },
     /** Вызвать слушателя документа — так браузер доставляет событие. */
     fireDocument: (type, event) => {
       for (const listener of [...(documentListeners.get(type) ?? [])]) listener(event);
@@ -954,7 +970,7 @@ check('без службы конфигурации работают дефол�
   const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
   assert.ok(entry, 'форма флагов всё равно зарегистрирована');
   const form = entry.entry.component({ ...entry.entry.options.inject(), view: 'page', t: (key) => key, translate: (key) => key });
-  assert.equal(form.children.filter((child) => child.props?.['data-tweak']).length, 5, 'показывает состояние всех твиков');
+  assert.equal(form.children.filter((child) => child.props?.['data-tweak']).length, 6, 'показывает состояние всех твиков');
   const texts = form.children.map((child) => child.children?.[0]).filter((text) => typeof text === 'string');
   assert.ok(texts.includes('form.unavailable'), `форма говорит о недоступности настроек (${texts.join(' | ')})`);
   for (const row of form.children.filter((child) => child.props?.['data-tweak'])) {
@@ -962,20 +978,20 @@ check('без службы конфигурации работают дефол�
   }
 });
 
-check('реестр знает пять твиков', () => {
+check('реестр знает шесть твиков', () => {
   const env = loadPlugin();
   const ids = formRows(env).map((row) => row.props['data-tweak']);
   assert.deepEqual(
     ids,
-    ['zoom', 'contextMenu', 'whisper', 'trafficLight', 'imageModelFallback'],
-    'в реестре пять твиков: zoom, contextMenu, whisper, trafficLight, imageModelFallback',
+    ['zoom', 'contextMenu', 'whisper', 'trafficLight', 'freePanels', 'imageModelFallback'],
+    'в реестре шесть твиков: zoom, contextMenu, whisper, trafficLight, freePanels, imageModelFallback',
   );
 });
 
-check('форма рисует пять галочек', () => {
+check('форма рисует шесть галочек', () => {
   const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: true, trafficLight: true, imageModelFallback: true } });
   const rows = formRows(env);
-  assert.equal(rows.length, 5, 'по галочке на каждый твик');
+  assert.equal(rows.length, 6, 'по галочке на каждый твик');
   for (const row of rows) {
     const id = row.props['data-tweak'];
     assert.equal(row.children.length, 2, `строка ${id}: подпись и переключатель`);
@@ -989,14 +1005,14 @@ check('whisper по умолчанию выключен', () => {
   // Дефолты реестра работают, пока конфигурация не готова: тяжёлый твик не
   // включается сам — иначе он поднимал бы Python-воркер и качал модель весов.
   const env = loadPlugin({ configFormsAvailable: false });
-  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight', 'imageModelFallback'], 'активны только твики с defaultOn');
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight', 'freePanels', 'imageModelFallback'], 'активны только твики с defaultOn');
   const row = formRows(env).find((child) => child.props['data-tweak'] === 'whisper');
   assert.equal(row.children[1].props.checked, false, 'галочка whisper снята');
 });
 
 check('включённый флаг вызывает клиентский activate, выключение снимает твик', () => {
   const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: false } });
-  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight', 'imageModelFallback'], 'пока флаг снят, твик не активен');
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight', 'freePanels', 'imageModelFallback'], 'пока флаг снят, твик не активен');
   /** Ресурсы соседей и формы: переключение whisper их трогать не должно. */
   const resources = () => ({
     keydown: env.listenerCount('keydown'),
@@ -1009,11 +1025,11 @@ check('включённый флаг вызывает клиентский activ
   const before = resources();
 
   env.setFlags({ whisper: true });
-  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight', 'imageModelFallback', 'whisper'], 'флаг включил твик без клиентского кода');
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight', 'freePanels', 'imageModelFallback', 'whisper'], 'флаг включил твик без клиентского кода');
   assert.deepEqual(resources(), before, 'включение whisper не задело соседей');
 
   env.setFlags({ whisper: false });
-  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight', 'imageModelFallback'], 'выключение убрало твик из активных');
+  assert.deepEqual(readyTweaks(env), ['zoom', 'contextMenu', 'trafficLight', 'freePanels', 'imageModelFallback'], 'выключение убрало твик из активных');
   assert.deepEqual(resources(), before, 'выключение ничего не оставило висеть');
 });
 
@@ -1546,6 +1562,73 @@ check('полоске панели clientX отдаётся в логическ�
   assert.equal(onHandle.clientX, 150, 'при 100% координата исходная');
 });
 
+check('свободный размер панелей: сетка без штатных лимитов и драг за курсором', () => {
+  // Штатный драг клампит ширины: сайдбар 264–420, панель 300 – 0.7·окно, центр не
+  // уже 400 — панель упирается и ручка уезжает от курсора. Твик перехватывает
+  // нажатие в capture-фазе (приложение свой DragHandle не получает) и пишет
+  // ширину прямо в сетку рамки.
+  const source = fs.readFileSync(CLIENT, 'utf8');
+  assert.ok(
+    source.includes('[data-sidebar-right-panel]:not([data-sidebar-right-panel="fullscreen"]){width:100%!important}'),
+    'содержимое правой панели заполняет нашу колонку',
+  );
+
+  const frame = createElement('app-frame');
+  frame.offsetWidth = 1400;
+  const sidebarCol = createElement('sidebar-col', ['X_sidebarCol']);
+  sidebarCol.offsetLeft = 0;
+  sidebarCol.offsetWidth = 280;
+  const rightbarCol = createElement('rightbar-col');
+  rightbarCol.offsetLeft = 900;
+  rightbarCol.offsetWidth = 500;
+  const seat = createElement('rightbar-seat');
+  const handle = createElement('handle-right', ['handle']);
+  handle.dataset.side = 'rightbar';
+  handle.parentElement = frame;
+  handle.closest = (selector) => (String(selector).includes('data-side') ? handle : null);
+  const env = loadPlugin({
+    frame,
+    seat,
+    columns: { sidebar: sidebarCol, rightbar: rightbarCol },
+    handles: [handle],
+    stored: '1.25',
+    flags: { zoom: true, contextMenu: true, freePanels: true },
+  });
+
+  // Ширины по умолчанию берутся из раскладки приложения, но центр уже без
+  // штатного `minmax(400px, 1fr)` — это и был потолок правой панели.
+  assert.equal(frame.style.gridTemplateColumns, '280px minmax(0px, 1fr) 500px', 'сетка без минимума центра');
+  assert.equal(handle.style.left, '900px', 'ручка стоит на границе панели');
+
+  /** Собрать событие указателя: как настоящее, но с методами отмены. */
+  const pointer = (type, clientX, pointerId = 1) => {
+    const event = new env.PointerEvent(type);
+    event.target = handle;
+    event.button = 0;
+    event.pointerId = pointerId;
+    event._x = clientX;
+    event.preventDefault = () => {};
+    event.stopImmediatePropagation = () => {};
+    return event;
+  };
+  env.fireWindow('pointerdown', pointer('pointerdown', 900));
+  // Тянем влево на 400 визуальных пикселей: это 320 логических, панель 820 —
+  // больше штатного потолка (min(1400−280−400, 0.7·1400) = 720).
+  env.fireWindow('pointermove', pointer('pointermove', 500));
+  env.runTimers();
+  assert.equal(
+    frame.style.gridTemplateColumns,
+    '280px minmax(0px, 1fr) 820px',
+    'панель вышла за штатный предел и следует за курсором',
+  );
+  env.fireWindow('pointerup', pointer('pointerup', 500));
+  assert.equal(
+    env.windowStorage?.('dsh.ui-panels.v1'),
+    '{"sidebar":280,"rightbar":820}',
+    'ширины панелей запоминаются',
+  );
+});
+
 check('правый клик в поле ввода открывает своё меню вместо системного', () => {
   // Системное меню Electron рисует Windows, и zoom до него не достаёт: плагин
   // подменяет его своим слоем, который масштабируется как обычный попап.
@@ -1641,7 +1724,7 @@ checkAsync('форма пишет флаг операцией set с прочи�
   const injected = entry.entry.options.inject();
   const form = entry.entry.component({ ...injected, view: 'page', t: (key) => key, translate: (key) => key });
   const rows = form.children.filter((child) => child.props?.['data-tweak']);
-  assert.equal(rows.length, 5, 'по переключателю на твик');
+  assert.equal(rows.length, 6, 'по переключателю на твик');
   assert.ok(
     rows.some((row) => row.props['data-tweak'] === 'imageModelFallback'),
     'в форме есть твик «отправить с Flash»',

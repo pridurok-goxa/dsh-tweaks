@@ -365,6 +365,7 @@ window.__ModuleLoader__.load({
         'tweak.whisper': 'Russian speech recognition',
         'tweak.trafficLight': 'Peak-hours traffic light',
         'tweak.imageModelFallback': 'Send images with a vision model',
+        'tweak.freePanels': 'Free panel resize',
         'imageFallback.text': 'This model does not support images. Send this message with a model that does.',
         'imageFallback.actionPrefix': 'Send with',
         'imageFallback.busy': 'Switching model…',
@@ -419,6 +420,7 @@ window.__ModuleLoader__.load({
         'tweak.whisper': 'Распознавание русской речи',
         'tweak.trafficLight': 'Светофор дорогих часов',
         'tweak.imageModelFallback': 'Отправка картинок через модель со зрением',
+        'tweak.freePanels': 'Свободный размер панелей',
         'imageFallback.text': 'Эта модель не видит изображения. Отправить сообщение моделью, которая их видит?',
         'imageFallback.actionPrefix': 'Отправить с',
         'imageFallback.busy': 'Меняю модель…',
@@ -1341,6 +1343,311 @@ window.__ModuleLoader__.load({
      * @param {object} api - отметка этапа и регистратор очисток твика.
      * @returns {void}
      */
+    /* #region free-panels */
+    /** Ключ хранения ширины панелей: у каждого устройства свои значения. */
+    const PANELS_KEY = 'dsh.ui-panels.v1';
+    /** Минимальная ширина панели, которую можно вытянуть мышью. */
+    const PANEL_MIN = 120;
+    /** Минимальная ширина центральной колонки: её не даём схлопнуть в ноль. */
+    const PANEL_MIN_CENTER = 120;
+    /** Потолок ширины сайдбара: 760 логических пикселей. */
+    const PANEL_MAX_SIDEBAR = 760;
+
+    /** Мост к твику «свободный размер панелей» для выключения. */
+    const freePanelsBridge = { reset: null };
+
+    /**
+     * Текущий масштаб интерфейса: координаты указателя визуальные, а ширины
+     * панелей живут в логических пикселях зум-контекста.
+     * @returns {number} масштаб (1 — без масштабирования).
+     */
+    function panelsScale() {
+      const raw = Number.parseFloat(document.documentElement.style.getPropertyValue(SCALE_VAR));
+      return Number.isFinite(raw) && raw > 0 ? raw : 1;
+    }
+
+    /**
+     * Развернуть твик «свободный размер панелей».
+     *
+     * Штатный драг приложения клампит ширины: сайдбар 264–420, правая панель
+     * 300 – 0.7·окно, центр не уже 400 px. Из-за этого панель упирается и ручка
+     * уезжает от курсора. Здесь перетаскивание перехватывается в capture-фазе до
+     * приложения (его DragHandle не получает событие), ширина пишется прямо в
+     * сетку рамки, а ручки ставятся на фактические границы колонок.
+     *
+     * Работает и в браузере, и в настольном приложении: используются только
+     * data-атрибуты DSH и суффиксы классов, без привязки к хешам сборки.
+     * @param {object} ctx - клиентский контекст плагина.
+     * @param {Function} markReady - отметка этапа инициализации.
+     * @param {Function} own - регистратор очисток твика.
+     * @returns {void}
+     */
+    function setupFreePanels(ctx, markReady, own) {
+      const frameOf = () => document.querySelector('[class*="_frame"]');
+      const sidebarOf = () => document.querySelector('[class*="_sidebarCol"]');
+      const rightbarOf = () => document.querySelector('[data-rightbar-col]');
+      const panelOpenOf = () => document.querySelector('[data-sidebar-right-open]');
+
+      // Инлайн-ширина места правой панели приходит пропсом приложения; сетка у
+      // нас своя, поэтому содержимому разрешаем заполнять колонку целиком.
+      const style = document.createElement('style');
+      style.dataset.dshFreePanels = 'root';
+      style.textContent =
+        '[data-sidebar-right-panel]:not([data-sidebar-right-panel="fullscreen"]){width:100%!important}';
+      document.head?.appendChild(style);
+
+      /**
+       * Прочитать сохранённые ширины панелей.
+       * @returns {{sidebar: number|null, rightbar: number|null}} ширины или null.
+       */
+      function readPanels() {
+        try {
+          const raw = window.localStorage?.getItem(PANELS_KEY);
+          if (raw === null || raw === undefined) return { sidebar: null, rightbar: null };
+          const parsed = JSON.parse(raw);
+          return {
+            sidebar: Number.isFinite(parsed?.sidebar) ? Math.round(parsed.sidebar) : null,
+            rightbar: Number.isFinite(parsed?.rightbar) ? Math.round(parsed.rightbar) : null,
+          };
+        } catch (_error) {
+          return { sidebar: null, rightbar: null };
+        }
+      }
+
+      /**
+       * Сохранить ширины панелей.
+       * @returns {void}
+       */
+      function savePanels() {
+        try {
+          window.localStorage?.setItem(PANELS_KEY, JSON.stringify(widths));
+        } catch (_error) {
+          /* приватный режим: ширины живут до перезагрузки */
+        }
+      }
+
+      /**
+       * Свести ширины к допустимым: панели не уже PANEL_MIN, центр не уже
+       * PANEL_MIN_CENTER; иначе панели «съедают» друг друга и ручку не поймать.
+       * @param {{sidebar: number|null, rightbar: number|null}} value - желаемые ширины.
+       * @param {number} frameWidth - логическая ширина рамки.
+       * @returns {{sidebar: number, rightbar: number}} допустимые ширины.
+       */
+      function clampPanels(value, frameWidth) {
+        const sidebar = Math.max(PANEL_MIN, Math.min(PANEL_MAX_SIDEBAR, Math.round(value.sidebar ?? 280)));
+        const maxRightbar = Math.max(PANEL_MIN, frameWidth - sidebar - PANEL_MIN_CENTER);
+        const rightbar = Math.max(PANEL_MIN, Math.min(maxRightbar, Math.round(value.rightbar ?? 300)));
+        return { sidebar, rightbar };
+      }
+
+      /**
+       * Поставить ручки рамки на фактические границы колонок.
+       * @returns {void}
+       */
+      function pinHandles() {
+        const sidebarCol = sidebarOf();
+        const rightbarCol = rightbarOf();
+        const sidebarHandle = document.querySelector('[data-side="sidebar"]');
+        const rightbarHandle = document.querySelector('[data-side="rightbar"]');
+        if (sidebarCol !== null && sidebarHandle !== null) {
+          const left = `${sidebarCol.offsetLeft + sidebarCol.offsetWidth}px`;
+          if (sidebarHandle.style.left !== left) sidebarHandle.style.left = left;
+        }
+        if (rightbarCol !== null && rightbarHandle !== null) {
+          const left = `${rightbarCol.offsetLeft}px`;
+          if (rightbarHandle.style.left !== left) rightbarHandle.style.left = left;
+        }
+      }
+
+      /**
+       * Применить ширины к сетке рамки. Свернутый сайдбар и закрытую/полноэкранную
+       * правую панель не трогаем — там шириной распоряжается приложение.
+       * @returns {void}
+       */
+      function apply() {
+        const frame = frameOf();
+        if (frame === null) return;
+        const frameWidth = Math.max(0, Math.round(frame.offsetWidth));
+        if (frameWidth === 0) return;
+        const sidebarCol = sidebarOf();
+        const appSidebar = sidebarCol === null ? 0 : Math.round(sidebarCol.offsetWidth);
+        const collapsed = appSidebar === 0 || appSidebar <= 64;
+        const fullscreen = document.querySelector('[data-rightbar-fullscreen]') !== null;
+        const panelOpen = panelOpenOf() !== null;
+        if (!customized) {
+          if (!collapsed && appSidebar > 0) widths.sidebar = appSidebar;
+          if (panelOpen) {
+            const appRightbar = Math.round(rightbarOf()?.offsetWidth ?? 0);
+            if (appRightbar > 0) widths.rightbar = appRightbar;
+          }
+        }
+        const clamped = clampPanels(widths, frameWidth);
+        // Свернутым сайдбаром и закрытой/полноэкранной панелью распоряжается
+        // приложение: свои ширины помним, но в сетку их сейчас не пишем.
+        const sidebar = collapsed ? appSidebar : clamped.sidebar;
+        const rightbar = panelOpen && !fullscreen ? clamped.rightbar : 0;
+        const grid = `${sidebar}px minmax(0px, 1fr) ${rightbar}px`;
+        lastApplied = grid;
+        if (frame.style.gridTemplateColumns !== grid) frame.style.gridTemplateColumns = grid;
+        // В настольном приложении шапка окна выравнивается по этой переменной.
+        if (frame.style.getPropertyValue('--dsh-windows-sidebar-width') !== '') {
+          frame.style.setProperty('--dsh-windows-sidebar-width', `${sidebar}px`);
+        }
+        pinHandles();
+      }
+
+      let widths = readPanels();
+      // Пока пользователь не тянул панели сам, их ширину берём у приложения:
+      // иначе первое открытие панели подставляло бы наш минимум вместо 45% окна.
+      let customized = widths.sidebar !== null || widths.rightbar !== null;
+      let dragging = null;
+      let lastApplied = '';
+      let appGrid = null;
+      let raf = 0;
+
+      /**
+       * Пересчитать сетку и ручки в следующем кадре.
+       * @returns {void}
+       */
+      function schedule() {
+        if (raf !== 0) return;
+        raf = window.requestAnimationFrame?.(() => {
+          raf = 0;
+          apply();
+        }) ?? 0;
+        if (raf === 0) apply();
+      }
+
+      /**
+       * Начать перетаскивание ручки рамки.
+       * @param {PointerEvent} event - событие нажатия.
+       * @returns {void}
+       */
+      function onPointerDown(event) {
+        if (event.button !== 0 || event.defaultPrevented) return;
+        const handle = event.target?.closest?.('[data-side="sidebar"], [data-side="rightbar"]');
+        if (handle === null || handle === undefined) return;
+        if (handle.closest('[data-width-handle]') !== null) return;
+        const side = handle.dataset.side;
+        const frame = frameOf();
+        const column = side === 'sidebar' ? sidebarOf() : rightbarOf();
+        if (frame === null || column === null) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        dragging = {
+          side,
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startSidebar: sidebarOf()?.offsetWidth ?? 0,
+          startRightbar: rightbarOf()?.offsetWidth ?? 0,
+        };
+        try {
+          handle.setPointerCapture?.(event.pointerId);
+        } catch (_error) {
+          /* захват не обязателен: слушаем window */
+        }
+        window.addEventListener('pointermove', onPointerMove, true);
+        window.addEventListener('pointerup', onPointerUp, true);
+        window.addEventListener('pointercancel', onPointerUp, true);
+      }
+
+      /**
+       * Тянуть ширину панели за курсором.
+       * @param {PointerEvent} event - движение указателя.
+       * @returns {void}
+       */
+      function onPointerMove(event) {
+        if (dragging === null || event.pointerId !== dragging.pointerId) return;
+        event.preventDefault();
+        // Координату указателя на ручках рамки уже делит твик «масштаб» (capture
+        // на `[data-side]`), поэтому сдвиг здесь сразу в логических пикселях.
+        const dx = event.clientX - dragging.startX;
+        const frame = frameOf();
+        if (frame === null) return;
+        customized = true;
+        const frameWidth = Math.max(0, Math.round(frame.offsetWidth));
+        if (dragging.side === 'rightbar') {
+          widths = { ...widths, rightbar: Math.round(dragging.startRightbar - dx) };
+        } else {
+          widths = { ...widths, sidebar: Math.round(dragging.startSidebar + dx) };
+        }
+        widths = clampPanels(widths, frameWidth);
+        schedule();
+      }
+
+      /**
+       * Закончить перетаскивание и запомнить ширины.
+       * @returns {void}
+       */
+      function onPointerUp() {
+        if (dragging === null) return;
+        dragging = null;
+        window.removeEventListener('pointermove', onPointerMove, true);
+        window.removeEventListener('pointerup', onPointerUp, true);
+        window.removeEventListener('pointercancel', onPointerUp, true);
+        apply();
+        savePanels();
+      }
+
+      const observer = new MutationObserver((records) => {
+        let touched = false;
+        for (const record of records) {
+          if (record.type === 'attributes' && record.attributeName === 'style') touched = true;
+        }
+        if (!touched) return;
+        const frame = frameOf();
+        if (frame === null) return;
+        const grid = frame.style.gridTemplateColumns;
+        if (grid === '' || grid === lastApplied) return;
+        // Это запись приложения (смена вёрстки, свёрнутый сайдбар, окно): запоминаем
+        // её для отката при выключении твика и возвращаем свою сетку.
+        appGrid = grid;
+        schedule();
+      });
+
+      // Ширины по умолчанию — из текущей раскладки приложения.
+      const firstApply = () => {
+        const frame = frameOf();
+        if (frame === null) return;
+        const appGridValue = frame.style.gridTemplateColumns;
+        if (appGridValue !== '') appGrid = appGridValue;
+        if (widths.sidebar === null) widths.sidebar = Math.round(sidebarOf()?.offsetWidth ?? 280);
+        if (widths.rightbar === null) widths.rightbar = Math.round(rightbarOf()?.offsetWidth ?? 300);
+        apply();
+      };
+
+      markReady?.('free-panels: ready');
+      firstApply();
+      // Ждём отрисовку рамки, если плагин поднялся раньше приложения.
+      const startTimer = window.setTimeout(() => {
+        firstApply();
+        const frame = frameOf();
+        if (frame !== null) observer.observe(frame, { attributes: true, attributeFilter: ['style'] });
+        window.addEventListener('resize', schedule);
+      }, 60);
+      window.addEventListener('pointerdown', onPointerDown, true);
+
+      /** Откатить твик: снять слушатели, вернуть сетку приложения. */
+      freePanelsBridge.reset = () => {
+        window.clearTimeout(startTimer);
+        window.removeEventListener('pointerdown', onPointerDown, true);
+        window.removeEventListener('resize', schedule);
+        window.removeEventListener('pointermove', onPointerMove, true);
+        window.removeEventListener('pointerup', onPointerUp, true);
+        window.removeEventListener('pointercancel', onPointerUp, true);
+        observer.disconnect();
+        style.remove?.();
+        const frame = frameOf();
+        if (frame !== null && appGrid !== null) frame.style.gridTemplateColumns = appGrid;
+        dragging = null;
+      };
+      own?.(() => {
+        freePanelsBridge.reset?.();
+        freePanelsBridge.reset = null;
+      });
+    }
+    /* #endregion free-panels */
+
     /* #region tweak-context-menu */
     /** Признак того, что узел принимает текстовый ввод. */
     function isEditable(node) {
@@ -3075,6 +3382,19 @@ window.__ModuleLoader__.load({
         },
         renderDetail(props) {
           return React.createElement(TrafficLightSettings, props);
+        },
+      },
+      freePanels: {
+        title: 'Свободный размер панелей',
+        titleKey: 'tweak.freePanels',
+        // Штатный драг панелей клампит ширины (сайдбар 264–420, панель 300–70%
+        // окна, центр не уже 400) — твик снимает эти лимиты.
+        defaultOn: true,
+        activate(ctx, api) {
+          setupFreePanels(ctx, api.markReady, api.own);
+        },
+        deactivate() {
+          freePanelsBridge.reset?.();
         },
       },
       imageModelFallback: {

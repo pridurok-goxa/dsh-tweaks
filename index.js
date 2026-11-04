@@ -88,6 +88,9 @@ export const Config = Schema.object({
   // кнопки — служебные поля (галочки у них нет): их читает клиент через
   // refresh, а форма строится из реестра TWEAKS.
   imageModelFallback: Schema.boolean().default(true).volatile(),
+  // Свободный размер панелей: снимает штатные лимиты драга (сайдбар 264–420,
+  // панель 300–70% окна, центр не уже 400) — клиентский твик.
+  freePanels: Schema.boolean().default(true).volatile(),
   imageFallbackProvider: Schema.string().default('deepseek-account').volatile(),
   imageFallbackModel: Schema.string().default('deepseek-flash').volatile(),
   imageFallbackLabel: Schema.string().default('Flash').volatile(),
