@@ -1576,6 +1576,10 @@ check('свободный размер панелей: сетка без шта�
     source.includes('clamp(240px,calc(var(--dsh-conversation-column-width, 0px) * .64),920px)'),
     'нижняя граница ширины чата ослаблена до 240 px',
   );
+  assert.ok(
+    source.includes('[class*="_sidebarCol"] [data-slot] > *{width:100%!important}'),
+    'содержимое сайдбара заполняет растянутую колонку',
+  );
 
   const frame = createElement('app-frame');
   frame.offsetWidth = 1400;
