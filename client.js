@@ -1392,8 +1392,14 @@ window.__ModuleLoader__.load({
       // нас своя, поэтому содержимому разрешаем заполнять колонку целиком.
       const style = document.createElement('style');
       style.dataset.dshFreePanels = 'root';
-      style.textContent =
-        '[data-sidebar-right-panel]:not([data-sidebar-right-panel="fullscreen"]){width:100%!important}';
+      // Содержимое правой панели заполняет нашу колонку; ширина чата внутри
+      // центральной колонки сохраняет нижнюю границу DSH (680 px), из-за которой
+      // при сужении центра чат уезжал за колонку и «скрывался». Ослабляем её,
+      // личную ширину чата (если её выставили ручкой) не трогаем.
+      style.textContent = [
+        '[data-sidebar-right-panel]:not([data-sidebar-right-panel="fullscreen"]){width:100%!important}',
+        '[class*="_body"]{--dsh-chat-content-width:var(--dsh-chat-user-width,clamp(240px,calc(var(--dsh-conversation-column-width, 0px) * .64),920px))!important}',
+      ].join('\n');
       document.head?.appendChild(style);
 
       /**

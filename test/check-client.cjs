@@ -1572,6 +1572,10 @@ check('свободный размер панелей: сетка без шта�
     source.includes('[data-sidebar-right-panel]:not([data-sidebar-right-panel="fullscreen"]){width:100%!important}'),
     'содержимое правой панели заполняет нашу колонку',
   );
+  assert.ok(
+    source.includes('clamp(240px,calc(var(--dsh-conversation-column-width, 0px) * .64),920px)'),
+    'нижняя граница ширины чата ослаблена до 240 px',
+  );
 
   const frame = createElement('app-frame');
   frame.offsetWidth = 1400;
