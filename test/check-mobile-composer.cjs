@@ -24,7 +24,7 @@ function fixture(coarse = true, mobile = false) {
   };
   const off = context.bind(card, actions, {matchMedia: () => ({matches: coarse}), navigator: {userAgentData: {mobile}}});
   return {
-    root, listeners, off,
+    root, card, listeners, off,
     get draft() { return draft; }, get insertions() { return insertions; },
     select(a, b) { start = a; end = b; }, reject() { reject = true; },
     event(type, props = {}) {
@@ -43,6 +43,12 @@ test('userAgentData.mobile fallback', () => { const f = fixture(false, true); as
 test('beforeinput-only Android Enter inserts newline', () => { const f = fixture(); assert(f.event('beforeinput', {inputType:'insertParagraph'}).stopped); assert.equal(f.draft, 'prefix \nsuffix'); });
 test('beforeinput insertLineBreak inserts newline', () => { const f = fixture(); f.event('beforeinput', {inputType:'insertLineBreak'}); assert.equal(f.insertions, 1); });
 test('IME Enter is not a send or an extra newline', () => { for (const props of [{isComposing:true},{keyCode:229}]) { const f = fixture(); const e = f.event('keydown', props); assert(e.stopped && !e.defaultPrevented); assert.equal(f.insertions,0); } });
+test('Safari unflagged final IME Enter is not an extra newline', () => {
+  const f = fixture(); let now = 1000; context.Date = {now:()=>now};
+  f.event('compositionstart'); assert(f.event('keydown').stopped); assert.equal(f.insertions,0);
+  f.event('compositionend'); assert(f.event('keydown').stopped); assert.equal(f.insertions,0);
+  now += 11; f.event('keydown'); assert.equal(f.insertions,1); delete context.Date;
+});
 test('ordinary composition/text input remains native', () => { const f = fixture(); assert(!f.event('beforeinput', {inputType:'insertCompositionText',data:'字',isComposing:true}).stopped); });
 test('paste preserves all lines, blank lines, tabs and trailing newline', () => { const f = fixture(); f.event('paste', {clipboardData:clipboard('first\n\nsecond\tя\n')}); assert.equal(f.draft,'prefix first\n\nsecond\tя\nsuffix'); assert.equal(f.insertions,1); });
 test('CRLF/CR normalize without truncation', () => { const f = fixture(); f.event('paste', {clipboardData:clipboard('first\r\n\r\nsecond\rthird')}); assert.equal(f.draft,'prefix first\n\nsecond\nthirdsuffix'); });
@@ -56,6 +62,13 @@ test('already consumed events are not repeated', () => { const f=fixture(); f.ev
 test('revision rejection cannot fall through to send', () => { const f=fixture(); f.reject(); assert(f.event('keydown').stopped); assert.equal(f.draft,'prefix suffix'); });
 test('two quick Returns are both preserved', () => { const f=fixture(); f.event('keydown'); f.event('keydown'); assert.equal(f.draft,'prefix \n\nsuffix'); });
 test('session/card isolation', () => { const a=fixture(), b=fixture(); a.event('keydown'); assert.equal(b.insertions,0); });
-test('cleanup removes every capture listener', () => { const f=fixture(); assert.equal(f.listeners.size,3); f.off(); assert.equal(f.listeners.size,0); });
+test('cleanup removes every capture listener', () => { const f=fixture(); assert.equal(f.listeners.size,5); f.off(); assert.equal(f.listeners.size,0); });
+test('overlay component binds public actions and cleans up on unmount', () => {
+  const f=fixture(); f.off(); const effects=[];
+  const view={matchMedia:()=>({matches:true})}; f.card.ownerDocument={defaultView:view};
+  context.React={useRef:()=>({current:{closest:()=>f.card}}),useEffect:fn=>effects.push(fn),createElement:(type,props)=>({type,props})};
+  const node=context.MobileComposerBinding({inputActions:{captureInsertion:()=>({start:0,end:0,draftRev:1}),insertText:()=>true}});
+  assert.equal(node.props.hidden,true); const cleanup=effects[0](); assert.equal(f.listeners.size,5);cleanup();assert.equal(f.listeners.size,0);
+});
 test('schema/default/registration are inside the existing tweak package', () => { assert(source.includes("titleKey: 'tweak.mobileComposer'")); assert(source.includes("slots.inject('conversation.input.overlay'")); assert(fs.readFileSync(path.join(__dirname,'..','index.js'),'utf8').includes('mobileComposer: Schema.boolean().default(true).volatile()')); });
 console.log(`PASS ${passed} mobile composer contract tests`);

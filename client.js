@@ -3368,9 +3368,21 @@ window.__ModuleLoader__.load({
         stop(event);
         actions.insertText(mobileComposerText(text), actions.captureInsertion());
       };
+      let composing = false;
+      let composingUntil = 0;
+      const onCompositionStart = (event) => {
+        if (editableTarget(event)) composing = true;
+      };
+      const onCompositionEnd = (event) => {
+        if (!editableTarget(event)) return;
+        composing = false;
+        // Match upstream's Safari grace period: final Enter can lose isComposing.
+        composingUntil = Date.now() + 10;
+      };
+      const inComposition = (event) => event.isComposing || event.keyCode === 229 || composing || Date.now() < composingUntil;
       const onKeyDown = (event) => {
         if (event.defaultPrevented || event.key !== 'Enter' || !editableTarget(event)) return;
-        if (event.isComposing || event.keyCode === 229) {
+        if (inComposition(event)) {
           // The IME owns confirmation; do not insert a newline or let the send keymap consume it.
           event.stopImmediatePropagation();
           return;
@@ -3381,7 +3393,7 @@ window.__ModuleLoader__.load({
         if (event.defaultPrevented || !editableTarget(event)) return;
         if (event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') {
           // Virtual keyboards may produce beforeinput without any keydown at all.
-          if (event.isComposing) { event.stopImmediatePropagation(); return; }
+          if (inComposition(event)) { event.stopImmediatePropagation(); return; }
           insert(event, '\n');
         } else if (event.inputType === 'insertFromPaste' || event.inputType === 'insertFromPasteAsQuotation') {
           // Some mobile clipboard keyboards only emit beforeinput. Mixed files stay upstream-owned.
@@ -3397,10 +3409,14 @@ window.__ModuleLoader__.load({
         const text = clipboard.getData('text/plain');
         if (text !== '') insert(event, text);
       };
+      card.addEventListener('compositionstart', onCompositionStart, true);
+      card.addEventListener('compositionend', onCompositionEnd, true);
       card.addEventListener('keydown', onKeyDown, true);
       card.addEventListener('beforeinput', onBeforeInput, true);
       card.addEventListener('paste', onPaste, true);
       return () => {
+        card.removeEventListener('compositionstart', onCompositionStart, true);
+        card.removeEventListener('compositionend', onCompositionEnd, true);
         card.removeEventListener('keydown', onKeyDown, true);
         card.removeEventListener('beforeinput', onBeforeInput, true);
         card.removeEventListener('paste', onPaste, true);
