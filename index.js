@@ -51,6 +51,8 @@ const TRAFFIC_LIGHT_HOLIDAYS_2026 = [
  * `default(true)` сохраняет поведение пакета до появления флагов.
  */
 export const Config = Schema.object({
+  // Touch composer: Enter/paste use public InputActions; desktop keymap is untouched.
+  mobileComposer: Schema.boolean().default(true).volatile(),
   zoom: Schema.boolean().default(true).volatile(),
   contextMenu: Schema.boolean().default(true).volatile(),
   // Речь — тяжёлый твик: он поднимает Python-воркер и качает модель весов,

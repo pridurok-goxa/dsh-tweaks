@@ -360,6 +360,7 @@ window.__ModuleLoader__.load({
         'menu.copy': 'Copy',
         'menu.paste': 'Paste',
         'menu.selectAll': 'Select All',
+        'tweak.mobileComposer': 'Mobile composer: Enter inserts a newline',
         'tweak.zoom': 'Interface size',
         'tweak.contextMenu': 'Custom right-click menu',
         'tweak.whisper': 'Russian speech recognition',
@@ -415,6 +416,7 @@ window.__ModuleLoader__.load({
         'menu.copy': 'Копировать',
         'menu.paste': 'Вставить',
         'menu.selectAll': 'Выделить всё',
+        'tweak.mobileComposer': 'Мобильный ввод: Enter переносит строку',
         'tweak.zoom': 'Масштаб интерфейса',
         'tweak.contextMenu': 'Своё меню по правой кнопке',
         'tweak.whisper': 'Распознавание русской речи',
@@ -3333,7 +3335,107 @@ window.__ModuleLoader__.load({
 
     /* #endregion tweak-image-model-fallback */
 
+    /* #region tweak-mobile-composer */
+
+    /** No reliable hardware-keyboard API exists; use the primary pointer, not viewport width. */
+    function mobileComposerDevice(view) {
+      return view?.matchMedia?.('(pointer: coarse)').matches === true ||
+        view?.navigator?.userAgentData?.mobile === true;
+    }
+
+    /** Preserve paragraph boundaries from Android/iOS clipboard providers, including CR-only text. */
+    function mobileComposerText(text) {
+      return text.replace(/\r\n?/g, '\n');
+    }
+
+    /**
+     * Scoped to one composer card; only the public revision-guarded InputActions API
+     * writes the draft. No DOM mutation, Lexical internals, synthetic keys, or submit calls.
+     */
+    function bindMobileComposer(card, actions, view) {
+      if (!card || typeof actions?.captureInsertion !== 'function' || typeof actions?.insertText !== 'function') return () => {};
+      const editableTarget = (event) => {
+        const target = event.target?.closest?.('[data-composer-input]');
+        return target && card.contains(target) && target.getAttribute('contenteditable') === 'true' &&
+          target.getAttribute('aria-disabled') !== 'true' && mobileComposerDevice(view) ? target : null;
+      };
+      const stop = (event) => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      };
+      const insert = (event, text) => {
+        // Stop Enter even if the current revision/phase refuses the edit: never fall through to submit.
+        stop(event);
+        actions.insertText(mobileComposerText(text), actions.captureInsertion());
+      };
+      const onKeyDown = (event) => {
+        if (event.defaultPrevented || event.key !== 'Enter' || !editableTarget(event)) return;
+        if (event.isComposing || event.keyCode === 229) {
+          // The IME owns confirmation; do not insert a newline or let the send keymap consume it.
+          event.stopImmediatePropagation();
+          return;
+        }
+        insert(event, '\n');
+      };
+      const onBeforeInput = (event) => {
+        if (event.defaultPrevented || !editableTarget(event)) return;
+        if (event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') {
+          // Virtual keyboards may produce beforeinput without any keydown at all.
+          if (event.isComposing) { event.stopImmediatePropagation(); return; }
+          insert(event, '\n');
+        } else if (event.inputType === 'insertFromPaste' || event.inputType === 'insertFromPasteAsQuotation') {
+          // Some mobile clipboard keyboards only emit beforeinput. Mixed files stay upstream-owned.
+          if (Array.from(event.dataTransfer?.items ?? []).some((item) => item.kind === 'file')) return;
+          const text = event.dataTransfer?.getData('text/plain') || event.data;
+          if (typeof text === 'string' && text !== '') insert(event, text);
+        }
+      };
+      const onPaste = (event) => {
+        if (event.defaultPrevented || !editableTarget(event)) return;
+        const clipboard = event.clipboardData;
+        if (!clipboard || Array.from(clipboard.items ?? []).some((item) => item.kind === 'file')) return;
+        const text = clipboard.getData('text/plain');
+        if (text !== '') insert(event, text);
+      };
+      card.addEventListener('keydown', onKeyDown, true);
+      card.addEventListener('beforeinput', onBeforeInput, true);
+      card.addEventListener('paste', onPaste, true);
+      return () => {
+        card.removeEventListener('keydown', onKeyDown, true);
+        card.removeEventListener('beforeinput', onBeforeInput, true);
+        card.removeEventListener('paste', onPaste, true);
+      };
+    }
+
+    function MobileComposerBinding({ inputActions }) {
+      const marker = React.useRef(null);
+      React.useEffect(() => {
+        const card = marker.current?.closest('[data-composer-card]');
+        return bindMobileComposer(card, inputActions, card?.ownerDocument?.defaultView);
+      }, [inputActions]);
+      return React.createElement('span', { ref: marker, hidden: true, 'data-mobile-composer-binding': '' });
+    }
+
+    function setupMobileComposer(ctx, api) {
+      const slots = typeof ctx?.get === 'function' ? ctx.get('slots') : undefined;
+      if (typeof slots?.inject !== 'function' || typeof slots?.register !== 'function') return;
+      api.own(slots.inject('conversation.input.overlay', () => slots.register(
+        { name: 'conversation.input.overlay', id: 'mobile-composer-newlines', order: -1000 },
+        (props) => React.createElement(MobileComposerBinding, props),
+      )));
+    }
+
+    /* #endregion tweak-mobile-composer */
+
     const TWEAKS = {
+      mobileComposer: {
+        title: 'Мобильный ввод: Enter переносит строку',
+        titleKey: 'tweak.mobileComposer',
+        defaultOn: true,
+        activate(ctx, api) {
+          setupMobileComposer(ctx, api);
+        },
+      },
       zoom: {
         title: 'Масштаб интерфейса',
         titleKey: 'tweak.zoom',
