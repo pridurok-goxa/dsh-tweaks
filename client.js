@@ -3337,107 +3337,253 @@ window.__ModuleLoader__.load({
 
     /* #region tweak-mobile-composer */
 
-    /** No reliable hardware-keyboard API exists; use the primary pointer, not viewport width. */
     function mobileComposerDevice(view) {
-      return view?.matchMedia?.('(pointer: coarse)').matches === true ||
-        view?.navigator?.userAgentData?.mobile === true;
+      return view?.matchMedia?.('(pointer: coarse)').matches === true || view?.navigator?.userAgentData?.mobile === true;
+    }
+    function mobileComposerText(text) { return text.replace(/\r\n?/g, '\n'); }
+    function leadingComposerCommand(text) { return /^\/[\w-]+(?=\s|$)/.exec(text)?.[0]; }
+
+    /** Detached parsing: Notes may provide HTML only, or plain text truncated to its first paragraph. */
+    function mobileClipboardText(data, view) {
+      const plain = mobileComposerText(data?.getData?.('text/plain') || '');
+      const html = data?.getData?.('text/html') || '';
+      if (!html || !view?.DOMParser) return plain;
+      const doc = new view.DOMParser().parseFromString(html, 'text/html');
+      const render = (node) => {
+        if (node.nodeType === 3) return node.nodeValue || '';
+        const tag = node.nodeName?.toUpperCase();
+        if (['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(tag)) return '';
+        if (tag === 'BR') return '\n';
+        let text = Array.from(node.childNodes || []).map(render).join('');
+        if (tag === 'P') text += '\n\n';
+        else if (['DIV', 'LI', 'PRE', 'BLOCKQUOTE', 'H1', 'H2', 'H3'].includes(tag) && !text.endsWith('\n')) text += '\n';
+        return text;
+      };
+      const converted = mobileComposerText(render(doc.body)).replace(/\n{1,2}$/, '');
+      return !plain || (!plain.includes('\n') && converted.startsWith(plain + '\n')) ? converted : plain;
     }
 
-    /** Preserve paragraph boundaries from Android/iOS clipboard providers, including CR-only text. */
-    function mobileComposerText(text) {
-      return text.replace(/\r\n?/g, '\n');
+    /** Native command claims supply mode, persistence, submission and guards. No custom send path. */
+    function mobileCommandBridge(ctx, sessionId) {
+      try {
+        const sessions = ctx?.get?.('sessions'), triggers = ctx?.get?.('inputTriggers');
+        const conversation = ctx?.get?.('conversation');
+        const actx = sessions?.scope?.(sessionId);
+        if (!actx || !triggers?.sessionOf || !conversation?.input?.for) return undefined;
+        const input = conversation.input.for(actx), controller = triggers.sessionOf(actx);
+        return {
+          snapshot: () => input.state.getSnapshot(),
+          resolve: (token, signal) => controller.resolveClaim(token, signal),
+          claim: (claim, span) => actx.bail(actx, 'slash/input-begin-command', { claim, span }) === true,
+          clear() {
+            const state = input.state.getSnapshot();
+            if (!state.claim) return;
+            const token = state.claim.token.trimEnd();
+            const separator = state.draft[token.length] === ' ' ? 1 : 0;
+            actx.bail(actx, 'slash/input-consume-token', { guard: { kind: 'span', span: { start: 0, end: 1 + separator, draftRev: state.draftRev } } });
+          },
+          toggle() {
+            const state = input.state.getSnapshot();
+            // Native beginCommand replaces [0, span.end), so caret/end-of-body is unsafe.
+            const end = state.claim ? 1 : leadingComposerCommand(state.draft)?.length || 0;
+            controller.toggleSource('command', { trigger: '/', query: '', quoted: false, position: 'leading', span: { start: 0, end, draftRev: state.draftRev } });
+          },
+        };
+      } catch (_error) { return undefined; }
     }
 
-    /**
-     * Scoped to one composer card; only the public revision-guarded InputActions API
-     * writes the draft. No DOM mutation, Lexical internals, synthetic keys, or submit calls.
-     */
-    function bindMobileComposer(card, actions, view) {
+    /** Write whole clipboard payload atomically through the public revision-guarded facade. */
+    function bindMobileComposer(card, actions, view, command) {
       if (!card || typeof actions?.captureInsertion !== 'function' || typeof actions?.insertText !== 'function') return () => {};
-      const editableTarget = (event) => {
+      let disposed = false, pendingNative = null, composing = false, composingUntil = 0;
+      const abort = new AbortController();
+      const targetOf = (event) => {
         const target = event.target?.closest?.('[data-composer-input]');
-        return target && card.contains(target) && target.getAttribute('contenteditable') === 'true' &&
-          target.getAttribute('aria-disabled') !== 'true' && mobileComposerDevice(view) ? target : null;
+        return target && card.contains(target) && target.getAttribute('contenteditable') === 'true' && target.getAttribute('aria-disabled') !== 'true' ? target : null;
       };
-      const stop = (event) => {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-      };
-      const insert = (event, text) => {
-        // Stop Enter even if the current revision/phase refuses the edit: never fall through to submit.
-        stop(event);
-        actions.insertText(mobileComposerText(text), actions.captureInsertion());
-      };
-      let composing = false;
-      let composingUntil = 0;
-      const onCompositionStart = (event) => {
-        if (editableTarget(event)) composing = true;
-      };
-      const onCompositionEnd = (event) => {
-        if (!editableTarget(event)) return;
-        composing = false;
-        // Match upstream's Safari grace period: final Enter can lose isComposing.
-        composingUntil = Date.now() + 10;
-      };
-      const inComposition = (event) => event.isComposing || event.keyCode === 229 || composing || Date.now() < composingUntil;
-      const onKeyDown = (event) => {
-        if (event.defaultPrevented || event.key !== 'Enter' || !editableTarget(event)) return;
-        if (inComposition(event)) {
-          // The IME owns confirmation; do not insert a newline or let the send keymap consume it.
-          event.stopImmediatePropagation();
-          return;
+      const stop = (event) => { event.preventDefault(); event.stopImmediatePropagation(); };
+      const insertText = (text, span = actions.captureInsertion()) => {
+        let clean = mobileComposerText(text);
+        const state = command?.snapshot?.();
+        // A preselected empty mode chip must not gain a duplicate literal /plan.
+        if (state?.claim && state.draft.trim() === state.claim.token.trim()) {
+          const token = state.claim.token.trim();
+          if (clean.startsWith(token) && /\s/.test(clean[token.length] || '')) clean = clean.slice(token.length).replace(/^ /, '');
         }
+        if (!actions.insertText(clean, span)) return false;
+        const next = command?.snapshot?.();
+        const token = next?.phase === 'plain' ? leadingComposerCommand(next.draft) : null;
+        if (token && command?.resolve && command?.claim) {
+          const draftRev = next.draftRev;
+          Promise.resolve(command.resolve(token, abort.signal)).then((claim) => {
+            if (disposed || !claim || command.snapshot().draftRev !== draftRev) return;
+            const caret = actions.captureInsertion();
+            const extraSeparator = next.draft[token.length] === ' ' ? 0 : claim.token.slice(claim.token.trimEnd().length).length;
+            if (command.claim(claim, { start: 0, end: token.length, draftRev }) && caret.start === caret.end) {
+              // Native claim insertion parks the caret at the chip. Restore a collapsed
+              // paste caret using a no-text public edit, never replacing a selected range.
+              const at = caret.start <= token.length ? 1 : caret.start + 1 - token.length + extraSeparator;
+              actions.insertText('', { start: at, end: at, draftRev: command.snapshot().draftRev });
+            }
+          }).catch(() => { /* Catalog unavailable: keep the full text, never send. */ });
+        }
+        return true;
+      };
+      const insert = (event, text) => { stop(event); insertText(text); };
+      const inComposition = (event) => event.isComposing || event.keyCode === 229 || composing || Date.now() < composingUntil;
+      const onCompositionStart = (event) => { if (targetOf(event)) composing = true; };
+      const onCompositionEnd = (event) => { if (targetOf(event)) { composing = false; composingUntil = Date.now() + 10; } };
+      const onKeyDown = (event) => {
+        if (event.defaultPrevented || event.key !== 'Enter' || !targetOf(event) || !mobileComposerDevice(view)) return;
+        if (inComposition(event)) { event.stopImmediatePropagation(); return; }
         insert(event, '\n');
       };
       const onBeforeInput = (event) => {
-        if (event.defaultPrevented || !editableTarget(event)) return;
-        if (event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') {
-          // Virtual keyboards may produce beforeinput without any keydown at all.
+        if (event.defaultPrevented || !targetOf(event)) return;
+        const mobile = mobileComposerDevice(view);
+        if (mobile && ['insertParagraph', 'insertLineBreak'].includes(event.inputType)) {
           if (inComposition(event)) { event.stopImmediatePropagation(); return; }
           insert(event, '\n');
-        } else if (event.inputType === 'insertFromPaste' || event.inputType === 'insertFromPasteAsQuotation') {
-          // Some mobile clipboard keyboards only emit beforeinput. Mixed files stay upstream-owned.
-          if (Array.from(event.dataTransfer?.items ?? []).some((item) => item.kind === 'file')) return;
-          const text = event.dataTransfer?.getData('text/plain') || event.data;
-          if (typeof text === 'string' && text !== '') insert(event, text);
+        } else if (['insertFromPaste', 'insertFromPasteAsQuotation'].includes(event.inputType)) {
+          if (Array.from(event.dataTransfer?.items || []).some((item) => item.kind === 'file')) return;
+          const text = mobileClipboardText(event.dataTransfer, view) || event.data;
+          if (typeof text === 'string' && text !== '' && (mobile || leadingComposerCommand(text))) insert(event, text);
+        } else if (mobile && ['insertText', 'insertCompositionText', 'insertFromComposition'].includes(event.inputType) &&
+          typeof event.data === 'string' && (/\r|\n/.test(event.data) || /^\/[\w-]+\s[\s\S]+/.test(event.data))) {
+          // Android clipboard keyboards can send a multi-paragraph paste as text/composition.
+          if (event.cancelable === false) {
+            pendingNative = { text: event.data, span: actions.captureInsertion() };
+            event.stopImmediatePropagation();
+          } else insert(event, event.data);
         }
       };
-      const onPaste = (event) => {
-        if (event.defaultPrevented || !editableTarget(event)) return;
-        const clipboard = event.clipboardData;
-        if (!clipboard || Array.from(clipboard.items ?? []).some((item) => item.kind === 'file')) return;
-        const text = clipboard.getData('text/plain');
-        if (text !== '') insert(event, text);
+      const onInput = (event) => {
+        if (!pendingNative || !targetOf(event)) return;
+        const pending = pendingNative; pendingNative = null;
+        event.stopImmediatePropagation();
+        insertText(pending.text, pending.span);
       };
-      card.addEventListener('compositionstart', onCompositionStart, true);
-      card.addEventListener('compositionend', onCompositionEnd, true);
-      card.addEventListener('keydown', onKeyDown, true);
-      card.addEventListener('beforeinput', onBeforeInput, true);
-      card.addEventListener('paste', onPaste, true);
+      const onPaste = (event) => {
+        if (event.defaultPrevented || !targetOf(event)) return;
+        const data = event.clipboardData;
+        if (!data || Array.from(data.items || []).some((item) => item.kind === 'file')) return;
+        const text = mobileClipboardText(data, view);
+        if (text !== '' && (mobileComposerDevice(view) || leadingComposerCommand(text))) insert(event, text);
+      };
+      const handlers = { compositionstart: onCompositionStart, compositionend: onCompositionEnd, keydown: onKeyDown, beforeinput: onBeforeInput, input: onInput, paste: onPaste };
+      for (const [name, fn] of Object.entries(handlers)) card.addEventListener(name, fn, true);
       return () => {
-        card.removeEventListener('compositionstart', onCompositionStart, true);
-        card.removeEventListener('compositionend', onCompositionEnd, true);
-        card.removeEventListener('keydown', onKeyDown, true);
-        card.removeEventListener('beforeinput', onBeforeInput, true);
-        card.removeEventListener('paste', onPaste, true);
+        disposed = true; abort.abort(); pendingNative = null;
+        for (const [name, fn] of Object.entries(handlers)) card.removeEventListener(name, fn, true);
       };
     }
 
-    function MobileComposerBinding({ inputActions }) {
+    /** Bounded mobile scrollport and visualViewport-aware menu anchoring. */
+    function bindMobileComposerLayout(card, view, command) {
+      if (typeof card?.querySelector !== 'function') return () => {};
+      const saved = new Map();
+      const plus = () => card.querySelector('button[aria-haspopup="listbox"]');
+      const setMenu = (menu, name, value) => {
+        if (!saved.has(menu)) saved.set(menu, new Map());
+        if (!saved.get(menu).has(name)) saved.get(menu).set(name, [menu.style.getPropertyValue(name), menu.style.getPropertyPriority(name)]);
+        menu.style.setProperty(name, value, 'important');
+      };
+      const restoreMenus = () => {
+        for (const [menu, props] of saved) for (const [name, [value, priority]] of props) {
+          if (value) menu.style.setProperty(name, value, priority); else menu.style.removeProperty(name);
+        }
+        saved.clear();
+      };
+      const position = () => {
+        if (command) card.setAttribute('data-tweaks-mode-chip', ''); else card.removeAttribute('data-tweaks-mode-chip');
+        if (!mobileComposerDevice(view)) { card.removeAttribute('data-mobile-composer'); restoreMenus(); return; }
+        const vp = view.visualViewport, height = vp?.height || view.innerHeight, width = vp?.width || view.innerWidth;
+        const top = vp?.offsetTop || 0, left = vp?.offsetLeft || 0;
+        // The existing zoom tweak scales #root: visual viewport lengths must become local CSS lengths.
+        const zoom = typeof readScale === 'function' ? readScale() : 1;
+        card.setAttribute('data-mobile-composer', '');
+        card.style.setProperty('--dsh-mobile-text-cap', Math.max(36, Math.floor(height * 0.4)) / zoom + 'px');
+        const menu = card.querySelector('[data-trigger-menu]'), button = plus();
+        if (!menu || !button) return;
+        const anchor = button.getBoundingClientRect();
+        const above = Math.max(0, anchor.top - top - 12), below = Math.max(0, top + height - anchor.bottom - 12);
+        const up = above >= Math.min(160, below);
+        const cap = Math.max(36, Math.min(320, up ? above : below));
+        const h = Math.min(cap, menu.scrollHeight * zoom || menu.getBoundingClientRect().height || cap), w = Math.min(360, Math.max(40, width - 16));
+        const x = Math.max(left + 8, Math.min(anchor.left, left + width - w - 8));
+        const y = Math.max(top + 8, Math.min(up ? anchor.top - h - 4 : anchor.bottom + 4, top + height - h - 8));
+        for (const [name, value] of Object.entries({ position: 'fixed', left: x / zoom + 'px', top: y / zoom + 'px', right: 'auto', bottom: 'auto', width: w / zoom + 'px', 'min-width': '0', 'max-height': cap / zoom + 'px', 'overflow-y': 'auto', 'z-index': '1200' })) setMenu(menu, name, value);
+      };
+      let frame = null;
+      const schedule = () => {
+        if (frame !== null) return;
+        if (!view.requestAnimationFrame) { position(); return; }
+        frame = view.requestAnimationFrame(() => { frame = null; position(); });
+      };
+      const isPlus = (event) => !!command && event.target?.closest?.('button[aria-haspopup="listbox"]') === plus();
+      const onDown = (event) => {
+        // On all platforms the menu selects a mode without stealing the editor selection.
+        if (!isPlus(event)) return;
+        event.preventDefault(); event.stopImmediatePropagation();
+      };
+      const onClick = (event) => {
+        if (!isPlus(event)) return;
+        event.preventDefault(); event.stopImmediatePropagation(); command.toggle(); schedule();
+      };
+      card.addEventListener('pointerdown', onDown, true);
+      card.addEventListener('mousedown', onDown, true);
+      card.addEventListener('click', onClick, true);
+      view.addEventListener?.('resize', schedule);
+      view.visualViewport?.addEventListener?.('resize', schedule);
+      view.visualViewport?.addEventListener?.('scroll', schedule);
+      const media = view.matchMedia?.('(pointer: coarse)'); media?.addEventListener?.('change', schedule);
+      const observer = view.MutationObserver ? new view.MutationObserver(schedule) : null;
+      observer?.observe(card, { childList: true, subtree: true });
+      // Scale changes are published on html by the same plugin. Do not observe our own inline menu writes.
+      if (card.ownerDocument?.documentElement) observer?.observe(card.ownerDocument.documentElement, { attributes: true, attributeFilter: ['style'] });
+      position();
+      return () => {
+        observer?.disconnect(); if (frame !== null) view.cancelAnimationFrame?.(frame);
+        card.removeEventListener('pointerdown', onDown, true); card.removeEventListener('mousedown', onDown, true); card.removeEventListener('click', onClick, true);
+        view.removeEventListener?.('resize', schedule); view.visualViewport?.removeEventListener?.('resize', schedule); view.visualViewport?.removeEventListener?.('scroll', schedule); media?.removeEventListener?.('change', schedule);
+        card.removeAttribute('data-mobile-composer'); card.removeAttribute('data-tweaks-mode-chip'); card.style.removeProperty('--dsh-mobile-text-cap'); restoreMenus();
+      };
+    }
+
+    function MobileComposerBinding({ inputActions, commandBridge }) {
       const marker = React.useRef(null);
       React.useEffect(() => {
-        const card = marker.current?.closest('[data-composer-card]');
-        return bindMobileComposer(card, inputActions, card?.ownerDocument?.defaultView);
-      }, [inputActions]);
+        const card = marker.current?.closest('[data-composer-card]'), view = card?.ownerDocument?.defaultView;
+        const offInput = bindMobileComposer(card, inputActions, view, commandBridge);
+        const offLayout = bindMobileComposerLayout(card, view, commandBridge);
+        return () => { offInput(); offLayout(); };
+      }, [inputActions, commandBridge]);
       return React.createElement('span', { ref: marker, hidden: true, 'data-mobile-composer-binding': '' });
     }
-
+    function ComposerModeChip({ useInput, commandBridge }) {
+      const state = typeof useInput === 'function' ? useInput((input) => input) : undefined;
+      if (!state?.claim || !commandBridge) return null;
+      return React.createElement('button', {
+        type: 'button', 'data-tweaks-command-mode': '', title: 'Снять режим ' + state.claim.token.trim(),
+        'aria-label': 'Снять режим ' + state.claim.token.trim(),
+        onPointerDown: (event) => event.preventDefault(), onMouseDown: (event) => event.preventDefault(),
+        onClick: (event) => { event.preventDefault(); commandBridge.clear(); },
+      }, state.claim.token.trim() + ' ×');
+    }
     function setupMobileComposer(ctx, api) {
       const slots = typeof ctx?.get === 'function' ? ctx.get('slots') : undefined;
       if (typeof slots?.inject !== 'function' || typeof slots?.register !== 'function') return;
+      const style = document.createElement('style');
+      style.textContent = '[data-tweaks-mode-chip] [data-composer-command]{display:none!important}[data-mobile-composer] [data-input-scroll]{max-height:var(--dsh-mobile-text-cap)!important;overflow-y:auto!important;overscroll-behavior:contain;min-height:0}[data-mobile-composer]>div:last-child{flex-shrink:0}[data-tweaks-command-mode]{border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:3px 10px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);cursor:pointer}';
+      document.head?.appendChild(style); api.own(() => style.remove());
+      const inject = (sessionId) => ({ commandBridge: mobileCommandBridge(ctx, sessionId) });
       api.own(slots.inject('conversation.input.overlay', () => slots.register(
-        { name: 'conversation.input.overlay', id: 'mobile-composer-newlines', order: -1000 },
+        { name: 'conversation.input.overlay', id: 'mobile-composer-newlines', order: -1000, inject },
         (props) => React.createElement(MobileComposerBinding, props),
+      )));
+      api.own(slots.inject('conversation.input.dock', () => slots.register(
+        { name: 'conversation.input.dock', id: 'composer-command-mode-chip', order: -900, inject },
+        (props) => React.createElement(ComposerModeChip, props),
       )));
     }
 

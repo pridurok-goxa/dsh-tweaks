@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '..', 'client.js'), 'utf8');
 const region = source.split('/* #region tweak-mobile-composer */')[1].split('/* #endregion tweak-mobile-composer */')[0];
-const context = vm.createContext({});
+const context = vm.createContext({AbortController});
 vm.runInContext(region + '\nthis.bind = bindMobileComposer; this.mobile = mobileComposerDevice;', context);
 let passed = 0;
 function test(name, fn) { fn(); passed++; console.log('ok', name); }
@@ -62,13 +62,13 @@ test('already consumed events are not repeated', () => { const f=fixture(); f.ev
 test('revision rejection cannot fall through to send', () => { const f=fixture(); f.reject(); assert(f.event('keydown').stopped); assert.equal(f.draft,'prefix suffix'); });
 test('two quick Returns are both preserved', () => { const f=fixture(); f.event('keydown'); f.event('keydown'); assert.equal(f.draft,'prefix \n\nsuffix'); });
 test('session/card isolation', () => { const a=fixture(), b=fixture(); a.event('keydown'); assert.equal(b.insertions,0); });
-test('cleanup removes every capture listener', () => { const f=fixture(); assert.equal(f.listeners.size,5); f.off(); assert.equal(f.listeners.size,0); });
+test('cleanup removes every capture listener', () => { const f=fixture(); assert.equal(f.listeners.size,6); f.off(); assert.equal(f.listeners.size,0); });
 test('overlay component binds public actions and cleans up on unmount', () => {
   const f=fixture(); f.off(); const effects=[];
   const view={matchMedia:()=>({matches:true})}; f.card.ownerDocument={defaultView:view};
   context.React={useRef:()=>({current:{closest:()=>f.card}}),useEffect:fn=>effects.push(fn),createElement:(type,props)=>({type,props})};
   const node=context.MobileComposerBinding({inputActions:{captureInsertion:()=>({start:0,end:0,draftRev:1}),insertText:()=>true}});
-  assert.equal(node.props.hidden,true); const cleanup=effects[0](); assert.equal(f.listeners.size,5);cleanup();assert.equal(f.listeners.size,0);
+  assert.equal(node.props.hidden,true); const cleanup=effects[0](); assert.equal(f.listeners.size,6);cleanup();assert.equal(f.listeners.size,0);
 });
 test('schema/default/registration are inside the existing tweak package', () => { assert(source.includes("titleKey: 'tweak.mobileComposer'")); assert(source.includes("slots.inject('conversation.input.overlay'")); assert(fs.readFileSync(path.join(__dirname,'..','index.js'),'utf8').includes('mobileComposer: Schema.boolean().default(true).volatile()')); });
 console.log(`PASS ${passed} mobile composer contract tests`);
