@@ -362,6 +362,7 @@ window.__ModuleLoader__.load({
         'menu.selectAll': 'Select All',
         'tweak.mobileComposer': 'Mobile composer: Enter inserts a newline',
         'tweak.queueEditor': 'Queue: edit messages with attachments',
+        'tweak.fileDownload': 'Files: download from chat and tabs',
         'tweak.mobileSidebar': 'Mobile menu: slide-out sidebar',
         'mobileSidebar.open': 'Open menu',
         'mobilePanels.open': 'Global panels',
@@ -423,6 +424,7 @@ window.__ModuleLoader__.load({
         'menu.selectAll': 'Выделить всё',
         'tweak.mobileComposer': 'Мобильный ввод: Enter переносит строку',
         'tweak.queueEditor': 'Очередь: редактирование с вложениями',
+        'tweak.fileDownload': 'Файлы: скачивание из чата и вкладок',
         'tweak.mobileSidebar': 'Мобильное меню: выдвижная панель',
         'mobileSidebar.open': 'Открыть меню',
         'mobilePanels.open': 'Глобальные панели',
@@ -5986,6 +5988,235 @@ window.__ModuleLoader__.load({
 
     /* #endregion tweak-mobile-tabs-actions */
 
+    /* #region tweak-file-download */
+
+    /** Относительный путь хост-роута скачивания. */
+    const DOWNLOAD_ROUTE = 'dsh-tweaks/download';
+
+    /**
+     * Разобрать `dsh-resource://file/session/<id>/<path>`.
+     * @param {unknown} address - адрес ресурса.
+     * @returns {{sessionId: string, path: string} | undefined} части или undefined.
+     */
+    function parseDshFileAddress(address) {
+      if (typeof address !== 'string' || !address.startsWith('dsh-resource://file/')) return undefined;
+      const end = address.search(/[?#]/);
+      const parts = address.slice(20, end === -1 ? undefined : end).split('/');
+      const scope = parts.shift();
+      if (scope !== 'session') return undefined;
+      const id = parts.shift();
+      if (id === undefined || id === '' || parts.length === 0) return undefined;
+      try {
+        return { sessionId: decodeURIComponent(id), path: parts.map(decodeURIComponent).join('/') };
+      } catch (_error) {
+        return undefined;
+      }
+    }
+
+    /**
+     * Скачать файл через хост-роут: ответ превращается в Blob и обычную ссылку.
+     * @param {object} body - тело запроса.
+     * @param {string} fallbackName - имя, если сервер не прислал.
+     * @returns {Promise<void>} завершение скачивания.
+     */
+    async function downloadViaHost(body, fallbackName) {
+      const response = await fetch(DOWNLOAD_ROUTE, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const message = await response.json().then((value) => value?.message).catch(() => null);
+        throw new Error(message ?? `Не удалось скачать (${response.status})`);
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('content-disposition') ?? '';
+      const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
+      let name = fallbackName;
+      if (encoded !== undefined) {
+        try { name = decodeURIComponent(encoded); } catch (_error) { /* имя остаётся запасным */ }
+      }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = name || 'file';
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 30000);
+    }
+
+    /**
+     * Найти durable-ссылку файла у карточки вложения через React fiber.
+     * В DOM у карточки есть только имя; сам ref лежит в props содержимого.
+     * @param {object} card - DOM-карточка файла.
+     * @returns {object | null} durable ref либо null.
+     */
+    function fileRefOfCard(card) {
+      try {
+        const key = Object.keys(card).find((name) => name.startsWith('__reactFiber$') || name.startsWith('__reactInternalInstance$'));
+        let fiber = key === undefined ? null : card[key];
+        const title = card.getAttribute('title') ?? '';
+        for (let depth = 0; depth < 20 && fiber !== null; depth += 1, fiber = fiber.return) {
+          const attachments = fiber.memoizedProps?.content?.attachments;
+          if (Array.isArray(attachments)) {
+            const match = attachments.find((item) => item?.type === 'file' && item.file?.name === title);
+            if (match !== undefined) return match.file;
+          }
+        }
+      } catch (_error) {
+        /* fiber недоступен — пункт меню будет неактивен */
+      }
+      return null;
+    }
+
+    /** Пункт «Скачать» в меню вкладки файла правой панели. */
+    function DownloadTabMenuItem({ tab, dismiss }) {
+      const parsed = parseDshFileAddress(tab?.contentId);
+      if (parsed === undefined) return null;
+      return React.createElement('button', {
+        type: 'button',
+        role: 'menuitem',
+        className: 'dsh-tweaks-download-item',
+        onClick: () => {
+          dismiss?.();
+          downloadViaHost({ sessionId: parsed.sessionId, path: parsed.path, name: tab.title }, tab.title).catch((error) => {
+            window.alert?.(error instanceof Error ? error.message : 'Не удалось скачать файл');
+          });
+        },
+      }, 'Скачать');
+    }
+
+    /**
+     * Скачивание файлов: пункт в меню вкладки правой панели и долгое нажатие
+     * на файловой карточке в чате.
+     * @param {object} ctx - клиентский контекст.
+     * @param {object} api - очистки твика.
+     * @returns {void}
+     */
+    function setupFileDownload(ctx, api) {
+      const own = typeof api?.own === 'function' ? api.own : () => {};
+      const style = document.createElement('style');
+      style.dataset.dshFileDownload = '';
+      style.textContent = [
+        '.dsh-tweaks-download-item{box-sizing:border-box;width:100%;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-primary);text-align:left;font:inherit;font-size:12px;line-height:17px;padding:5px 8px;cursor:pointer}',
+        '.dsh-tweaks-download-item:hover,.dsh-tweaks-download-item:focus-visible{background:var(--dsw-alias-interactive-bg-hover)}',
+        '.dsh-tweaks-file-menu{position:fixed;z-index:120;min-width:132px;padding:4px;border-radius:var(--dsw-radius-md);border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-specific-menu);box-shadow:var(--dsw-elevation-prominent)}',
+        '.dsh-tweaks-file-menu button{display:block;width:100%;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-primary);text-align:left;font:inherit;font-size:13px;padding:7px 10px;cursor:pointer}',
+        '.dsh-tweaks-file-menu button:hover{background:var(--dsw-alias-interactive-bg-hover)}',
+        '.dsh-tweaks-file-menu button:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}',
+      ].join('\n');
+      document.head?.appendChild(style);
+      own(() => style.remove());
+
+      let menu = null;
+      const closeMenu = () => {
+        menu?.remove();
+        menu = null;
+      };
+      const onDocumentDown = (event) => {
+        if (menu !== null && !menu.contains(event.target)) closeMenu();
+      };
+      const onKey = (event) => {
+        if (event.key === 'Escape') closeMenu();
+      };
+      document.addEventListener('pointerdown', onDocumentDown, true);
+      document.addEventListener('keydown', onKey, true);
+      own(() => {
+        document.removeEventListener('pointerdown', onDocumentDown, true);
+        document.removeEventListener('keydown', onKey, true);
+        closeMenu();
+      });
+
+      /**
+       * Открыть маленькое меню у точки нажатия.
+       * @param {number} clientX - x.
+       * @param {number} clientY - y.
+       * @param {object | null} ref - durable-ссылка.
+       * @param {string} name - имя файла.
+       * @returns {void}
+       */
+      const openMenu = (clientX, clientY, ref, name) => {
+        closeMenu();
+        menu = document.createElement('div');
+        menu.className = 'dsh-tweaks-file-menu';
+        menu.setAttribute('role', 'menu');
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.setAttribute('role', 'menuitem');
+        item.textContent = 'Скачать';
+        item.disabled = ref === null;
+        item.addEventListener('click', () => {
+          if (ref === null) return;
+          closeMenu();
+          const sessionId = document.querySelector('[data-conversation-session]')?.getAttribute('data-conversation-session');
+          if (typeof sessionId !== 'string' || sessionId === '') return;
+          downloadViaHost({ sessionId, attachment: ref }, name).catch((error) => {
+            window.alert?.(error instanceof Error ? error.message : 'Не удалось скачать файл');
+          });
+        });
+        menu.appendChild(item);
+        document.body.appendChild(menu);
+        const width = menu.offsetWidth;
+        const height = menu.offsetHeight;
+        menu.style.left = `${Math.round(Math.min(Math.max(8, clientX), window.innerWidth - width - 8))}px`;
+        menu.style.top = `${Math.round(Math.min(Math.max(8, clientY), window.innerHeight - height - 8))}px`;
+      };
+
+      let holdTimer = null;
+      let holdStart = null;
+      const cancelHold = () => {
+        if (holdTimer !== null) window.clearTimeout(holdTimer);
+        holdTimer = null;
+        holdStart = null;
+      };
+      const onPointerDown = (event) => {
+        if (event.button > 0) return;
+        const card = event.target?.closest?.('[class*="_fileCard"]');
+        if (card === null || card === undefined) return;
+        cancelHold();
+        holdStart = { x: event.clientX, y: event.clientY, card };
+        holdTimer = window.setTimeout(() => {
+          holdTimer = null;
+          if (holdStart === null) return;
+          openMenu(holdStart.x, holdStart.y, fileRefOfCard(holdStart.card), holdStart.card.getAttribute('title') ?? 'file');
+        }, 520);
+      };
+      const onPointerMove = (event) => {
+        if (holdStart === null) return;
+        if (Math.abs(event.clientX - holdStart.x) > 8 || Math.abs(event.clientY - holdStart.y) > 8) cancelHold();
+      };
+      const onPointerUp = () => cancelHold();
+      document.addEventListener('pointerdown', onPointerDown, true);
+      document.addEventListener('pointermove', onPointerMove, true);
+      document.addEventListener('pointerup', onPointerUp, true);
+      document.addEventListener('pointercancel', onPointerUp, true);
+      own(() => {
+        cancelHold();
+        document.removeEventListener('pointerdown', onPointerDown, true);
+        document.removeEventListener('pointermove', onPointerMove, true);
+        document.removeEventListener('pointerup', onPointerUp, true);
+        document.removeEventListener('pointercancel', onPointerUp, true);
+      });
+
+      let slots;
+      try {
+        slots = typeof ctx?.get === 'function' ? ctx.get('slots') : undefined;
+      } catch (_error) {
+        slots = undefined;
+      }
+      if (typeof slots?.inject === 'function' && typeof slots?.register === 'function') {
+        own(slots.inject('sidebar.right.tab.menu.item', () => slots.register(
+          { name: 'sidebar.right.tab.menu.item', id: 'download', order: 40 },
+          (props) => React.createElement(DownloadTabMenuItem, props),
+        )));
+      }
+    }
+
+    /* #endregion tweak-file-download */
+
     const TWEAKS = {
       mobileComposer: {
         title: 'Мобильный ввод: Enter переносит строку',
@@ -6003,6 +6234,14 @@ window.__ModuleLoader__.load({
         defaultOn: true,
         activate(ctx, api) {
           setupQueueEditor(ctx, api);
+        },
+      },
+      fileDownload: {
+        title: 'Скачивание файлов из чата и вкладок',
+        titleKey: 'tweak.fileDownload',
+        defaultOn: true,
+        activate(ctx, api) {
+          setupFileDownload(ctx, api);
         },
       },
       mobileSidebar: {

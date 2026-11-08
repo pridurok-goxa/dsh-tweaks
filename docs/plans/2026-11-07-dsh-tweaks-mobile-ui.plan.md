@@ -186,3 +186,13 @@
 - Три точки «More actions» перенесены в панель вкладок и прижаты вправо
   (x356..384 при строке до 384); `moreOf` находит перемещённую кнопку, поэтому
   пункты «Копировать ID» и виды продолжают работать. Версия 2.4.4.
+
+## Дополнение 2026-11-08 15:20 MSK
+
+- Скачивание файлов: хост-роут POST /dsh-tweaks/download (durable-вложения
+  через readFileStream, workspace-файлы через workspaceFiles.readBytes и
+  workspaceFileScope из header.cwd). Клиент: пункт «Скачать» в меню вкладки
+  правой панели и долгое нажатие на файловой карточке в чате (меню у точки
+  нажатия, ref через React fiber). Headless проверено: вкладка package.json —
+  Close + Скачать; чат test.txt — download test.txt без ошибки; workspace-роут
+  отдал package.json 1202 байта. Версия 2.5.0.

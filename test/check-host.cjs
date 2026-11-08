@@ -233,6 +233,9 @@ async function main() {
   assert.ok(dict.queueEditor, 'в схеме Config есть поле queueEditor');
   assert.equal(dict.queueEditor.options.default, true, 'queueEditor включён по умолчанию');
   assert.equal(dict.queueEditor.options.volatile, true, 'queueEditor — volatile-поле');
+  assert.ok(dict.fileDownload, 'в схеме Config есть поле fileDownload');
+  assert.equal(dict.fileDownload.options.default, true, 'fileDownload включён по умолчанию');
+  assert.equal(dict.fileDownload.options.volatile, true, 'fileDownload — volatile-поле');
 
   // 2) Флаг снят: хост-часть даже не импортируется.
   const idle = createContext();

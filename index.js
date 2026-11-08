@@ -59,6 +59,8 @@ export const Config = Schema.object({
   // Единая форма редактирования очереди (текст + вложения) с сохранением позиции.
   // Клиентская часть — в TWEAKS; хост-роут живёт всегда, пока плагин включён.
   queueEditor: Schema.boolean().default(true).volatile(),
+  // Скачивание файлов из чата и вкладок правой панели.
+  fileDownload: Schema.boolean().default(true).volatile(),
   zoom: Schema.boolean().default(true).volatile(),
   contextMenu: Schema.boolean().default(true).volatile(),
   // Речь — тяжёлый твик: он поднимает Python-воркер и качает модель весов,
@@ -103,6 +105,9 @@ export const Config = Schema.object({
   imageFallbackModel: Schema.string().default('deepseek-flash').volatile(),
   imageFallbackLabel: Schema.string().default('Flash').volatile(),
 });
+
+/** Модуль хост-части скачивания файлов. */
+const DOWNLOAD_HOST = './tweaks/download-host.js';
 
 /** Модуль хост-части редактора очереди. */
 const QUEUE_EDIT_HOST = './tweaks/queue-edit-host.js';
@@ -513,6 +518,20 @@ function attachTrafficLight(ctx, config) {
 }
 
 /**
+ * Подключить хост-роут скачивания файлов.
+ * @param {object} ctx - хост-контекст плагина.
+ * @returns {void}
+ */
+function attachDownloads(ctx) {
+  import(DOWNLOAD_HOST)
+    .then((host) => {
+      if (typeof host?.activate === 'function') host.activate(ctx);
+      else warn(ctx, `dsh-tweaks: в хост-части скачивания (${DOWNLOAD_HOST}) нет activate`);
+    })
+    .catch((error) => warn(ctx, `dsh-tweaks: хост-часть скачивания (${DOWNLOAD_HOST}) недоступна`, error));
+}
+
+/**
  * Подключить хост-роут редактора очереди. Роут один и не зависит от
  * volatile-поля: клиентская галочка `queueEditor` только показывает форму.
  * @param {object} ctx - хост-контекст плагина.
@@ -538,4 +557,5 @@ export function apply(ctx, config) {
   attachWhisper(ctx, config);
   attachTrafficLight(ctx, config);
   attachQueueEditor(ctx);
+  attachDownloads(ctx);
 }
