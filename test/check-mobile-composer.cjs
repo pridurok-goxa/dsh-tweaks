@@ -43,11 +43,11 @@ test('userAgentData.mobile fallback', () => { const f = fixture(false, true); as
 test('beforeinput-only Android Enter inserts newline', () => { const f = fixture(); assert(f.event('beforeinput', {inputType:'insertParagraph'}).stopped); assert.equal(f.draft, 'prefix \nsuffix'); });
 test('beforeinput insertLineBreak inserts newline', () => { const f = fixture(); f.event('beforeinput', {inputType:'insertLineBreak'}); assert.equal(f.insertions, 1); });
 test('IME Enter is not a send or an extra newline', () => { for (const props of [{isComposing:true},{keyCode:229}]) { const f = fixture(); const e = f.event('keydown', props); assert(e.stopped && !e.defaultPrevented); assert.equal(f.insertions,0); } });
-test('Safari unflagged final IME Enter is not an extra newline', () => {
+test('IME Enter commits composition and adds the newline once', () => {
   const f = fixture(); let now = 1000; context.Date = {now:()=>now};
   f.event('compositionstart'); assert(f.event('keydown').stopped); assert.equal(f.insertions,0);
-  f.event('compositionend'); assert(f.event('keydown').stopped); assert.equal(f.insertions,0);
-  now += 11; f.event('keydown'); assert.equal(f.insertions,1); delete context.Date;
+  f.event('compositionend'); assert.equal(f.insertions,1, 'первый Enter после композиции уже даёт перенос');
+  now += 11; f.event('keydown'); assert.equal(f.insertions,2, 'следующий Enter — обычный перенос'); delete context.Date;
 });
 test('ordinary composition/text input remains native', () => { const f = fixture(); assert(!f.event('beforeinput', {inputType:'insertCompositionText',data:'字',isComposing:true}).stopped); });
 test('paste preserves all lines, blank lines, tabs and trailing newline', () => { const f = fixture(); f.event('paste', {clipboardData:clipboard('first\n\nsecond\tя\n')}); assert.equal(f.draft,'prefix first\n\nsecond\tя\nsuffix'); assert.equal(f.insertions,1); });
@@ -84,6 +84,8 @@ test('composer wiring keeps the new mobile behaviors', () => {
   assert.match(source, /revealComposerSoon\(card, view\)/);
   assert.match(source, /height \* 0\.2/, 'высота черновика вдвое меньше');
   assert.ok(source.includes("setAttribute('spellcheck', 'false')"), 'подчёркивание проверки орфографии снято');
+  assert.ok(source.includes("setAttribute('autocorrect', 'off')"), 'автокоррекция не подчёркивает слово');
+  assert.match(source, /finishCompositionEnter\(\)/, 'перенос после IME-композиции');
   assert.ok(source.includes('webkit-composition-frame-color'), 'рамка IME-композиции скрыта');
   assert.ok(source.includes("name: 'conversation.input.left'"), 'чип режима в строке композера');
   assert.ok(source.includes("'session.copyId'"), 'пункт копирования id объявлен');

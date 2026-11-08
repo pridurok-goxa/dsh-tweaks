@@ -3647,7 +3647,30 @@ window.__ModuleLoader__.load({
     function bindMobileComposer(card, actions, view, command) {
       if (!card || typeof actions?.captureInsertion !== 'function' || typeof actions?.insertText !== 'function') return () => {};
       let disposed = false, pendingNative = null, composing = false, composingUntil = 0;
+      let pendingCompositionEnter = null;
       const abort = new AbortController();
+      const countNewlines = (text) => (String(text).match(/\n/g) ?? []).length;
+
+      /**
+       * Первый Enter во время IME-композиции обычно только фиксирует слово.
+       * После `compositionend` добавляем перенос сами, если клавиатура его не
+       * вставила: иначе для пустого списка нужно два Enter.
+       * @returns {void}
+       */
+      const finishCompositionEnter = () => {
+        const pending = pendingCompositionEnter;
+        if (pending === null || disposed) return;
+        pendingCompositionEnter = null;
+        const run = () => {
+          if (disposed) return;
+          const draft = command?.snapshot?.()?.draft ?? '';
+          if (countNewlines(draft) > pending.newlines) return;
+          insertText('\n');
+        };
+        if (typeof view?.setTimeout === 'function') view.setTimeout(run, 30);
+        else if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') window.setTimeout(run, 30);
+        else run();
+      };
       const unguardSlash = mobileComposerDevice(view) && typeof command?.guardSlash === 'function' ? command.guardSlash() : null;
       const targetOf = (event) => {
         const target = event.target?.closest?.('[data-composer-input]');
@@ -3711,17 +3734,31 @@ window.__ModuleLoader__.load({
       const insert = (event, text) => { stop(event); insertText(text); };
       const inComposition = (event) => event.isComposing || event.keyCode === 229 || composing || Date.now() < composingUntil;
       const onCompositionStart = (event) => { if (targetOf(event)) composing = true; };
-      const onCompositionEnd = (event) => { if (targetOf(event)) { composing = false; composingUntil = Date.now() + 10; } };
+      const onCompositionEnd = (event) => {
+        if (!targetOf(event)) return;
+        composing = false;
+        composingUntil = Date.now() + 10;
+        finishCompositionEnter();
+      };
       const onKeyDown = (event) => {
         if (event.defaultPrevented || event.key !== 'Enter' || !targetOf(event) || !mobileComposerDevice(view)) return;
-        if (inComposition(event)) { event.stopImmediatePropagation(); return; }
+        if (inComposition(event)) {
+          event.stopImmediatePropagation();
+          const draft = command?.snapshot?.()?.draft ?? '';
+          pendingCompositionEnter = { newlines: countNewlines(draft) };
+          return;
+        }
         insert(event, '\n');
       };
       const onBeforeInput = (event) => {
         if (event.defaultPrevented || !targetOf(event)) return;
         const mobile = mobileComposerDevice(view);
         if (mobile && ['insertParagraph', 'insertLineBreak'].includes(event.inputType)) {
-          if (inComposition(event)) { event.stopImmediatePropagation(); return; }
+          if (inComposition(event)) {
+            event.stopImmediatePropagation();
+            pendingCompositionEnter = { newlines: countNewlines(command?.snapshot?.()?.draft ?? '') };
+            return;
+          }
           insert(event, '\n');
         } else if (['insertFromPaste', 'insertFromPasteAsQuotation'].includes(event.inputType)) {
           if (Array.from(event.dataTransfer?.items || []).some((item) => item.kind === 'file')) return;
@@ -3832,7 +3869,10 @@ window.__ModuleLoader__.load({
         const zoom = typeof readScale === 'function' ? readScale() : 1;
         card.setAttribute('data-mobile-composer', '');
         const editor = card.querySelector?.('[data-composer-input]');
-        if (editor !== null && editor !== undefined && editor.getAttribute?.('spellcheck') !== 'false') editor.setAttribute('spellcheck', 'false');
+        if (editor !== null && editor !== undefined) {
+          if (editor.getAttribute?.('spellcheck') !== 'false') editor.setAttribute('spellcheck', 'false');
+          if (editor.getAttribute?.('autocorrect') !== 'off') editor.setAttribute('autocorrect', 'off');
+        }
         card.style.setProperty('--dsh-mobile-text-cap', Math.max(36, Math.floor(height * 0.2)) / zoom + 'px');
         const menu = card.querySelector('[data-trigger-menu]'), button = plus();
         if (!menu || !button) return;
