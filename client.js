@@ -4519,7 +4519,7 @@ window.__ModuleLoader__.load({
         `${root}[${MOBILE_PANEL_MENU_ATTR}="open"] [class*="_panelList"]{display:flex!important;position:absolute;left:8px;right:8px;` +
           'bottom:calc(var(--dsh-tweaks-footer-height,64px) + 8px);flex-direction:column;gap:2px;padding:6px;z-index:40;' +
           'max-height:calc(100% - var(--dsh-tweaks-footer-height,64px) - 16px);overflow:auto;border-radius:var(--dsw-radius-lg);' +
-          'background:var(--dsw-specific-menu);box-shadow:var(--dsw-elevation-prominent)}',
+          'background:Canvas!important;backdrop-filter:none!important;box-shadow:var(--dsw-elevation-prominent)}',
         `${root} [class*="_footArea"]{flex-direction:row;align-items:center;gap:4px}`,
         `${root} [class*="_settingsArea"]{flex:1;min-width:0}`,
         `${root} [class*="_footerActions"]{flex:none;order:1;width:auto}`,
@@ -6074,6 +6074,8 @@ window.__ModuleLoader__.load({
 
     /** Относительный путь хост-роута скачивания. */
     const DOWNLOAD_ROUTE = 'dsh-tweaks/download';
+    /** Относительный путь хост-роута копирования пути. */
+    const FILE_PATH_ROUTE = 'dsh-tweaks/file-path';
 
     /**
      * Разобрать `dsh-resource://file/session/<id>/<path>`.
@@ -6131,6 +6133,60 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Положить текст в буфер обмена с запасным путём для старых WebView.
+     * @param {string} value - текст.
+     * @returns {Promise<void>} завершение.
+     */
+    async function copyText(value) {
+      try {
+        const write = primitives?.writeClipboard;
+        if (typeof write === 'function') {
+          await write(value);
+          return;
+        }
+        if (navigator.clipboard?.writeText !== undefined) {
+          await navigator.clipboard.writeText(value);
+          return;
+        }
+      } catch (_error) {
+        /* ниже запасной путь */
+      }
+      const area = document.createElement('textarea');
+      area.value = value;
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      try { document.execCommand?.('copy'); } catch (_error) { /* ничего */ }
+      area.remove();
+    }
+
+    /**
+     * Скопировать путь через хост; если хост старый/недоступен — запасной текст.
+     * @param {object} body - тело запроса пути.
+     * @param {string} fallback - что копировать при ошибке.
+     * @returns {Promise<void>} завершение.
+     */
+    async function copyPathViaHost(body, fallback) {
+      try {
+        const response = await fetch(FILE_PATH_ROUTE, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const result = await response.json().catch(() => null);
+        if (response.ok && typeof result?.path === 'string' && result.path !== '') {
+          await copyText(result.path);
+          return;
+        }
+      } catch (_error) {
+        /* копируем запасной путь */
+      }
+      await copyText(fallback);
+    }
+
+    /**
      * Найти durable-ссылку файла у карточки вложения через React fiber.
      * В DOM у карточки есть только имя; сам ref лежит в props содержимого.
      * @param {object} card - DOM-карточка файла.
@@ -6154,21 +6210,28 @@ window.__ModuleLoader__.load({
       return null;
     }
 
-    /** Пункт «Скачать» в меню вкладки файла правой панели. */
+    /** Пункты «Скачать» и «Копировать путь» в меню вкладки файла. */
     function DownloadTabMenuItem({ tab, dismiss }) {
       const parsed = parseDshFileAddress(tab?.contentId);
       if (parsed === undefined) return null;
-      return React.createElement('button', {
-        type: 'button',
-        role: 'menuitem',
-        className: 'dsh-tweaks-download-item',
-        onClick: () => {
-          dismiss?.();
-          downloadViaHost({ sessionId: parsed.sessionId, path: parsed.path, name: tab.title }, tab.title).catch((error) => {
-            window.alert?.(error instanceof Error ? error.message : 'Не удалось скачать файл');
-          });
-        },
-      }, 'Скачать');
+      const download = () => {
+        dismiss?.();
+        downloadViaHost({ sessionId: parsed.sessionId, path: parsed.path, name: tab.title }, tab.title).catch((error) => {
+          window.alert?.(error instanceof Error ? error.message : 'Не удалось скачать файл');
+        });
+      };
+      const copyPath = () => {
+        dismiss?.();
+        copyPathViaHost({ sessionId: parsed.sessionId, path: parsed.path, name: tab.title }, parsed.path).catch((error) => {
+          window.alert?.(error instanceof Error ? error.message : 'Не удалось скопировать путь');
+        });
+      };
+      return React.createElement(
+        React.Fragment,
+        null,
+        React.createElement('button', { type: 'button', role: 'menuitem', className: 'dsh-tweaks-download-item', onClick: download }, 'Скачать'),
+        React.createElement('button', { type: 'button', role: 'menuitem', className: 'dsh-tweaks-download-item', onClick: copyPath }, 'Копировать путь'),
+      );
     }
 
     /**
@@ -6225,6 +6288,7 @@ window.__ModuleLoader__.load({
         menu = document.createElement('div');
         menu.className = 'dsh-tweaks-file-menu';
         menu.setAttribute('role', 'menu');
+        const sessionId = () => document.querySelector('[data-conversation-session]')?.getAttribute('data-conversation-session');
         const item = document.createElement('button');
         item.type = 'button';
         item.setAttribute('role', 'menuitem');
@@ -6233,13 +6297,30 @@ window.__ModuleLoader__.load({
         item.addEventListener('click', () => {
           if (ref === null) return;
           closeMenu();
-          const sessionId = document.querySelector('[data-conversation-session]')?.getAttribute('data-conversation-session');
-          if (typeof sessionId !== 'string' || sessionId === '') return;
-          downloadViaHost({ sessionId, attachment: ref }, name).catch((error) => {
+          const id = sessionId();
+          if (typeof id !== 'string' || id === '') return;
+          downloadViaHost({ sessionId: id, attachment: ref }, name).catch((error) => {
             window.alert?.(error instanceof Error ? error.message : 'Не удалось скачать файл');
           });
         });
+        const copyPath = document.createElement('button');
+        copyPath.type = 'button';
+        copyPath.setAttribute('role', 'menuitem');
+        copyPath.textContent = 'Копировать путь';
+        copyPath.addEventListener('click', () => {
+          closeMenu();
+          const id = sessionId();
+          if (typeof id !== 'string' || id === '') return;
+          if (ref === null) {
+            copyText(name).catch(() => {});
+            return;
+          }
+          copyPathViaHost({ sessionId: id, attachment: ref }, name).catch((error) => {
+            window.alert?.(error instanceof Error ? error.message : 'Не удалось скопировать путь');
+          });
+        });
         menu.appendChild(item);
+        menu.appendChild(copyPath);
         document.body.appendChild(menu);
         const width = menu.offsetWidth;
         const height = menu.offsetHeight;

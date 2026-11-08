@@ -26,6 +26,13 @@ test('parseDshFileAddress разбирает session-файл с encoded-сег�
   assert.equal(context.parse('https://example.com/a'), undefined);
 });
 
+test('wiring: Скачать и Копировать путь в обоих меню', () => {
+  assert.match(source, /'Копировать путь'/);
+  assert.match(source, /copyPathViaHost/);
+  assert.match(source, /FILE_PATH_ROUTE/);
+  assert.match(source, /const copyPath = document\.createElement\('button'\)/);
+});
+
 test('wiring: меню вкладки, долгое нажатие и fiber-ссылка', () => {
   assert.match(source, /function setupFileDownload\(ctx, api\)/);
   assert.match(source, /sidebar.right.tab.menu.item/);

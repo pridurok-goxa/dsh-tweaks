@@ -50,17 +50,29 @@ function test(name, fn) {
     assert.equal(calls[0][1], 'dir/a.bin');
   });
 
-  await test('activate регистрирует POST /dsh-tweaks/download', () => {
-    let route = null;
+  await test('resolveFilePath отдаёт абсолютный путь вложения и workspace-файла', async () => {
+    const attachmentScope = { attachments: { fileHostPath: () => '/store/a.txt' }, workspaceFiles: {}, sessions: {}, sandboxPolicy: {} };
+    assert.equal(await host.resolveFilePath(attachmentScope, { kind: 'attachment', attachment: { attachmentId: 'a' } }), '/store/a.txt');
+    const workspaceScope = {
+      attachments: {},
+      sessions: { get: () => ({ header: { cwd: '/workspace' } }) },
+      sandboxPolicy: {},
+      workspaceFiles: { async stat(scope, p) { assert.deepEqual(scope, { sessionId: 's', workspaceRoot: '/workspace' }); assert.equal(p, 'dir/b.txt'); return { absolutePath: '/workspace/dir/b.txt' }; } },
+    };
+    assert.equal(await host.resolveFilePath(workspaceScope, { kind: 'workspace', sessionId: 's', path: 'dir/b.txt', name: 'b.txt' }), '/workspace/dir/b.txt');
+  });
+
+  await test('activate регистрирует роуты скачивания и пути', () => {
+    const routes = [];
     const scope = {
-      webServer: { register(next) { route = next; return () => {}; } },
+      webServer: { register(next) { routes.push(next); return () => {}; } },
       connection: { requestRejection: () => undefined },
       attachments: {}, workspaceFiles: {}, sessions: {}, sandboxPolicy: {},
       effect(callback) { callback(); return () => {}; },
     };
     host.activate({ inject(deps, callback) { callback(scope); } });
-    assert.equal(route.path, '/dsh-tweaks/download');
-    assert.equal(typeof route.handler, 'function');
+    assert.deepEqual(routes.map((route) => route.path), ['/dsh-tweaks/download', '/dsh-tweaks/file-path']);
+    for (const route of routes) assert.equal(typeof route.handler, 'function');
   });
 
   console.log(`PASS ${passed} download host contract tests`);

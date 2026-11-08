@@ -9,6 +9,8 @@
 
 /** Путь роута; клиент зовёт его документ-относительно. */
 export const DOWNLOAD_PATH = '/dsh-tweaks/download';
+/** Путь роута копирования пути к файлу. */
+export const FILE_PATH_PATH = '/dsh-tweaks/file-path';
 
 /** Предел одного файла, чтобы случайно не залить память. */
 const MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024;
@@ -107,7 +109,34 @@ export async function readDownload(scope, request) {
 }
 
 /**
- * Зарегистрировать роут скачивания.
+ * Разрешить абсолютный путь к файлу: durable-вложение или workspace-файл.
+ * @param {object} scope - контекст с attachments/workspaceFiles.
+ * @param {object} request - разобранный запрос.
+ * @returns {Promise<string>} абсолютный путь.
+ */
+export async function resolveFilePath(scope, request) {
+  if (request.kind === 'attachment') {
+    const path = scope.attachments.fileHostPath?.(request.attachment);
+    if (typeof path !== 'string' || path === '') {
+      const error = new Error('attachment has no host path');
+      error.status = 404;
+      throw error;
+    }
+    return path;
+  }
+  const header = scope.sessions?.get?.(request.sessionId)?.header;
+  const workspaceRoot = header?.cwd ?? scope.sandboxPolicy?.workspaceRoot;
+  const stat = await scope.workspaceFiles.stat({ sessionId: request.sessionId, workspaceRoot }, request.path, undefined);
+  if (typeof stat?.absolutePath !== 'string' || stat.absolutePath === '') {
+    const error = new Error('file has no host path');
+    error.status = 404;
+    throw error;
+  }
+  return stat.absolutePath;
+}
+
+/**
+ * Зарегистрировать роуты скачивания и копирования пути.
  * @param {object} ctx - хост-контекст плагина.
  * @returns {void}
  */
@@ -161,5 +190,49 @@ export function activate(ctx) {
       }
     };
     scope.effect(() => scope.webServer.register({ kind: 'exact', path: DOWNLOAD_PATH, handler }), 'dsh-tweaks: download route');
+
+    const pathHandler = async (req, res) => {
+      const rejection = scope.connection.requestRejection(req);
+      if (rejection !== undefined) {
+        res.statusCode = rejection;
+        res.end();
+        return;
+      }
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { ok: false, code: 'method-not-allowed', message: 'POST required' });
+        return;
+      }
+      let raw;
+      try {
+        raw = await readBoundedBody(req);
+      } catch (_error) {
+        sendJson(res, 400, { ok: false, code: 'bad-request', message: 'request body unreadable' });
+        return;
+      }
+      if (raw === null) {
+        sendJson(res, 413, { ok: false, code: 'payload-too-large', message: 'request body is too large' });
+        return;
+      }
+      let request;
+      try {
+        request = parseDownload(JSON.parse(raw));
+      } catch (_error) {
+        sendJson(res, 400, { ok: false, code: 'bad-request', message: 'invalid JSON' });
+        return;
+      }
+      if (request.error !== undefined) {
+        sendJson(res, 400, { ok: false, code: 'bad-request', message: request.error });
+        return;
+      }
+      try {
+        const path = await resolveFilePath(scope, request);
+        sendJson(res, 200, { ok: true, path });
+      } catch (error) {
+        const status = Number.isInteger(error?.status) ? error.status : 500;
+        const message = error instanceof Error && error.message !== '' ? error.message : 'path lookup failed';
+        sendJson(res, status, { ok: false, code: 'path-failed', message });
+      }
+    };
+    scope.effect(() => scope.webServer.register({ kind: 'exact', path: FILE_PATH_PATH, handler: pathHandler }), 'dsh-tweaks: file path route');
   });
 }
