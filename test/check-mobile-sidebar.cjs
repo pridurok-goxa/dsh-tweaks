@@ -184,6 +184,10 @@ test('CSS режима: атрибут, нулевой трек, fixed-ящик 
   );
   assert.ok(css.includes('prefers-reduced-motion'), 'анимация уважает настройку движения');
   assert.ok(css.includes('--dsh-chat-content-width:100%!important'), 'чат на всю ширину');
+  assert.ok(css.includes('--dsh-composer-side-clearance:4px!important'), 'композер шире');
+  assert.ok(css.includes('[class*="_scroll"]:has(> [class*="_column"]){padding:8px 8px!important}'), 'лента компактнее');
+  assert.ok(css.includes('[class*="_stack"]:has(> [class*="_bubble"]){max-width:94%!important}'), 'сообщения шире');
+  assert.ok(css.includes('[class*="_bubble"]{padding:8px 12px!important}'), 'пузырь компактнее');
   assert.ok(css.includes('data-dsh-tweaks-drawer-leaving'), 'есть состояние анимированного закрытия');
   assert.ok(css.includes('data-dsh-tweaks-panel-menu'), 'есть поповер глобальных панелей');
   assert.ok(css.includes('data-dsh-tweaks-panel-toggle'), 'есть нижняя кнопка панелей');

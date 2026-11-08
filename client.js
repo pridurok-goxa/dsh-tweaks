@@ -4444,7 +4444,12 @@ window.__ModuleLoader__.load({
         // авто-разместиться в освободившемся первом треке.
         `${root} [class*="_frame"] > [class*="_centerCol"]{grid-column:2;grid-row:1}`,
         `${root} [class*="_frame"] > [data-rightbar-col]{grid-column:3;grid-row:1}`,
-        `${root} [class*="_body"]{--dsh-chat-content-width:100%!important}`,
+        `${root} [class*="_body"]{--dsh-chat-content-width:100%!important;--dsh-composer-side-clearance:4px!important;--dsh-chat-flow-gap:4px!important}`,
+        // Чуть компактнее и шире: меньше боковых полей в ленте, шире сообщения,
+        // компактнее пузырь. Центральная панель занимает почти всю ширину.
+        `${root} [class*="_scroll"]:has(> [class*="_column"]){padding:8px 8px!important}`,
+        `${root} [class*="_stack"]:has(> [class*="_bubble"]){max-width:94%!important}`,
+        `${root} [class*="_bubble"]{padding:8px 12px!important}`,
         `${root} [class*="_sidebarCol"]{position:fixed!important;top:var(--dsh-windows-titlebar-height,0px);bottom:0;left:0;width:280px!important;max-width:86vw;` +
           'z-index:19;background:var(--dsw-specific-sidebar-fill);border-right:0.5px solid var(--dsw-alias-border-l3);' +
           'box-shadow:var(--dsw-elevation-prominent);transform:translateX(-102%);visibility:hidden;' +
