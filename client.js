@@ -4224,6 +4224,19 @@ window.__ModuleLoader__.load({
     }
 
     /** Колонка левой панели: без неё режим не включаем, чтобы не прятать панель навсегда. */
+    /**
+     * Состояние ящика: реальный DOM отдаёт `hasAttribute`, тестовые заглушки —
+     * `getAttribute`. Отсутствие атрибута везде значит «открыт».
+     * @param {object} frame - рамка.
+     * @returns {boolean} свернут ли ящик.
+     */
+    function mobileDrawerCollapsed(frame) {
+      if (frame === null || frame === undefined) return true;
+      if (typeof frame.hasAttribute === 'function') return frame.hasAttribute('data-sidebar-collapsed');
+      const value = typeof frame.getAttribute === 'function' ? frame.getAttribute('data-sidebar-collapsed') : undefined;
+      return value !== null && value !== undefined;
+    }
+
     function mobileDrawerSidebar() {
       return document.querySelector('[class*="_sidebarCol"]');
     }
@@ -4562,6 +4575,13 @@ window.__ModuleLoader__.load({
        */
       function closeAnimated(finish) {
         if (leaving || disposed) return;
+        const frame = mobileDrawerFrame();
+        // Приложение уже свернуло панель (например, навигация по чату):
+        // не запускаем обратный toggle и не мигаем ящиком.
+        if (frame === null || mobileDrawerCollapsed(frame)) {
+          closePanelMenu();
+          return;
+        }
         const reduced = typeof window?.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches === true;
         closePanelMenu();
         if (reduced || typeof finish !== 'function') {
@@ -4574,7 +4594,9 @@ window.__ModuleLoader__.load({
           leavingTimer = null;
           leaving = false;
           html?.removeAttribute(MOBILE_DRAWER_LEAVING_ATTR);
-          finish();
+          // За 300 мс панель могла свернуться сама: повторный toggle открыл бы её.
+          const current = mobileDrawerFrame();
+          if (current !== null && !mobileDrawerCollapsed(current)) finish();
         }, MOBILE_DRAWER_SLIDE_MS);
       }
 
@@ -4593,9 +4615,13 @@ window.__ModuleLoader__.load({
               return;
             }
             const frame = mobileDrawerFrame();
-            if (frame !== null && !leaving && narrow(frame) && !frame.hasAttribute('data-sidebar-collapsed')) {
-              closeAnimated(originalToggle);
-              return;
+            if (frame !== null && narrow(frame)) {
+              // Пока ящик уезжает, запоздавший toggle не должен разворачивать его обратно.
+              if (leaving) return;
+              if (!mobileDrawerCollapsed(frame)) {
+                closeAnimated(originalToggle);
+                return;
+              }
             }
             originalToggle();
           };
@@ -4657,6 +4683,12 @@ window.__ModuleLoader__.load({
         const active = frame !== null && sidebar !== null && narrow(frame);
         if (active) html?.setAttribute(MOBILE_DRAWER_ATTR, 'on');
         else html?.removeAttribute(MOBILE_DRAWER_ATTR);
+        if (frame !== null && leaving && mobileDrawerCollapsed(frame)) {
+          if (leavingTimer !== null) window.clearTimeout(leavingTimer);
+          leavingTimer = null;
+          leaving = false;
+          html?.removeAttribute(MOBILE_DRAWER_LEAVING_ATTR);
+        }
         if (frame !== null) {
           const tracks = mobileDrawerTracks(frame.style.gridTemplateColumns);
           const third = tracks.length > 2 ? tracks[2] : 'minmax(0px, 0px)';
@@ -4664,7 +4696,7 @@ window.__ModuleLoader__.load({
             rightbarTrack = third;
             writeStyle();
           }
-          if (frame.getAttribute?.('data-sidebar-collapsed') !== null) closePanelMenu();
+          if (mobileDrawerCollapsed(frame)) closePanelMenu();
           if (active) attachObserver(frame);
           else {
             detachObserver();
@@ -4684,14 +4716,43 @@ window.__ModuleLoader__.load({
        * @param {object} event - pointerdown.
        * @returns {void}
        */
+      /**
+       * Цель тапа находится вне открытого ящика и вне портальных меню?
+       * @param {object} target - цель события.
+       * @returns {boolean} да или нет.
+       */
+      const outsideDrawer = (target) => {
+        if (typeof target?.closest !== 'function') return false;
+        if (target.closest('[class*="_sidebarCol"]') !== null) return false;
+        if (target.closest('[role="menu"], [role="listbox"], [data-trigger-menu]') !== null) return false;
+        return true;
+      };
+
+      /**
+       * Тап по видимой центральной части закрывает ящик.
+       * @param {object} event - pointerdown.
+       * @returns {void}
+       */
       const onPointerDown = (event) => {
         if (suppressor.armed()) suppressor.clear();
         if (disposed || leaving) return;
         const frame = mobileDrawerFrame();
-        if (frame === null || !narrow(frame) || frame.hasAttribute('data-sidebar-collapsed')) return;
-        const target = event.target;
-        if (target?.closest?.('[class*="_sidebarCol"]') !== null && target?.closest) return;
-        if (target?.closest?.('[role="menu"], [role="listbox"], [data-trigger-menu]') !== null && target?.closest) return;
+        if (frame === null || !narrow(frame) || mobileDrawerCollapsed(frame)) return;
+        if (!outsideDrawer(event.target)) return;
+        closeAnimated(originalToggle ?? toggleSidebar);
+      };
+
+      /**
+       * Страховка для тапов, где pointerdown не дошёл (сложный target/оверлей):
+       * отпускание пальца вне ящика закрывает его тем же путём.
+       * @param {object} event - pointerup.
+       * @returns {void}
+       */
+      const onPointerUp = (event) => {
+        if (disposed || leaving) return;
+        const frame = mobileDrawerFrame();
+        if (frame === null || !narrow(frame) || mobileDrawerCollapsed(frame)) return;
+        if (!outsideDrawer(event.target)) return;
         closeAnimated(originalToggle ?? toggleSidebar);
       };
 
@@ -4709,7 +4770,7 @@ window.__ModuleLoader__.load({
           closePanelMenu();
         }
         const frame = mobileDrawerFrame();
-        if (frame === null || leaving || !narrow(frame) || frame.hasAttribute('data-sidebar-collapsed')) return;
+        if (frame === null || leaving || !narrow(frame) || mobileDrawerCollapsed(frame)) return;
         const intent = mobileSidebarIntent(target);
         if (intent === null || intent === 'keep') return;
         // Композер мог остаться в фокусе с прошлого чата: клавиатуру закрываем сразу.
@@ -4738,10 +4799,12 @@ window.__ModuleLoader__.load({
       window.addEventListener?.('resize', onResize);
       window.visualViewport?.addEventListener?.('resize', onResize);
       document.addEventListener?.('pointerdown', onPointerDown, true);
+      document.addEventListener?.('pointerup', onPointerUp, true);
       document.addEventListener?.('click', onClick, true);
       document.addEventListener?.('keydown', onKeyDown, true);
       own(() => {
         document.removeEventListener?.('pointerdown', onPointerDown, true);
+        document.removeEventListener?.('pointerup', onPointerUp, true);
         document.removeEventListener?.('click', onClick, true);
         document.removeEventListener?.('keydown', onKeyDown, true);
         window.removeEventListener?.('resize', onResize);
@@ -4763,7 +4826,7 @@ window.__ModuleLoader__.load({
         html?.removeAttribute(MOBILE_DRAWER_LEAVING_ATTR);
         html?.style.removeProperty('--dsh-tweaks-footer-height');
         const frame = mobileDrawerFrame();
-        if (frame !== null && narrow(frame) && !frame.hasAttribute('data-sidebar-collapsed')) {
+        if (frame !== null && narrow(frame) && !mobileDrawerCollapsed(frame)) {
           (originalToggle ?? toggleSidebar)();
         }
       });

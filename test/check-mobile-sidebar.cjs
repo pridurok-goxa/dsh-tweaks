@@ -185,6 +185,10 @@ test('регистрация и очистка твика на месте', () =
   assert.ok(source.includes("headerLeadingSeat.set(ctx, 'title'"), 'название чата идёт через leading-seat');
   assert.ok(source.includes("sidebar.footer.action"), 'нижняя кнопка панелей в подвале');
   assert.ok(source.includes("id: 'mobile-panel-menu'"), 'id нижней кнопки уникален');
+  assert.ok(source.includes('function mobileDrawerCollapsed'), 'состояние ящика читается безопасно');
+  assert.ok(source.includes('Повторный toggle открыл бы её') || source.includes('повторный toggle открыл бы её'), 'закрытие не переоткрывает ящик');
+  assert.ok(source.includes("addEventListener?.('pointerup', onPointerUp"), 'тап-страховка на pointerup');
+  assert.ok(source.includes('if (leaving) return;'), 'запоздавший toggle во время анимации игнорируется');
   assert.ok(source.includes("id: 'composer-command-mode-chip'"), 'чип режима в строке композера');
   assert.ok(source.includes('installMobileFocusPatch'), 'патч focus вызывается');
   assert.ok(source.includes('removeAttribute(MOBILE_DRAWER_ATTR)'), 'режим снимается при выключении');
