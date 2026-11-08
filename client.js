@@ -365,7 +365,7 @@ window.__ModuleLoader__.load({
         'tweak.fileDownload': 'Files: download from chat and tabs',
         'tweak.mobileSidebar': 'Mobile menu: slide-out sidebar',
         'mobileSidebar.open': 'Open menu',
-        'mobilePanels.open': 'Global panels',
+        'mobilePanels.open': 'More',
         'session.copyId': 'Copy session ID',
         'tweak.zoom': 'Interface size',
         'tweak.contextMenu': 'Custom right-click menu',
@@ -427,7 +427,7 @@ window.__ModuleLoader__.load({
         'tweak.fileDownload': 'Файлы: скачивание из чата и вкладок',
         'tweak.mobileSidebar': 'Мобильное меню: выдвижная панель',
         'mobileSidebar.open': 'Открыть меню',
-        'mobilePanels.open': 'Глобальные панели',
+        'mobilePanels.open': 'More',
         'session.copyId': 'Копировать ID сессии',
         'tweak.zoom': 'Масштаб интерфейса',
         'tweak.contextMenu': 'Своё меню по правой кнопке',
@@ -4512,6 +4512,10 @@ window.__ModuleLoader__.load({
         `${root} [data-dockkit-split-button],${root} [data-sidebar-right-mode]{display:none!important}`,
         `${root} [data-dsh-tweaks-tab-hold]{opacity:.72;transform:scale(.97);transition:transform 120ms ease-out,opacity 120ms ease-out}`,
         `${root} [class*="_panelList"]{display:none!important}`,
+        `${root} [class*="_panelList"] button[aria-label="More"]{display:none!important}`,
+        '[data-dsh-tweaks-account-inline]{display:flex;flex-direction:column;gap:2px;padding-top:4px;margin-top:2px;border-top:.5px solid var(--dsw-alias-border-l2)}',
+        '[data-dsh-tweaks-account-inline] button{box-sizing:border-box;width:100%;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-primary);text-align:left;font:inherit;font-size:13px;line-height:18px;padding:8px;cursor:pointer}',
+        '[data-dsh-tweaks-account-inline] button:hover,[data-dsh-tweaks-account-inline] button:focus-visible{background:var(--dsw-alias-interactive-bg-hover)}',
         `${root}[${MOBILE_PANEL_MENU_ATTR}="open"] [class*="_panelList"]{display:flex!important;position:absolute;left:8px;right:8px;` +
           'bottom:calc(var(--dsh-tweaks-footer-height,64px) + 8px);flex-direction:column;gap:2px;padding:6px;z-index:40;' +
           'max-height:calc(100% - var(--dsh-tweaks-footer-height,64px) - 16px);overflow:auto;border-radius:var(--dsw-radius-lg);' +
@@ -4643,6 +4647,10 @@ window.__ModuleLoader__.load({
       let leaving = false;
       let leavingTimer = null;
       let panelOpen = false;
+      let mergingAccount = false;
+      let accountTrigger = null;
+      let accountRoot = null;
+      let accountInline = null;
       const panelListeners = new Set();
 
       /** Открыть/закрыть панель штатным действием приложения. */
@@ -4654,11 +4662,32 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /** Вернуть пункты аккаунта на место и убрать встроенный блок. */
+      function restoreAccountInline() {
+        if (accountInline === null) return;
+        const buttons = [...accountInline.querySelectorAll('button')];
+        for (const button of buttons) {
+          if (accountRoot?.isConnected) accountRoot.appendChild(button);
+          else button.remove();
+        }
+        accountInline.remove();
+        accountInline = null;
+        if (accountRoot?.isConnected) accountRoot.style.display = 'none';
+        accountRoot = null;
+        if (accountTrigger?.getAttribute?.('aria-expanded') === 'true') {
+          mergingAccount = true;
+          accountTrigger.click();
+          mergingAccount = false;
+        }
+        accountTrigger = null;
+      }
+
       /** Закрыть всплывающий список панелей. */
       function closePanelMenu() {
         if (!panelOpen) return;
         panelOpen = false;
         html?.removeAttribute(MOBILE_PANEL_MENU_ATTR);
+        restoreAccountInline();
         for (const listener of panelListeners) listener(false);
       }
 
@@ -4674,6 +4703,37 @@ window.__ModuleLoader__.load({
         panelOpen = true;
         html?.setAttribute(MOBILE_PANEL_MENU_ATTR, 'open');
         for (const listener of panelListeners) listener(true);
+
+        // Одно меню More: подтягиваем пункты аккаунта (Settings/Feedback/…)
+        // внутрь списка панелей, а вложенный пункт More скрыт CSS-ом.
+        accountTrigger = document.querySelector('button[aria-label="Account menu"]');
+        if (accountTrigger !== null) {
+          mergingAccount = true;
+          accountTrigger.click();
+          mergingAccount = false;
+          let attempts = 0;
+          const merge = () => {
+            if (!panelOpen || disposed) return;
+            const list = document.querySelector('[class*="_panelList"]');
+            if (list === null) return;
+            const menu = [...document.querySelectorAll('[role="menu"]')]
+              .find((node) => node.closest('[class*="_panelList"]') === null && /Settings|Feedback|Sign/i.test(node.innerText ?? ''));
+            if (menu === undefined) {
+              if (attempts < 30) {
+                attempts += 1;
+                window.requestAnimationFrame(merge);
+              }
+              return;
+            }
+            accountRoot = menu;
+            menu.style.display = 'none';
+            accountInline = document.createElement('div');
+            accountInline.setAttribute('data-dsh-tweaks-account-inline', '');
+            for (const button of [...menu.querySelectorAll('button')]) accountInline.appendChild(button);
+            list.appendChild(accountInline);
+          };
+          window.requestAnimationFrame(merge);
+        }
       }
 
       /**
@@ -4865,13 +4925,35 @@ window.__ModuleLoader__.load({
         closeAnimated(originalToggle ?? toggleSidebar);
       };
 
+      /** Клик по аккаунту открывает единое меню More, а не отдельное. */
+      const onAccountTriggerClick = (event) => {
+        if (mergingAccount) return;
+        if (document.documentElement?.getAttribute?.(MOBILE_DRAWER_ATTR) !== 'on') return;
+        const trigger = event.target?.closest?.('button[aria-label="Account menu"]');
+        if (trigger === null || trigger === undefined) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (panelOpen) closePanelMenu();
+        else togglePanelMenu();
+      };
+      document.addEventListener('click', onAccountTriggerClick, true);
+      own(() => document.removeEventListener('click', onAccountTriggerClick, true));
+
+      /** Пункт аккаунта внутри общего меню закрывает меню после действия. */
+      const onAccountInlineClick = (event) => {
+        if (event.target?.closest?.('[data-dsh-tweaks-account-inline]') === null) return;
+        window.setTimeout(() => closePanelMenu(), 0);
+      };
+      document.addEventListener('click', onAccountInlineClick, true);
+      own(() => document.removeEventListener('click', onAccountInlineClick, true));
+
       /**
        * Клик в левой панели и по всплывающему списку панелей.
        * @param {object} event - click.
        * @returns {void}
        */
       const onClick = (event) => {
-        if (disposed) return;
+        if (disposed || mergingAccount) return;
         const target = event.target;
         if (panelOpen && target?.closest?.('[class*="_panelList"]') === null
           && target?.closest?.('[role="menu"], [role="listbox"]') === null

@@ -98,6 +98,15 @@ test('плюс на строке workspace создаёт чат и закрыв
   assert.equal(context.intent(ru), 'close');
 });
 
+test('одно меню More: панели и аккаунт вместе', () => {
+  assert.match(source, /data-dsh-tweaks-account-inline/);
+  assert.match(source, /button\[aria-label="More"\]\{display:none/);
+  assert.match(source, /Settings\|Feedback\|Sign/);
+  assert.match(source, /onAccountTriggerClick/);
+  assert.match(source, /'mobilePanels.open': 'More'/);
+  assert.match(source, /window\.requestAnimationFrame\(merge\)/);
+});
+
 test('остальные клики в панели не наши', () => {
   assert.equal(context.intent(target()), null);
   assert.equal(context.intent(null), null);
