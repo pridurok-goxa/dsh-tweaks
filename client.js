@@ -5734,7 +5734,9 @@ window.__ModuleLoader__.load({
           });
           const result = await response.json().catch(() => null);
           if (!response.ok || result?.ok !== true) {
-            setError(result?.message ?? `Не удалось сохранить (${response.status})`);
+            setError(response.status === 404 || response.status === 405
+              ? 'Сервер ещё не загрузил редактор вложений: нужен перезапуск DSH. Сообщение не изменено.'
+              : (result?.message ?? `Не удалось сохранить (${response.status})`));
             return;
           }
           onClose();
