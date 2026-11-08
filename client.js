@@ -385,8 +385,8 @@ window.__ModuleLoader__.load({
         'light.untilRed': 'Expensive hours start at {{time}}',
         'light.untilPeak': 'Cheap hours until {{time}}',
         'light.countdownH': '{{hours}} h {{minutes}} min',
-        'light.countdownM': '{{minutes}} min {{seconds}} s',
-        'light.countdownS': '{{seconds}} s',
+        'light.countdownM': '{{minutes}} min',
+        'light.countdownS': '< 1 min',
         'light.clockTitle': '24-hour price clock',
         'light.weekdays': 'Mon–Fri',
         'light.holidaysNote': 'Except Chinese public holidays',
@@ -447,8 +447,8 @@ window.__ModuleLoader__.load({
         'light.untilRed': 'Дорогие часы начнутся в {{time}}',
         'light.untilPeak': 'Дешёвые часы до {{time}}',
         'light.countdownH': '{{hours}} ч {{minutes}} мин',
-        'light.countdownM': '{{minutes}} мин {{seconds}} с',
-        'light.countdownS': '{{seconds}} с',
+        'light.countdownM': '{{minutes}} мин',
+        'light.countdownS': 'меньше минуты',
         'light.clockTitle': 'Часы тарифа на сутки',
         'light.weekdays': 'Пн–Пт',
         'light.holidaysNote': 'Кроме праздников КНР',
@@ -2420,8 +2420,8 @@ window.__ModuleLoader__.load({
     /* #endregion header-leading-seat */
 
     /* #region tweak-traffic-light */
-    /** Период пересчёта индикатора: раз в секунду, чтобы тикал отсчёт. */
-    const LIGHT_TICK_MS = 1000;
+    /** Период пересчёта индикатора: раз в минуту (секундный тик грузил CPU). */
+    const LIGHT_TICK_MS = 60000;
 
     /** Цвета лампы из токенов темы: красный — ошибка, жёлтый — предупреждение, зелёный — успех. */
     const LIGHT_COLORS = {
@@ -2681,15 +2681,14 @@ window.__ModuleLoader__.load({
       return text;
     }
 
-    /** Отсчёт «X ч MM мин» / «M мин SS с» по словарю. */
+    /** Отсчёт «X ч MM мин» / «M мин» по словарю, минутная точность (тик раз в минуту). */
     function formatCountdownText(ms, t) {
-      const total = Math.max(0, Math.ceil(ms / 1000));
-      const hours = Math.floor(total / 3600);
-      const minutes = Math.floor((total % 3600) / 60);
-      const seconds = total % 60;
+      const total = Math.max(0, Math.ceil(ms / 60000));
+      const hours = Math.floor(total / 60);
+      const minutes = total % 60;
       if (hours > 0) return fillText(t('light.countdownH'), { hours, minutes: twoDigits(minutes) });
-      if (minutes > 0) return fillText(t('light.countdownM'), { minutes, seconds: twoDigits(seconds) });
-      return fillText(t('light.countdownS'), { seconds });
+      if (minutes > 0) return fillText(t('light.countdownM'), { minutes });
+      return t('light.countdownS');
     }
 
     /**
@@ -2700,9 +2699,20 @@ window.__ModuleLoader__.load({
     function useLightTick() {
       const [now, setNow] = React.useState(Date.now());
       React.useEffect(() => {
-        if (typeof window === 'undefined' || typeof window.setInterval !== 'function') return undefined;
-        const timer = window.setInterval(() => setNow(Date.now()), LIGHT_TICK_MS);
-        return () => window.clearInterval(timer);
+        if (typeof window === 'undefined') return undefined;
+        if (typeof window.setInterval !== 'function' || typeof window.setTimeout !== 'function') return undefined;
+        // Первый тик — в начале следующей минуты, дальше раз в минуту: секундная
+        // перерисовка в софтверном рендере (headless Chrome) жгла ядро CPU.
+        const alignMs = 60000 - (Date.now() % 60000);
+        let interval = undefined;
+        const first = window.setTimeout(() => {
+          setNow(Date.now());
+          interval = window.setInterval(() => setNow(Date.now()), LIGHT_TICK_MS);
+        }, alignMs);
+        return () => {
+          window.clearTimeout(first);
+          if (interval !== undefined) window.clearInterval(interval);
+        };
       }, []);
       const [revision, setRevision] = React.useState(0);
       React.useEffect(() => lightHub.subscribe(() => setRevision((value) => value + 1)), []);
@@ -2999,8 +3009,7 @@ window.__ModuleLoader__.load({
       const anchorRef = React.useRef(null);
       const t = lightTranslator;
       const color = LIGHT_COLORS[status.light];
-      const blink = status.light === 'yellow';
-      // Индикаторы работы сессий в сайдбаре краснеют и пульсируют вместе с лампой.
+      // Индикаторы работы сессий в сайдбаре краснеют вместе с лампой.
       React.useEffect(() => {
         const root = document.documentElement;
         if (root === undefined || root === null) return undefined;
@@ -3013,7 +3022,6 @@ window.__ModuleLoader__.load({
           if (typeof root.removeAttribute === 'function') root.removeAttribute(LIGHT_RED_ATTR);
         };
       }, [status.light]);
-      const pulse = status.light === 'red' && running;
       const target = lightCountdownTarget(status);
       const label = target === null
         ? t(lightLabelKey(status.light))
@@ -3023,46 +3031,22 @@ window.__ModuleLoader__.load({
       const dot = React.createElement('span', {
         key: 'lamp',
         className: `${LIGHT_CLASS}-lamp`,
-        style: {
-          background: color,
-          // На красном при работающих сессиях лампа дышит в такт волне.
-          animation: blink
-            ? `${LIGHT_CLASS}-blink 1s steps(2, start) infinite`
-            : pulse
-              ? `${LIGHT_CLASS}-pulse 2s ease-in-out infinite`
-              : undefined,
-        },
+        // Лампа статична: бесконечные blink/pulse-анимации постоянно
+        // перерисовывали кадр в софтверном рендере и грузили CPU.
+        style: { background: color },
       });
-      // Волна живёт в тесном контейнере лампы: её радиус ограничен 2.6 диаметра,
-      // а не растягивается на кнопку или экран (у кнопки нет position:relative).
       const lampNode = React.createElement('span', {
         key: 'lamp-wrap',
         className: `${LIGHT_CLASS}-lamp-wrap`,
-      },
-        dot,
-        pulse
-          ? React.createElement('span', {
-              key: 'wave',
-              className: `${LIGHT_CLASS}-wave`,
-              style: { borderColor: color },
-              'aria-hidden': true,
-            })
-          : null,
-      );
+      }, dot);
       const content = [lampNode];
       if (dockMode === 'lamp-time-label') {
         content.push(React.createElement('span', { key: 'label', className: `${LIGHT_CLASS}-label` }, t(lightLabelKey(status.light))));
       }
-      if (dockMode !== 'lamp' && target !== null) {
-        // Вариант «только время» — лампа и голый отсчёт; остальные показывают
-        // ещё и адрес: «ещё 60 ч 12 мин · до пн 04:00».
-        const text = dockMode === 'time'
-          ? formatCountdownText(target - now, t)
-          : fillText(t('light.leftTo'), {
-              value: formatCountdownText(target - now, t),
-              time: formatTarget(target, now, t),
-            });
-        content.push(React.createElement('span', { key: 'time', className: `${LIGHT_CLASS}-count` }, text));
+      if (dockMode !== 'lamp') {
+        // Вместо секундного отсчёта — текущее системное время в часовом поясе
+        // пользователя (браузера); обновляется раз в минуту вместе с лампой.
+        content.push(React.createElement('span', { key: 'time', className: `${LIGHT_CLASS}-count` }, formatClock(now)));
       }
       return React.createElement(React.Fragment, null,
         React.createElement('button', {
@@ -3205,10 +3189,9 @@ window.__ModuleLoader__.load({
       `@keyframes ${LIGHT_CLASS}-pulse{0%{transform:scale(.85);opacity:.8}60%{transform:scale(1);opacity:1}100%{transform:scale(.85);opacity:.8}}`,
       `@keyframes ${LIGHT_CLASS}-wave{0%,55%{transform:scale(1);opacity:0}62%{opacity:.5}100%{transform:scale(2.6);opacity:0}}`,
       // Индикатор работы в списке сессий (StateDot с data-state="ongoing"):
-      // на красном свете — красный и пульсирует в такт лампам.
+      // на красном свете — красный, без пульсации (бесконечная анимация жгла CPU).
       `html[${LIGHT_RED_ATTR}] [class*="_sessionRow"] svg[data-state="ongoing"]{`,
-      'color:var(--dsw-alias-state-error-primary);',
-      `animation:${LIGHT_CLASS}-pulse 2s ease-in-out infinite}`,
+      'color:var(--dsw-alias-state-error-primary);}',
       '@media (prefers-reduced-motion: reduce){'
       + `.${LIGHT_CLASS}-wave{animation:none;display:none}.${LIGHT_CLASS}-lamp{animation:none!important}}`,
     ].join('');
