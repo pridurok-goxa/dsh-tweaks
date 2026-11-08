@@ -4511,6 +4511,9 @@ window.__ModuleLoader__.load({
           'padding:0;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;flex:none}',
         `${root} [data-dsh-tweaks-panel-toggle]:hover{background:var(--dsw-alias-interactive-bg-hover)}`,
         `${root} [data-dsh-tweaks-panel-toggle] svg{width:16px;height:16px;display:block}`,
+        // Единственный вход в меню — строка «Signed in …»; отдельный кружок
+        // с тремя точками больше не нужен.
+        `${root} [data-dsh-tweaks-panel-toggle]{display:none!important}`,
         `@media (prefers-reduced-motion:reduce){${root} [class*="_sidebarCol"]{transition:none!important}}`,
       ].join('\n');
     }
@@ -4911,7 +4914,6 @@ window.__ModuleLoader__.load({
       /** Клик по аккаунту открывает единое меню More, а не отдельное. */
       const onAccountTriggerClick = (event) => {
         if (mergingAccount) return;
-        if (document.documentElement?.getAttribute?.(MOBILE_DRAWER_ATTR) !== 'on') return;
         const trigger = event.target?.closest?.('button[aria-label="Account menu"]');
         if (trigger === null || trigger === undefined) return;
         event.preventDefault();
@@ -5924,6 +5926,12 @@ window.__ModuleLoader__.load({
         '.dsh-tweaks-tabs-actions{display:inline-flex;align-items:center;gap:2px;margin-left:0;min-width:0;flex:1;position:relative;top:-6px}',
         '.dsh-tweaks-tabs-actions [data-dsh-tweaks-more-slot]{margin-left:auto;display:inline-flex;align-items:center;flex:none}',
         '[data-slot="conversation.session.header.utilities"] > *:empty{display:none!important}',
+        // На ПК те же панели/аккаунт прячем в нижнее меню: список панелей
+        // показывается только по атрибуту открытия, отдельный More видов скрыт.
+        '[class*="_viewsMoreAnchor"], [class*="_viewsMoreMenu"]{display:none!important}',
+        '[class*="_panelList"]{display:none!important}',
+        'html[data-dsh-tweaks-panel-menu="open"] [class*="_panelList"]{display:flex!important;position:fixed;left:8px;bottom:calc(var(--dsh-tweaks-footer-height,64px) + 8px);width:min(280px,calc(100vw - 16px));flex-direction:column;gap:2px;padding:6px;z-index:120;max-height:calc(100vh - var(--dsh-tweaks-footer-height,64px) - 16px);overflow:auto;border-radius:var(--dsw-radius-lg);background:Canvas!important;backdrop-filter:none!important;box-shadow:var(--dsw-elevation-prominent)}',
+        'html[data-dsh-tweaks-panel-menu="open"] [class*="_panelList"] button[aria-label="More"]{display:none!important}',
         '@media (max-width:720px){',
         'div:has(> [data-conversation-tabs]){gap:4px!important}',
         '[data-conversation-tabs]{gap:8px!important}',

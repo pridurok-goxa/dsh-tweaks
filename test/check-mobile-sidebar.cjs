@@ -98,6 +98,16 @@ test('плюс на строке workspace создаёт чат и закрыв
   assert.equal(context.intent(ru), 'close');
 });
 
+test('ПК: пункты скрыты в нижнее меню, лишние три точки убраны', () => {
+  assert.match(source, /button\[aria-label="More"\]\{display:none/);
+  assert.match(source, /html\[data-dsh-tweaks-panel-menu="open"\] \[class\*="_panelList"\]\{display:flex!important;position:fixed/);
+  assert.match(source, /_viewsMoreAnchor"], \[class\*="_viewsMoreMenu"\]\{display:none!important\}/);
+  assert.match(source, /data-dsh-tweaks-panel-toggle\]\{display:none!important\}/);
+  // перехват аккаунта работает и на ПК: нет проверки мобильного атрибута
+  const accountHandler = source.slice(source.indexOf('const onAccountTriggerClick'), source.indexOf('const onAccountInlineClick'));
+  assert.doesNotMatch(accountHandler, /MOBILE_DRAWER_ATTR/);
+});
+
 test('одно меню More: панели и аккаунт вместе', () => {
   assert.match(source, /data-dsh-tweaks-account-inline/);
   assert.match(source, /button\[aria-label="More"\]\{display:none/);
