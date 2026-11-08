@@ -223,6 +223,10 @@ async function main() {
   assert.ok(dict.whisperSelectionApplied, 'в схеме Config есть служебное поле whisperSelectionApplied');
   assert.equal(dict.whisperSelectionApplied.options.default, false, 'признак по умолчанию снят');
   assert.equal(dict.whisperSelectionApplied.options.volatile, true, 'признак — volatile-поле');
+  // Мобильное меню — клиентский твик без хост-части: в схеме только флаг.
+  assert.ok(dict.mobileSidebar, 'в схеме Config есть поле mobileSidebar');
+  assert.equal(dict.mobileSidebar.options.default, true, 'mobileSidebar включён по умолчанию');
+  assert.equal(dict.mobileSidebar.options.volatile, true, 'mobileSidebar — volatile-поле');
 
   // 2) Флаг снят: хост-часть даже не импортируется.
   const idle = createContext();

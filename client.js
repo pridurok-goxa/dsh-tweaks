@@ -361,6 +361,10 @@ window.__ModuleLoader__.load({
         'menu.paste': 'Paste',
         'menu.selectAll': 'Select All',
         'tweak.mobileComposer': 'Mobile composer: Enter inserts a newline',
+        'tweak.mobileSidebar': 'Mobile menu: slide-out sidebar',
+        'mobileSidebar.open': 'Open menu',
+        'mobilePanels.open': 'Global panels',
+        'session.copyId': 'Copy session ID',
         'tweak.zoom': 'Interface size',
         'tweak.contextMenu': 'Custom right-click menu',
         'tweak.whisper': 'Russian speech recognition',
@@ -417,6 +421,10 @@ window.__ModuleLoader__.load({
         'menu.paste': 'Вставить',
         'menu.selectAll': 'Выделить всё',
         'tweak.mobileComposer': 'Мобильный ввод: Enter переносит строку',
+        'tweak.mobileSidebar': 'Мобильное меню: выдвижная панель',
+        'mobileSidebar.open': 'Открыть меню',
+        'mobilePanels.open': 'Глобальные панели',
+        'session.copyId': 'Копировать ID сессии',
         'tweak.zoom': 'Масштаб интерфейса',
         'tweak.contextMenu': 'Своё меню по правой кнопке',
         'tweak.whisper': 'Распознавание русской речи',
@@ -2298,6 +2306,115 @@ window.__ModuleLoader__.load({
     }
     /* #endregion tweak-whisper */
 
+    /* #region header-leading-seat */
+
+    /**
+     * Общий слот `conversation.header.leading`.
+     *
+     * Слот одинарный, а нам нужны сразу меню, светофор и название. Поэтому
+     * части складываются сюда, а слой регистрируется один раз; когда частей не
+     * осталось — регистрация снимается и слот возвращается приложению.
+     */
+    const headerLeadingSeat = (() => {
+      const parts = new Map();
+      const listeners = new Set();
+      let scope = null;
+
+      /** Перерисовать подписчиков после смены частей. */
+      function notify() {
+        for (const listener of listeners) listener();
+      }
+
+      /**
+       * Слой слота: части по возрастанию ранга.
+       * @param {object} props - стандартные пропсы слота.
+       * @returns {object} фрагмент с частями.
+       */
+      function HeaderLeadingSeat(props) {
+        const [, force] = React.useState(0);
+        React.useEffect(() => {
+          listeners.add(force);
+          return () => listeners.delete(force);
+        }, []);
+        const children = [];
+        for (const [id, part] of [...parts.entries()].sort((left, right) => left[1].rank - right[1].rank)) {
+          children.push(React.createElement(React.Fragment, { key: id }, part.render(props)));
+        }
+        return React.createElement(React.Fragment, null, ...children);
+      }
+
+      /**
+       * Зарегистрировать слот при первой части.
+       * @param {object} ctx - клиентский контекст плагина.
+       * @returns {void}
+       */
+      function mount(ctx) {
+        if (scope !== null) return;
+        let slots = undefined;
+        try {
+          slots = typeof ctx?.get === 'function' ? ctx.get('slots') : undefined;
+        } catch (_error) {
+          slots = undefined;
+        }
+        if (typeof slots?.inject !== 'function' || typeof slots?.register !== 'function') return;
+        scope = createScope();
+        scope.own(slots.inject('conversation.header.leading', () => slots.register(
+          { name: 'conversation.header.leading' },
+          HeaderLeadingSeat,
+        )));
+      }
+
+      return {
+        /**
+         * @param {object} ctx - контекст.
+         * @param {string} id - ключ части.
+         * @param {number} rank - порядок (меньше — левее).
+         * @param {Function} render - (props) => элемент.
+         * @returns {void}
+         */
+        set(ctx, id, rank, render) {
+          parts.set(id, { rank, render });
+          mount(ctx);
+          notify();
+        },
+        /**
+         * @param {string} id - ключ части.
+         * @returns {void}
+         */
+        clear(id) {
+          if (!parts.delete(id)) return;
+          notify();
+          if (parts.size === 0 && scope !== null) {
+            scope.dispose();
+            scope = null;
+          }
+        },
+      };
+    })();
+
+    /**
+     * Название текущего чата в шапке: на телефоне штатные крошки скрыты,
+     * а здесь название стоит сразу за светофором.
+     * @param {object} props - стандартные пропсы слота (useSessions, usePanelInfo).
+     * @returns {object | null} название или null.
+     */
+    function MobileHeaderTitle({ useSessions, usePanelInfo }) {
+      const activePanel = typeof usePanelInfo === 'function'
+        ? usePanelInfo((info) => info.activePanelId ?? null)
+        : null;
+      const title = typeof useSessions === 'function'
+        ? useSessions((state) => {
+            const byId = state?.byId ?? {};
+            const current = Object.values(byId).find((item) => (item?.retainedBy?.mainView ?? 0) > 0);
+            return typeof current?.title === 'string' && current.title !== '' ? current.title : null;
+          })
+        : null;
+      if (activePanel !== null || title === null) return null;
+      return React.createElement('span', { className: 'dsh-tweaks-header-title', title }, title);
+    }
+
+    /* #endregion header-leading-seat */
+
     /* #region tweak-traffic-light */
     /** Период пересчёта индикатора: раз в секунду, чтобы тикал отсчёт. */
     const LIGHT_TICK_MS = 1000;
@@ -3116,10 +3233,8 @@ window.__ModuleLoader__.load({
       }
       if (typeof slots?.inject === 'function' && typeof slots?.register === 'function') {
         try {
-          own(slots.inject('conversation.header.leading', () => slots.register(
-            { name: 'conversation.header.leading' },
-            (props) => React.createElement(TrafficLightIndicator, { ...props, variant: 'header' }),
-          )));
+          headerLeadingSeat.set(ctx, 'trafficLight', 1, (props) => React.createElement(TrafficLightIndicator, { ...props, variant: 'header' }));
+          own(() => headerLeadingSeat.clear('trafficLight'));
         } catch (error) {
           console.error('dsh-tweaks: индикатор светофора в шапке не подключён', error);
         }
@@ -3237,14 +3352,26 @@ window.__ModuleLoader__.load({
         setFailure(null);
         try {
           const ctx = host.ctx;
-          const remote = typeof ctx?.get === 'function' ? ctx.get('remote') : undefined;
-          const selectModel = remote?.session?.selectModel;
-          if (typeof selectModel !== 'function') throw new Error('remote session API is unavailable');
+          // Штатный сервис выбора модели: у него уже внедрён `remote.session`,
+          // поэтому не трогаем ctx.remote напрямую (без inject он падает).
           if (sessionId === undefined) throw new Error('session identity is unavailable');
-          const request = { sessionId, provider: target.provider, model: target.model };
+          const directories = typeof ctx?.get === 'function' ? ctx.get('modelDirectories') : undefined;
+          const request = { provider: target.provider, model: target.model };
           const effort = selection?.reasoningEffort;
           if (typeof effort === 'string' && effort !== '') request.reasoningEffort = effort;
-          const result = await selectModel(request);
+          let result;
+          if (typeof directories?.directoryFor === 'function') {
+            const directory = directories.directoryFor(sessionId);
+            if (typeof directory?.select !== 'function') throw new Error('model selection is unavailable');
+            result = await directory.select(request);
+          } else {
+            // Совместимость со старым ядром: remote требует inject, поэтому
+            // используется только как последний резерв.
+            const remote = typeof ctx?.get === 'function' ? ctx.get('remote') : undefined;
+            const selectModel = remote?.session?.selectModel;
+            if (typeof selectModel !== 'function') throw new Error('model directory API is unavailable');
+            result = await selectModel({ sessionId, ...request });
+          }
           if (result === undefined || result === null || result.ok !== true) {
             const error = result?.error;
             throw new Error(
@@ -3388,8 +3515,129 @@ window.__ModuleLoader__.load({
             const end = state.claim ? 1 : leadingComposerCommand(state.draft)?.length || 0;
             controller.toggleSource('command', { trigger: '/', query: '', quoted: false, position: 'leading', span: { start: 0, end, draftRev: state.draftRev } });
           },
+          /**
+           * Не давать набранному `/` открывать меню. Тир `claimed` в детекторе
+           * триггеров отключает только слэш; `@` остаётся живым.
+           * @returns {Function} снятие патча.
+           */
+          guardSlash() {
+            if (typeof controller.track !== 'function' || controller.track.__dshNoSlash === true) return () => {};
+            const original = controller.track;
+            const patched = function (draft, caret, guard, rev) {
+              const next = guard?.tier === 'plain' ? { ...guard, tier: 'claimed' } : guard;
+              return original.call(this, draft, caret, next, rev);
+            };
+            patched.__dshNoSlash = true;
+            try {
+              controller.track = patched;
+            } catch (_error) {
+              return () => {};
+            }
+            return () => {
+              if (controller.track === patched) controller.track = original;
+            };
+          },
+          /**
+           * Открыть меню ссылок `@` программно, если нативный триггер не успел.
+           * Источник `reference` даёт файлы/папки и сессии — то же основное
+           * меню, что и у набранной собаки.
+           * @returns {boolean} попытка отправлена.
+           */
+          /** Закрыть открытое меню триггеров (после blur оно не всегда само уходит). */
+          dismissMenu() {
+            try {
+              controller.dismiss();
+              return true;
+            } catch (_error) {
+              return false;
+            }
+          },
         };
       } catch (_error) { return undefined; }
+    }
+
+    /**
+     * На сколько прокрутить скроллпорт, чтобы каретка стала видна.
+     * @param {object} caret - прямоугольник каретки.
+     * @param {object} box - прямоугольник скроллпорта.
+     * @returns {number} сдвиг scrollTop.
+     */
+    function caretScrollDelta(caret, box) {
+      if (caret.bottom > box.bottom) return caret.bottom - box.bottom;
+      if (caret.top < box.top) return caret.top - box.top;
+      return 0;
+    }
+
+    /**
+     * Показать каретку внутри `[data-input-scroll]`: после программной вставки
+     * браузер сам не прокручивает черновик.
+     * @param {object} card - карточка композера.
+     * @param {object} view - окно устройства.
+     * @returns {void}
+     */
+    function revealComposerCaret(card, view) {
+      const root = card?.querySelector?.('[data-composer-input]');
+      const doc = root?.ownerDocument;
+      if (!root || !doc) return;
+      if (doc.activeElement !== root) root.focus?.({ preventScroll: true });
+      const scroll = root.closest?.('[data-input-scroll]');
+      if (!scroll) return;
+      const selection = doc.getSelection?.();
+      if (!selection || selection.rangeCount === 0) return;
+      const range = selection.getRangeAt(0);
+      // Пустой перенос: у схлопнутого range в пустом абзаце может не быть
+      // высоты. Тогда каретка в конце — прокручиваем черновик до низа,
+      // иначе берём ближайший блок.
+      const rectOfRange = range.getBoundingClientRect?.();
+      if (!rectOfRange || (rectOfRange.width === 0 && rectOfRange.height === 0)) {
+        let atEnd = false;
+        try {
+          const tail = doc.createRange();
+          tail.setStart(range.endContainer, range.endOffset);
+          tail.setEnd(root, root.childNodes.length);
+          atEnd = tail.toString().replace(/\u200b/g, '').trim() === '';
+        } catch (_error) {
+          atEnd = false;
+        }
+        if (atEnd) {
+          scroll.scrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+          return;
+        }
+        const anchor = range.startContainer;
+        const element = anchor?.nodeType === 1 ? anchor : anchor?.parentElement;
+        const block = element?.closest?.('p, li, div, br') ?? element;
+        const rect = block?.getBoundingClientRect?.();
+        const box = scroll.getBoundingClientRect?.();
+        if (rect && box && rect.height > 0) {
+          const delta = caretScrollDelta(rect, box);
+          if (delta !== 0) scroll.scrollTop += delta;
+        }
+        return;
+      }
+      const box = scroll.getBoundingClientRect?.();
+      const delta = rectOfRange && box ? caretScrollDelta(rectOfRange, box) : 0;
+      if (delta !== 0) scroll.scrollTop += delta;
+    }
+
+    /**
+     * Показать каретку после программной вставки. Пустой перенос строки
+     * дорисовывается не к следующему кадру (Lexical добавляет пустой блок),
+     * поэтому повторяем прокрутку ещё пару раз, когда DOM уже устоялся.
+     * @param {object} card - карточка композера.
+     * @param {object} view - окно устройства.
+     * @returns {void}
+     */
+    function revealComposerSoon(card, view) {
+      const run = () => revealComposerCaret(card, view);
+      if (typeof view?.requestAnimationFrame === 'function') view.requestAnimationFrame(run);
+      else if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') window.setTimeout(run, 0);
+      else run();
+      const later = (ms) => {
+        if (typeof view?.setTimeout === 'function') view.setTimeout(run, ms);
+        else if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') window.setTimeout(run, ms);
+      };
+      later(50);
+      later(160);
     }
 
     /** Write whole clipboard payload atomically through the public revision-guarded facade. */
@@ -3397,6 +3645,7 @@ window.__ModuleLoader__.load({
       if (!card || typeof actions?.captureInsertion !== 'function' || typeof actions?.insertText !== 'function') return () => {};
       let disposed = false, pendingNative = null, composing = false, composingUntil = 0;
       const abort = new AbortController();
+      const unguardSlash = mobileComposerDevice(view) && typeof command?.guardSlash === 'function' ? command.guardSlash() : null;
       const targetOf = (event) => {
         const target = event.target?.closest?.('[data-composer-input]');
         return target && card.contains(target) && target.getAttribute('contenteditable') === 'true' && target.getAttribute('aria-disabled') !== 'true' ? target : null;
@@ -3411,6 +3660,7 @@ window.__ModuleLoader__.load({
           if (clean.startsWith(token) && /\s/.test(clean[token.length] || '')) clean = clean.slice(token.length).replace(/^ /, '');
         }
         if (!actions.insertText(clean, span)) return false;
+        revealComposerSoon(card, view);
         const next = command?.snapshot?.();
         const token = next?.phase === 'plain' ? leadingComposerCommand(next.draft) : null;
         if (token && command?.resolve && command?.claim) {
@@ -3428,6 +3678,32 @@ window.__ModuleLoader__.load({
           }).catch(() => { /* Catalog unavailable: keep the full text, never send. */ });
         }
         return true;
+      };
+      let revealFrame = null;
+      /** Держать каретку в видимой части черновика при обычном наборе. */
+      const followCaret = () => {
+        if (!mobileComposerDevice(view) || revealFrame !== null) return;
+        const run = () => {
+          revealFrame = null;
+          if (disposed) return;
+          revealComposerCaret(card, view);
+        };
+        if (typeof view?.requestAnimationFrame === 'function') revealFrame = view.requestAnimationFrame(run);
+        else run();
+      };
+      const onSelectionChange = () => {
+        const doc = view?.document;
+        // Только когда редактор уже в фокусе: программный focus внутри
+        // reveal снова шлёт selectionchange и может зациклить rAF.
+        if (!isComposerInput(doc?.activeElement)) return;
+        const selection = doc?.getSelection?.();
+        const node = selection?.anchorNode;
+        const element = node?.nodeType === 1 ? node : node?.parentElement;
+        if (!element || !card.contains(element)) return;
+        followCaret();
+      };
+      const onViewportResize = () => {
+        if (isComposerInput(view?.document?.activeElement)) followCaret();
       };
       const insert = (event, text) => { stop(event); insertText(text); };
       const inComposition = (event) => event.isComposing || event.keyCode === 229 || composing || Date.now() < composingUntil;
@@ -3458,6 +3734,7 @@ window.__ModuleLoader__.load({
         }
       };
       const onInput = (event) => {
+        if (mobileComposerDevice(view) && targetOf(event)) followCaret();
         if (!pendingNative || !targetOf(event)) return;
         const pending = pendingNative; pendingNative = null;
         event.stopImmediatePropagation();
@@ -3472,8 +3749,16 @@ window.__ModuleLoader__.load({
       };
       const handlers = { compositionstart: onCompositionStart, compositionend: onCompositionEnd, keydown: onKeyDown, beforeinput: onBeforeInput, input: onInput, paste: onPaste };
       for (const [name, fn] of Object.entries(handlers)) card.addEventListener(name, fn, true);
+      const doc = view?.document;
+      doc?.addEventListener?.('selectionchange', onSelectionChange);
+      view?.visualViewport?.addEventListener?.('resize', onViewportResize);
       return () => {
         disposed = true; abort.abort(); pendingNative = null;
+        unguardSlash?.();
+        if (revealFrame !== null) view?.cancelAnimationFrame?.(revealFrame);
+        revealFrame = null;
+        doc?.removeEventListener?.('selectionchange', onSelectionChange);
+        view?.visualViewport?.removeEventListener?.('resize', onViewportResize);
         for (const [name, fn] of Object.entries(handlers)) card.removeEventListener(name, fn, true);
       };
     }
@@ -3494,15 +3779,58 @@ window.__ModuleLoader__.load({
         }
         saved.clear();
       };
+      /** Разрешённые подписи меню «+»: остальное живёт в других панелях. */
+      const PLUS_MENU_LABELS = new Set(['File', 'Goal', 'Plan', '文件', '目标', '计划']);
+      let plusMenuOpen = false;
+      let plusMenuSeen = false;
+
+      /** Первая строка подписи опции. */
+      function plusOptionLabel(option) {
+        const text = String(option?.innerText ?? option?.textContent ?? '').trim();
+        return text.split('\n')[0].trim();
+      }
+
+      /**
+       * Оставить в плюс-меню только File/Goal/Plan. Скрываем и секцию Commands,
+       * если под ней не осталось видимых пунктов.
+       * @returns {void}
+       */
+      function filterPlusMenu() {
+        if (!plusMenuOpen || !mobileComposerDevice(view)) return;
+        const menu = card.querySelector('[data-trigger-menu]');
+        if (menu === null) {
+          if (plusMenuSeen) { plusMenuOpen = false; plusMenuSeen = false; }
+          return;
+        }
+        plusMenuSeen = true;
+        const options = [...menu.querySelectorAll('button[role="option"]')];
+        for (const option of options) {
+          option.style.display = PLUS_MENU_LABELS.has(plusOptionLabel(option)) ? '' : 'none';
+        }
+        const titles = [...menu.querySelectorAll('[role="presentation"]')];
+        for (const title of titles) {
+          let node = title.nextElementSibling;
+          let visible = false;
+          while (node !== null && !titles.includes(node)) {
+            if (node.getAttribute?.('role') === 'option' && node.style.display !== 'none') visible = true;
+            node = node.nextElementSibling;
+          }
+          title.style.display = visible ? '' : 'none';
+        }
+      }
+
       const position = () => {
         if (command) card.setAttribute('data-tweaks-mode-chip', ''); else card.removeAttribute('data-tweaks-mode-chip');
         if (!mobileComposerDevice(view)) { card.removeAttribute('data-mobile-composer'); restoreMenus(); return; }
+        filterPlusMenu();
         const vp = view.visualViewport, height = vp?.height || view.innerHeight, width = vp?.width || view.innerWidth;
         const top = vp?.offsetTop || 0, left = vp?.offsetLeft || 0;
         // The existing zoom tweak scales #root: visual viewport lengths must become local CSS lengths.
         const zoom = typeof readScale === 'function' ? readScale() : 1;
         card.setAttribute('data-mobile-composer', '');
-        card.style.setProperty('--dsh-mobile-text-cap', Math.max(36, Math.floor(height * 0.4)) / zoom + 'px');
+        const editor = card.querySelector?.('[data-composer-input]');
+        if (editor !== null && editor !== undefined && editor.getAttribute?.('spellcheck') !== 'false') editor.setAttribute('spellcheck', 'false');
+        card.style.setProperty('--dsh-mobile-text-cap', Math.max(36, Math.floor(height * 0.2)) / zoom + 'px');
         const menu = card.querySelector('[data-trigger-menu]'), button = plus();
         if (!menu || !button) return;
         const anchor = button.getBoundingClientRect();
@@ -3528,11 +3856,31 @@ window.__ModuleLoader__.load({
       };
       const onClick = (event) => {
         if (!isPlus(event)) return;
-        event.preventDefault(); event.stopImmediatePropagation(); command.toggle(); schedule();
+        event.preventDefault(); event.stopImmediatePropagation();
+        if (mobileComposerDevice(view)) {
+          plusMenuOpen = true;
+          plusMenuSeen = false;
+        }
+        command.toggle();
+        schedule();
       };
       card.addEventListener('pointerdown', onDown, true);
       card.addEventListener('mousedown', onDown, true);
       card.addEventListener('click', onClick, true);
+      // После скрытия клавиатуры меню триггеров иногда остаётся открытым и
+      // перекрывает поле. Закрываем его тапом вне меню и Escape.
+      const menuOf = () => card.querySelector('[data-trigger-menu]');
+      const onOutsidePointer = (event) => {
+        const menu = menuOf();
+        if (menu === null || menu.contains(event.target)) return;
+        command?.dismissMenu?.();
+      };
+      const onEscape = (event) => {
+        if (event.key !== 'Escape' || menuOf() === null) return;
+        command?.dismissMenu?.();
+      };
+      document.addEventListener?.('pointerdown', onOutsidePointer, true);
+      document.addEventListener?.('keydown', onEscape, true);
       view.addEventListener?.('resize', schedule);
       view.visualViewport?.addEventListener?.('resize', schedule);
       view.visualViewport?.addEventListener?.('scroll', schedule);
@@ -3545,9 +3893,48 @@ window.__ModuleLoader__.load({
       return () => {
         observer?.disconnect(); if (frame !== null) view.cancelAnimationFrame?.(frame);
         card.removeEventListener('pointerdown', onDown, true); card.removeEventListener('mousedown', onDown, true); card.removeEventListener('click', onClick, true);
+        document.removeEventListener?.('pointerdown', onOutsidePointer, true);
+        document.removeEventListener?.('keydown', onEscape, true);
         view.removeEventListener?.('resize', schedule); view.visualViewport?.removeEventListener?.('resize', schedule); view.visualViewport?.removeEventListener?.('scroll', schedule); media?.removeEventListener?.('change', schedule);
         card.removeAttribute('data-mobile-composer'); card.removeAttribute('data-tweaks-mode-chip'); card.style.removeProperty('--dsh-mobile-text-cap'); restoreMenus();
+        plusMenuOpen = false; plusMenuSeen = false;
       };
+    }
+
+    /**
+     * Enter в редакторе отложенного сообщения на touch-устройстве.
+     *
+     * Очередь рисует примитив `InlineEditor` — `<textarea>`, где Enter без Shift
+     * штатно вызывает сохранение. На телефоне Enter должен остаться переводом
+     * строки: обработчик гасит синтетический keydown, но НЕ preventDefault,
+     * поэтому перенос строки делает сам браузер, а сохранение — кнопка-галочка.
+     * @param {object} event - событие keydown.
+     * @param {object} view - окно устройства.
+     * @returns {boolean} нужно ли остановить всплытие.
+     */
+    function queueEditorEnter(event, view) {
+      if (!event || event.defaultPrevented || event.key !== 'Enter') return false;
+      if (event.isComposing || event.keyCode === 229) return false;
+      const target = event.target;
+      if (target?.tagName !== 'TEXTAREA' || typeof target.closest !== 'function') return false;
+      if (target.closest('[data-queue-dock]') === null) return false;
+      return mobileComposerDevice(view);
+    }
+
+    /**
+     * Подписаться на Enter в редакторе очереди.
+     * @param {object} doc - документ.
+     * @param {object} view - окно устройства.
+     * @returns {Function} снятие подписки.
+     */
+    function bindQueueEditorEnter(doc, view) {
+      const onKeyDown = (event) => {
+        if (!queueEditorEnter(event, view)) return;
+        // Только всплытие: перевод строки остаётся браузеру, React не сохраняет.
+        event.stopPropagation();
+      };
+      doc?.addEventListener?.('keydown', onKeyDown, true);
+      return () => doc?.removeEventListener?.('keydown', onKeyDown, true);
     }
 
     function MobileComposerBinding({ inputActions, commandBridge }) {
@@ -3563,31 +3950,1150 @@ window.__ModuleLoader__.load({
     function ComposerModeChip({ useInput, commandBridge }) {
       const state = typeof useInput === 'function' ? useInput((input) => input) : undefined;
       if (!state?.claim || !commandBridge) return null;
+      const raw = String(state.claim.name || state.claim.token.replace(/^\//, '')).trim();
+      const label = raw === '' ? 'Mode' : raw.charAt(0).toUpperCase() + raw.slice(1);
+      const remove = `Remove ${label}`;
       return React.createElement('button', {
-        type: 'button', 'data-tweaks-command-mode': '', title: 'Снять режим ' + state.claim.token.trim(),
-        'aria-label': 'Снять режим ' + state.claim.token.trim(),
+        type: 'button', 'data-tweaks-command-mode': '', title: remove, 'aria-label': remove,
         onPointerDown: (event) => event.preventDefault(), onMouseDown: (event) => event.preventDefault(),
         onClick: (event) => { event.preventDefault(); commandBridge.clear(); },
-      }, state.claim.token.trim() + ' ×');
+      }, label + ' ×');
     }
+    /**
+     * Убрать поиск из маленьких меню на touch: он нужен большим спискам,
+     * а в меню прав/команд только занимает место. Скрытый input не получает
+     * фокус — фокус уходит на первый пункт.
+     * @param {object} view - окно устройства.
+     * @returns {Function} снятие подписки.
+     */
+    function installSmallMenuSearchHider(view) {
+      if (!mobileComposerDevice(view) || typeof view?.MutationObserver !== 'function') return () => {};
+      const doc = view.document;
+      if (!doc) return () => {};
+      /**
+       * Скрыть поиск, если в меню не больше шести пунктов.
+       * @param {object} menu - узел меню.
+       * @returns {void}
+       */
+      function hide(menu) {
+        const inputs = [...menu.querySelectorAll('input')].filter((input) =>
+          input.getAttribute('data-dsh-tweaks-search-hidden') === null
+          && (input.type === 'search' || /search|搜索/i.test(input.getAttribute('placeholder') || '')));
+        if (inputs.length === 0) return;
+        const items = menu.querySelectorAll('button, [role="option"], [role="menuitem"]').length;
+        if (items === 0 || items > 6) return;
+        for (const input of inputs) {
+          input.setAttribute('data-dsh-tweaks-search-hidden', '');
+          input.style.display = 'none';
+          input.setAttribute('aria-hidden', 'true');
+          const parent = input.parentElement;
+          if (parent !== null && parent !== menu && parent.children.length <= 2 && parent.querySelectorAll('input').length === 1) {
+            parent.style.display = 'none';
+          }
+        }
+      }
+      /** Пройти по всем открытым меню. */
+      function sweep() {
+        for (const menu of doc.querySelectorAll('[role="menu"], [role="listbox"], [data-trigger-menu]')) hide(menu);
+      }
+      let frame = null;
+      const schedule = () => {
+        if (frame !== null) return;
+        const run = () => { frame = null; sweep(); };
+        if (typeof view.requestAnimationFrame === 'function') frame = view.requestAnimationFrame(run);
+        else frame = view.setTimeout(run, 0);
+      };
+      const observer = new view.MutationObserver(schedule);
+      observer.observe(doc.body ?? doc.documentElement, { childList: true, subtree: true });
+      const onFocus = (event) => {
+        const input = event.target;
+        if (input?.getAttribute?.('data-dsh-tweaks-search-hidden') === null) return;
+        const menu = input.closest?.('[role="menu"], [role="listbox"], [data-trigger-menu]');
+        menu?.querySelector('button, [role="option"], [role="menuitem"]')?.focus?.();
+      };
+      doc.addEventListener('focusin', onFocus, true);
+      sweep();
+      return () => {
+        observer.disconnect();
+        doc.removeEventListener('focusin', onFocus, true);
+        if (frame !== null) view.cancelAnimationFrame?.(frame);
+      };
+    }
+
     function setupMobileComposer(ctx, api) {
+      // Редактор очереди живёт вне карточки композера: своя подписка на документ
+      // работает и без слота, поэтому ставим её до проверки службы слотов.
+      api?.own?.(bindQueueEditorEnter(document, window));
+      api?.own?.(installSmallMenuSearchHider(window));
       const slots = typeof ctx?.get === 'function' ? ctx.get('slots') : undefined;
       if (typeof slots?.inject !== 'function' || typeof slots?.register !== 'function') return;
       const style = document.createElement('style');
-      style.textContent = '[data-tweaks-mode-chip] [data-composer-command]{display:none!important}[data-mobile-composer] [data-input-scroll]{max-height:var(--dsh-mobile-text-cap)!important;overflow-y:auto!important;overscroll-behavior:contain;min-height:0}[data-mobile-composer]>div:last-child{flex-shrink:0}[data-tweaks-command-mode]{border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:3px 10px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);cursor:pointer}';
+      style.textContent = '[data-tweaks-mode-chip] [data-composer-command]{display:none!important}[data-mobile-composer] [data-input-scroll]{max-height:var(--dsh-mobile-text-cap)!important;overflow-y:auto!important;overscroll-behavior:contain;min-height:0}[data-mobile-composer]>div:last-child{flex-shrink:0}[data-mobile-composer] [data-composer-input]{-webkit-composition-fill-color:transparent!important;-webkit-composition-frame-color:transparent!important}[data-tweaks-command-mode]{border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:2px 8px;font-size:12px;line-height:18px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);cursor:pointer;flex:none}';
       document.head?.appendChild(style); api.own(() => style.remove());
       const inject = (sessionId) => ({ commandBridge: mobileCommandBridge(ctx, sessionId) });
       api.own(slots.inject('conversation.input.overlay', () => slots.register(
         { name: 'conversation.input.overlay', id: 'mobile-composer-newlines', order: -1000, inject },
         (props) => React.createElement(MobileComposerBinding, props),
       )));
-      api.own(slots.inject('conversation.input.dock', () => slots.register(
-        { name: 'conversation.input.dock', id: 'composer-command-mode-chip', order: -900, inject },
+      api.own(slots.inject('conversation.input.left', () => slots.register(
+        { name: 'conversation.input.left', id: 'composer-command-mode-chip', order: -100, inject },
         (props) => React.createElement(ComposerModeChip, props),
       )));
     }
 
     /* #endregion tweak-mobile-composer */
+
+    /* #region tweak-mobile-sidebar */
+
+    /** Порог приложения `SIDEBAR_AUTO_COLLAPSE`: ниже него сайдбар узкий. */
+    const MOBILE_DRAWER_BREAKPOINT = 1024;
+    /** Атрибут на `<html>`: включён выдвижной режим левой панели. */
+    const MOBILE_DRAWER_ATTR = 'data-dsh-tweaks-mobile-drawer';
+    /** Атрибут на `<html>`: ящик уже уезжает, приложение ещё считает его открытым. */
+    const MOBILE_DRAWER_LEAVING_ATTR = 'data-dsh-tweaks-drawer-leaving';
+    /** Атрибут на `<html>`: открыт всплывающий список глобальных панелей. */
+    const MOBILE_PANEL_MENU_ATTR = 'data-dsh-tweaks-panel-menu';
+    /** Сколько ждём жеста пользователя, чтобы снять подавление фокуса композера. */
+    const MOBILE_FOCUS_SUPPRESS_MS = 5000;
+    /** Длительность выезда ящика: как у правой панели (`--ds-transition-duration-slow`). */
+    const MOBILE_DRAWER_SLIDE_MS = 300;
+
+    /** Рамка интерфейса, как её находит твик свободных панелей. */
+    function mobileDrawerFrame() {
+      return document.querySelector('[class*="_frame"]');
+    }
+
+    /** Колонка левой панели: без неё режим не включаем, чтобы не прятать панель навсегда. */
+    function mobileDrawerSidebar() {
+      return document.querySelector('[class*="_sidebarCol"]');
+    }
+
+    /**
+     * Разложить `grid-template-columns` приложения на треки верхнего уровня.
+     * Пробелы внутри `minmax(...)` не разделяют треки.
+     * @param {string} value - значение inline-стиля.
+     * @returns {string[]} треки.
+     */
+    function mobileDrawerTracks(value) {
+      const text = typeof value === 'string' ? value.trim() : '';
+      if (text === '' || text === 'none') return [];
+      const tracks = [];
+      let depth = 0;
+      let start = 0;
+      for (let index = 0; index < text.length; index += 1) {
+        const char = text[index];
+        if (char === '(') depth += 1;
+        else if (char === ')') depth = Math.max(0, depth - 1);
+        else if (/\s/.test(char) && depth === 0) {
+          if (index > start) tracks.push(text.slice(start, index));
+          start = index + 1;
+        }
+      }
+      if (start < text.length) tracks.push(text.slice(start));
+      return tracks.filter((track) => track !== '');
+    }
+
+    /**
+     * Сетка выдвижного режима: место сайдбара нулевое, центр гибкий,
+     * трек правой панели сохраняется, чтобы не сломать её на планшете.
+     * @param {string} value - текущая сетка приложения.
+     * @returns {string} сетка режима.
+     */
+    function mobileDrawerGrid(value) {
+      const tracks = mobileDrawerTracks(value);
+      const rightbar = tracks.length > 2 ? tracks[2] : 'minmax(0px, 0px)';
+      return `0px minmax(0px, 1fr) ${rightbar}`;
+    }
+
+    /**
+     * Куда ведёт клик внутри левой панели.
+     * @param {object} target - цель клика.
+     * @returns {'close'|'keep'|null} закрыть ящик, оставить или не наше событие.
+     */
+    function mobileSidebarIntent(target) {
+      if (target === null || target === undefined || typeof target.closest !== 'function') return null;
+      // «Три точки» и кнопки строки: привычное меню открывается, ящик остаётся.
+      if (target.closest('[class*="_rowActions"]') !== null) return 'keep';
+      if (target.closest('[data-row-key^="session:"]') !== null) return 'close';
+      // Результаты поиска по чатам в той же панели тоже открывают чат.
+      if (target.closest('[class*="_searchResultRow"]') !== null) return 'close';
+      if (target.closest('[class*="_panelRow"]') !== null) return 'close';
+      if (target.closest('[class*="_newSession"]') !== null) return 'close';
+      return null;
+    }
+
+    /**
+     * Элемент — поле ввода композера (Lexical-редактор)?
+     * @param {object} element - узел DOM.
+     * @returns {boolean} да или нет.
+     */
+    function isComposerInput(element) {
+      if (element === null || element === undefined) return false;
+      if (element?.hasAttribute?.('data-composer-input') === true) return true;
+      return typeof element?.closest === 'function' && element.closest('[data-composer-input]') !== null;
+    }
+
+    /**
+     * Подавление программного фокуса композера после выбора чата в ящике.
+     * @param {Function} [now] - часы (для тестов).
+     * @returns {object} arm/clear/armed/shouldSwallow.
+     */
+    function createMobileFocusSuppressor(now = () => Date.now()) {
+      let until = 0;
+      return {
+        arm(ms = MOBILE_FOCUS_SUPPRESS_MS) {
+          until = now() + ms;
+        },
+        clear() {
+          until = 0;
+        },
+        armed() {
+          return until !== 0 && now() < until;
+        },
+        shouldSwallow(element) {
+          return this.armed() && isComposerInput(element);
+        },
+      };
+    }
+
+    /**
+     * Подменить `focus` на время твика: программный фокус композера глотается,
+     * когда взведено подавление. Нативные тапы по полю браузер фокусирует сам,
+     * поэтому ввод остаётся доступен.
+     * @param {object} view - окно.
+     * @param {object} suppressor - подавитель.
+     * @returns {Function} возврат оригинала.
+     */
+    function installMobileFocusPatch(view, suppressor) {
+      const proto = view?.HTMLElement?.prototype;
+      if (proto === undefined || proto === null || typeof proto.focus !== 'function') return () => {};
+      const original = proto.focus;
+      function patchedFocus(...args) {
+        if (suppressor.shouldSwallow(this)) return undefined;
+        return original.apply(this, args);
+      }
+      proto.focus = patchedFocus;
+      return () => {
+        if (proto.focus === patchedFocus) proto.focus = original;
+      };
+    }
+
+    /**
+     * CSS режима: ящик за краем, первый трек сетки нулевой, полная ширина чата,
+     * объединённая шапка, точки строки и панели из нижней иконки.
+     * @param {string} [rightbar] - трек правой панели из сетки приложения.
+     * @returns {string} текст правила.
+     */
+    function mobileDrawerStyleText(rightbar = 'minmax(0px, 0px)') {
+      const root = `html[${MOBILE_DRAWER_ATTR}="on"]`;
+      const slide = 'var(--ds-transition-duration-slow) var(--ds-ease-in-out)';
+      return [
+        `${root} [class*="_frame"]{grid-template-columns:${mobileDrawerGrid(`280px minmax(0px, 1fr) ${rightbar}`)}!important}`,
+        // Колонка панели вышла из потока: центр и правая панель не должны
+        // авто-разместиться в освободившемся первом треке.
+        `${root} [class*="_frame"] > [class*="_centerCol"]{grid-column:2;grid-row:1}`,
+        `${root} [class*="_frame"] > [data-rightbar-col]{grid-column:3;grid-row:1}`,
+        `${root} [class*="_body"]{--dsh-chat-content-width:100%!important}`,
+        `${root} [class*="_sidebarCol"]{position:fixed!important;top:var(--dsh-windows-titlebar-height,0px);bottom:0;left:0;width:280px!important;max-width:86vw;` +
+          'z-index:19;background:var(--dsw-specific-sidebar-fill);border-right:0.5px solid var(--dsw-alias-border-l3);' +
+          'box-shadow:var(--dsw-elevation-prominent);transform:translateX(-102%);visibility:hidden;' +
+          `transition:transform ${slide},visibility 0s linear var(--ds-transition-duration-slow);will-change:transform}`,
+        `${root} [class*="_frame"]:not([data-sidebar-collapsed]) [class*="_sidebarCol"]{` +
+          `transform:translateX(0);visibility:visible;transition:transform ${slide}}`,
+        `${root}[${MOBILE_DRAWER_LEAVING_ATTR}="leaving"] [class*="_sidebarCol"]{transform:translateX(-102%)!important;visibility:visible!important;transition:transform ${slide}!important}`,
+        `${root} [class*="_sidebarCol"] [data-slot] > *{width:100%!important}`,
+        `${root} [data-side="sidebar"]{display:none!important}`,
+        `${root} [class*="_sessionRow"] [class*="_rowActions"],${root} [class*="_searchResultRow"] [class*="_rowActions"]{display:inline-flex!important}`,
+        `${root} [class*="_sessionRow"] [class*="_time"],${root} [class*="_sessionRow"] [class*="_pinIndicator"]{display:none!important}`,
+        // Шапка: крошки приложения скрыты, название рисует наша часть слота.
+        `${root} [class*="_titleCluster"] [class*="_crumbs"]{display:none!important}`,
+        `${root} .dsh-tweaks-header-title{max-width:42vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;` +
+          'color:var(--dsw-alias-label-primary);font-weight:500;font-size:14px;line-height:20px}',
+        // Второстепенные действия и утилиты уходят в верхнее «…»; их кнопки
+        // остаются невидимыми анкорами у правого верхнего края.
+        `${root} [data-slot="conversation.session.header.actions"] > *{position:fixed;top:44px;right:8px;width:0;height:0;opacity:0;` +
+          'pointer-events:none;overflow:visible;z-index:-1}',
+        `${root} [data-slot="conversation.session.header.utilities"] > *{position:fixed;top:44px;right:8px;width:0;height:0;opacity:0;` +
+          'pointer-events:none;overflow:visible;z-index:-1}',
+        `${root} [data-slot="conversation.session.header.utilities"] > *:has([class*="_moreButton"]){position:static;width:auto;height:auto;opacity:1;pointer-events:auto;overflow:visible;z-index:auto}`,
+        `${root} [class*="_viewsMoreAnchor"]{position:fixed;top:44px;right:8px;width:0;height:0;opacity:0;pointer-events:none;overflow:visible;z-index:-1}`,
+        `${root} [class*="_viewsMoreMenu"]{display:none!important}`,
+        '[data-dsh-mobile-sidebar-toggle]{display:none}',
+        `${root} [data-dsh-mobile-sidebar-toggle]{display:inline-flex;align-items:center;justify-content:center;` +
+          'width:28px;height:28px;padding:0;border:0;border-radius:var(--dsw-radius-sm);background:transparent;' +
+          'color:var(--dsw-alias-label-secondary);cursor:pointer;flex:none}',
+        `${root} [data-dsh-mobile-sidebar-toggle]:hover{background:var(--dsw-alias-interactive-bg-hover)}`,
+        `${root} [data-dsh-mobile-sidebar-toggle] svg{width:15px;height:15px;display:block}`,
+        // Панели: список скрыт, открывается поповером из нижней иконки.
+        // Вкладки правой панели: выбор не должен плавно прокручивать полосу
+        // (выглядело как анимация «не в ту сторону»).
+        `${root} [data-dockkit-strip-tabs]{scroll-behavior:auto!important}`,
+        `${root} [data-dockkit-split-button],${root} [data-sidebar-right-mode]{display:none!important}`,
+        `${root} [data-dsh-tweaks-tab-hold]{opacity:.72;transform:scale(.97);transition:transform 120ms ease-out,opacity 120ms ease-out}`,
+        `${root} [class*="_panelList"]{display:none!important}`,
+        `${root}[${MOBILE_PANEL_MENU_ATTR}="open"] [class*="_panelList"]{display:flex!important;position:absolute;left:8px;right:8px;` +
+          'bottom:calc(var(--dsh-tweaks-footer-height,64px) + 8px);flex-direction:column;gap:2px;padding:6px;z-index:40;' +
+          'max-height:calc(100% - var(--dsh-tweaks-footer-height,64px) - 16px);overflow:auto;border-radius:var(--dsw-radius-lg);' +
+          'background:var(--dsw-specific-menu);box-shadow:var(--dsw-elevation-prominent)}',
+        `${root} [class*="_footArea"]{flex-direction:row;align-items:center;gap:4px}`,
+        `${root} [class*="_settingsArea"]{flex:1;min-width:0}`,
+        `${root} [class*="_footerActions"]{flex:none;order:1;width:auto}`,
+        '[data-dsh-tweaks-panel-toggle]{display:none}',
+        `${root} [data-dsh-tweaks-panel-toggle]{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;` +
+          'padding:0;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;flex:none}',
+        `${root} [data-dsh-tweaks-panel-toggle]:hover{background:var(--dsw-alias-interactive-bg-hover)}`,
+        `${root} [data-dsh-tweaks-panel-toggle] svg{width:16px;height:16px;display:block}`,
+        `@media (prefers-reduced-motion:reduce){${root} [class*="_sidebarCol"]{transition:none!important}}`,
+      ].join('\n');
+    }
+
+    /** Иконка «панель слева» для кнопки в шапке: та же, что у правой панели, в 15 px. */
+    function MobileSidebarIcon() {
+      const Icon = primitives?.IconPanelLeftOutlineRegular;
+      if (typeof Icon === 'function') return React.createElement(Icon, { size: 15 });
+      return React.createElement(
+        'svg',
+        { viewBox: '0 0 16 16', 'aria-hidden': true, focusable: 'false' },
+        React.createElement('rect', { x: 2, y: 3, width: 12, height: 10, rx: 2, fill: 'none', stroke: 'currentColor', strokeWidth: 1.2 }),
+        React.createElement('path', { d: 'M6 3.4v9.2', stroke: 'currentColor', strokeWidth: 1.2 }),
+      );
+    }
+
+    /** Иконка нижней кнопки панелей. */
+    function MobilePanelMenuIcon() {
+      const Icon = primitives?.IconEllipsisOutlineRegular;
+      if (typeof Icon === 'function') return React.createElement(Icon, { size: 16 });
+      return React.createElement(
+        'svg',
+        { viewBox: '0 0 16 16', width: 16, height: 16, 'aria-hidden': true },
+        ...[3, 8, 13].map((cx) => React.createElement('circle', { key: cx, cx, cy: 8, r: 1.1, fill: 'currentColor' })),
+      );
+    }
+
+    /**
+     * Кнопка «открыть меню» в шапке чата. Как и кнопка правой панели, видна
+     * только пока панель закрыта.
+     * @param {object} props - слот-пропсы и host с подписью и действием.
+     * @returns {object} кнопка.
+     */
+    function MobileSidebarToggle({ host }) {
+      const label = typeof host?.label === 'function' ? host.label() : 'Меню';
+      return React.createElement(
+        'button',
+        {
+          type: 'button',
+          className: 'dsh-tweaks-mobile-sidebar-toggle',
+          'data-dsh-mobile-sidebar-toggle': '',
+          title: label,
+          'aria-label': label,
+          onClick: (event) => {
+            event.preventDefault();
+            host?.open?.();
+          },
+        },
+        React.createElement(MobileSidebarIcon, null),
+      );
+    }
+
+    /**
+     * Нижняя кнопка глобальных панелей рядом с «Signed in…».
+     * @param {object} props - слот-пропсы и host с состоянием и переключением.
+     * @returns {object} кнопка.
+     */
+    function MobilePanelMenuToggle({ host }) {
+      const [open, setOpen] = React.useState(host.isOpen());
+      React.useEffect(() => host.subscribe(setOpen), [host]);
+      const label = host.label();
+      return React.createElement(
+        'button',
+        {
+          type: 'button',
+          className: 'dsh-tweaks-panel-toggle',
+          'data-dsh-tweaks-panel-toggle': '',
+          title: label,
+          'aria-label': label,
+          'aria-haspopup': 'menu',
+          'aria-expanded': open,
+          onClick: (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            host.toggle();
+          },
+        },
+        React.createElement(MobilePanelMenuIcon, null),
+      );
+    }
+
+    /**
+     * Включить твик: выдвижная левая панель, объединённая шапка и панели внизу.
+     *
+     * Панель не перерисовывается и не дублируется: приложению отдаётся его же
+     * состояние (`layout.toggleSidebar`), а CSS переносит колонку за край и
+     * обнуляет её трек в сетке. Сетку приложения читаем из inline-стиля, поэтому
+     * трек правой панели сохраняется, а `freePanels` не конфликтует: свои
+     * значения пишем правилом `!important`, а не в тот же inline.
+     * @param {object} ctx - клиентский контекст плагина.
+     * @param {object} api - регистратор очисток твика.
+     * @returns {void}
+     */
+    function setupMobileSidebar(ctx, api) {
+      const own = typeof api?.own === 'function' ? api.own : () => {};
+      let locale = undefined;
+      try {
+        locale = typeof ctx?.get === 'function' ? ctx.get('locale') : undefined;
+      } catch (_error) {
+        locale = undefined;
+      }
+      const translate = createTranslator(locale);
+      const html = document.documentElement;
+      const suppressor = createMobileFocusSuppressor();
+
+      const style = document.createElement('style');
+      style.dataset.dshMobileSidebar = 'rules';
+      style.textContent = mobileDrawerStyleText();
+      document.head?.appendChild(style);
+      own(() => style.remove());
+
+      own(installMobileFocusPatch(typeof window === 'undefined' ? undefined : window, suppressor));
+      own(setupMobileRightTabs(ctx, api));
+
+      let disposed = false;
+      let leaving = false;
+      let leavingTimer = null;
+      let panelOpen = false;
+      const panelListeners = new Set();
+
+      /** Открыть/закрыть панель штатным действием приложения. */
+      function toggleSidebar() {
+        try {
+          ctx?.get?.('layout')?.toggleSidebar?.();
+        } catch (_error) {
+          /* служба раскладки ещё не поднялась: кнопка просто ничего не делает */
+        }
+      }
+
+      /** Закрыть всплывающий список панелей. */
+      function closePanelMenu() {
+        if (!panelOpen) return;
+        panelOpen = false;
+        html?.removeAttribute(MOBILE_PANEL_MENU_ATTR);
+        for (const listener of panelListeners) listener(false);
+      }
+
+      /** Открыть/закрыть список панелей. */
+      function togglePanelMenu() {
+        if (panelOpen) {
+          closePanelMenu();
+          return;
+        }
+        const foot = document.querySelector('[class*="_footArea"]');
+        const height = foot === null ? 64 : Math.max(48, Math.round(foot.offsetHeight));
+        html?.style.setProperty('--dsh-tweaks-footer-height', `${height}px`);
+        panelOpen = true;
+        html?.setAttribute(MOBILE_PANEL_MENU_ATTR, 'open');
+        for (const listener of panelListeners) listener(true);
+      }
+
+      /**
+       * Анимированное закрытие: сначала ящик уезжает при открытом состоянии
+       * приложения, затем вызывается настоящий toggle — содержимое меняется за экраном.
+       * @param {Function} finish - настоящий toggle.
+       * @returns {void}
+       */
+      function closeAnimated(finish) {
+        if (leaving || disposed) return;
+        const reduced = typeof window?.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches === true;
+        closePanelMenu();
+        if (reduced || typeof finish !== 'function') {
+          finish?.();
+          return;
+        }
+        leaving = true;
+        html?.setAttribute(MOBILE_DRAWER_LEAVING_ATTR, 'leaving');
+        leavingTimer = window.setTimeout(() => {
+          leavingTimer = null;
+          leaving = false;
+          html?.removeAttribute(MOBILE_DRAWER_LEAVING_ATTR);
+          finish();
+        }, MOBILE_DRAWER_SLIDE_MS);
+      }
+
+      // Настоящий toggle раскладки; при открытом ящике в узком режиме его
+      // вызов превращается в анимированное закрытие (наша кнопка, кнопка
+      // панели и shortcut используют один и тот же сервис).
+      let layoutService = null;
+      let originalToggle = null;
+      try {
+        layoutService = typeof ctx?.get === 'function' ? ctx.get('layout') : null;
+        if (layoutService !== null && typeof layoutService.toggleSidebar === 'function') {
+          originalToggle = layoutService.toggleSidebar.bind(layoutService);
+          const patched = () => {
+            if (disposed) {
+              originalToggle();
+              return;
+            }
+            const frame = mobileDrawerFrame();
+            if (frame !== null && !leaving && narrow(frame) && !frame.hasAttribute('data-sidebar-collapsed')) {
+              closeAnimated(originalToggle);
+              return;
+            }
+            originalToggle();
+          };
+          layoutService.toggleSidebar = patched;
+          own(() => {
+            if (layoutService.toggleSidebar === patched) layoutService.toggleSidebar = originalToggle;
+          });
+        }
+      } catch (_error) {
+        /* сервис только для чтения: обойдёмся прямыми вызовами */
+      }
+
+      /** Ширина рамки в логических пикселях: её уже правит твик масштаба. */
+      function narrow(frame) {
+        const width = typeof frame?.getBoundingClientRect === 'function' ? frame.getBoundingClientRect().width : 0;
+        if (Number.isFinite(width) && width > 0) return width < MOBILE_DRAWER_BREAKPOINT;
+        return Number(window?.innerWidth) > 0 && window.innerWidth < MOBILE_DRAWER_BREAKPOINT;
+      }
+
+      let observer = null;
+      let observedFrame = null;
+      let retryTimer = null;
+      let retryCount = 0;
+      let rightbarTrack = 'minmax(0px, 0px)';
+      let lastStyle = style.textContent;
+
+      /** Перерисовать правило, только если трек правой панели правда изменился. */
+      function writeStyle() {
+        const next = mobileDrawerStyleText(rightbarTrack);
+        if (next === lastStyle) return;
+        lastStyle = next;
+        style.textContent = next;
+      }
+
+      /** Снять observer с прежней рамки. */
+      function detachObserver() {
+        if (observer !== null) {
+          observer.disconnect();
+          observer = null;
+        }
+        observedFrame = null;
+      }
+
+      /** Следить за сеткой и состоянием ящика. */
+      function attachObserver(frame) {
+        if (frame === null || frame === undefined || typeof MutationObserver === 'undefined') return;
+        if (observer !== null && observedFrame === frame) return;
+        detachObserver();
+        observer = new MutationObserver(() => sync());
+        observer.observe(frame, { attributes: true, attributeFilter: ['style', 'data-sidebar-collapsed'] });
+        observedFrame = frame;
+      }
+
+      /** Привести режим и правило к текущей раскладке. */
+      function sync() {
+        if (disposed) return;
+        const frame = mobileDrawerFrame();
+        const sidebar = mobileDrawerSidebar();
+        const active = frame !== null && sidebar !== null && narrow(frame);
+        if (active) html?.setAttribute(MOBILE_DRAWER_ATTR, 'on');
+        else html?.removeAttribute(MOBILE_DRAWER_ATTR);
+        if (frame !== null) {
+          const tracks = mobileDrawerTracks(frame.style.gridTemplateColumns);
+          const third = tracks.length > 2 ? tracks[2] : 'minmax(0px, 0px)';
+          if (third !== rightbarTrack) {
+            rightbarTrack = third;
+            writeStyle();
+          }
+          if (frame.getAttribute?.('data-sidebar-collapsed') !== null) closePanelMenu();
+          if (active) attachObserver(frame);
+          else {
+            detachObserver();
+            closePanelMenu();
+          }
+        } else {
+          detachObserver();
+          closePanelMenu();
+        }
+      }
+
+      const onResize = () => sync();
+
+      /**
+       * Тап мимо открытого ящика закрывает его. Портальные меню и сам ящик
+       * не считаются «мимо»; событие не отменяется, тап доходит до цели.
+       * @param {object} event - pointerdown.
+       * @returns {void}
+       */
+      const onPointerDown = (event) => {
+        if (suppressor.armed()) suppressor.clear();
+        if (disposed || leaving) return;
+        const frame = mobileDrawerFrame();
+        if (frame === null || !narrow(frame) || frame.hasAttribute('data-sidebar-collapsed')) return;
+        const target = event.target;
+        if (target?.closest?.('[class*="_sidebarCol"]') !== null && target?.closest) return;
+        if (target?.closest?.('[role="menu"], [role="listbox"], [data-trigger-menu]') !== null && target?.closest) return;
+        closeAnimated(originalToggle ?? toggleSidebar);
+      };
+
+      /**
+       * Клик в левой панели и по всплывающему списку панелей.
+       * @param {object} event - click.
+       * @returns {void}
+       */
+      const onClick = (event) => {
+        if (disposed) return;
+        const target = event.target;
+        if (panelOpen && target?.closest?.('[class*="_panelList"]') === null
+          && target?.closest?.('[role="menu"], [role="listbox"]') === null
+          && target?.closest?.('[data-dsh-tweaks-panel-toggle]') === null) {
+          closePanelMenu();
+        }
+        const frame = mobileDrawerFrame();
+        if (frame === null || leaving || !narrow(frame) || frame.hasAttribute('data-sidebar-collapsed')) return;
+        const intent = mobileSidebarIntent(target);
+        if (intent === null || intent === 'keep') return;
+        // Композер мог остаться в фокусе с прошлого чата: клавиатуру закрываем сразу.
+        const active = document.activeElement;
+        if (isComposerInput(active)) active.blur?.();
+        suppressor.arm();
+        closePanelMenu();
+        closeAnimated(originalToggle ?? toggleSidebar);
+      };
+
+      /** Escape закрывает список панелей, не трогая ящик. */
+      const onKeyDown = (event) => {
+        if (panelOpen && event.key === 'Escape') closePanelMenu();
+      };
+
+      /** Искать рамку, если плагин поднялся раньше приложения. */
+      const tryStart = () => {
+        if (disposed) return;
+        sync();
+        if (mobileDrawerFrame() === null && retryCount < 40) {
+          retryCount += 1;
+          retryTimer = window.setTimeout(tryStart, 100);
+        }
+      };
+
+      window.addEventListener?.('resize', onResize);
+      window.visualViewport?.addEventListener?.('resize', onResize);
+      document.addEventListener?.('pointerdown', onPointerDown, true);
+      document.addEventListener?.('click', onClick, true);
+      document.addEventListener?.('keydown', onKeyDown, true);
+      own(() => {
+        document.removeEventListener?.('pointerdown', onPointerDown, true);
+        document.removeEventListener?.('click', onClick, true);
+        document.removeEventListener?.('keydown', onKeyDown, true);
+        window.removeEventListener?.('resize', onResize);
+        window.visualViewport?.removeEventListener?.('resize', onResize);
+      });
+      own(() => {
+        // Выключение твика возвращает штатную раскладку.
+        if (disposed) return;
+        disposed = true;
+        if (retryTimer !== null) window.clearTimeout(retryTimer);
+        retryTimer = null;
+        if (leavingTimer !== null) window.clearTimeout(leavingTimer);
+        leavingTimer = null;
+        leaving = false;
+        detachObserver();
+        suppressor.clear();
+        closePanelMenu();
+        html?.removeAttribute(MOBILE_DRAWER_ATTR);
+        html?.removeAttribute(MOBILE_DRAWER_LEAVING_ATTR);
+        html?.style.removeProperty('--dsh-tweaks-footer-height');
+        const frame = mobileDrawerFrame();
+        if (frame !== null && narrow(frame) && !frame.hasAttribute('data-sidebar-collapsed')) {
+          (originalToggle ?? toggleSidebar)();
+        }
+      });
+
+      let slots = undefined;
+      try {
+        slots = typeof ctx?.get === 'function' ? ctx.get('slots') : undefined;
+      } catch (_error) {
+        slots = undefined;
+      }
+      if (typeof slots?.inject === 'function' && typeof slots?.register === 'function') {
+        const menuHost = {
+          label: () => translate('mobileSidebar.open'),
+          open: toggleSidebar,
+        };
+        // Меню и название — в общий leading-слот: меню первым, затем лампа,
+        // затем название чата.
+        headerLeadingSeat.set(ctx, 'mobileMenu', 0, (props) => React.createElement(MobileSidebarToggle, { ...props, host: menuHost }));
+        own(() => headerLeadingSeat.clear('mobileMenu'));
+        headerLeadingSeat.set(ctx, 'title', 2, (props) => React.createElement(MobileHeaderTitle, props));
+        own(() => headerLeadingSeat.clear('title'));
+
+        const panelHost = {
+          label: () => translate('mobilePanels.open'),
+          isOpen: () => panelOpen,
+          toggle: togglePanelMenu,
+          subscribe: (listener) => {
+            panelListeners.add(listener);
+            return () => panelListeners.delete(listener);
+          },
+        };
+        own(slots.inject('sidebar.footer.action', () => slots.register(
+          { name: 'sidebar.footer.action', id: 'mobile-panel-menu', order: -10 },
+          (props) => React.createElement(MobilePanelMenuToggle, { ...props, host: panelHost }),
+        )));
+      }
+
+      own(installHeaderOverflow(translate));
+      tryStart();
+    }
+
+    /**
+     * Верхнее «…» становится единственным меню шапки: в него добавляются
+     * «Copy session ID» и прокси к скрытым действиям/утилитам/меню видов.
+     * @param {Function} translate - словарь твика.
+     * @returns {void}
+     */
+    function installHeaderOverflow(translate) {
+      if (typeof MutationObserver === 'undefined') return;
+      const moreOf = () => document.querySelector('[data-slot="conversation.session.header.utilities"] [class*="_moreButton"]');
+      let scheduled = false;
+      let probeViews = 0;
+
+      /** Скопировать id текущей сессии. */
+      function copySessionId() {
+        const id = document.querySelector('[data-conversation-session]')?.getAttribute('data-conversation-session');
+        if (typeof id !== 'string' || id === '') return;
+        try {
+          const write = primitives?.writeClipboard;
+          if (typeof write === 'function') write(id);
+          else navigator.clipboard?.writeText(id);
+        } catch (_error) {
+          /* буфер недоступен: пункт всё равно виден */
+        }
+      }
+
+      /**
+       * Пункт меню на основе штатной разметки.
+       * @param {object} template - штатный menuitem.
+       * @param {string} label - подпись.
+       * @param {Function} run - действие.
+       * @returns {object} кнопка.
+       */
+      function makeItem(template, label, run) {
+        const node = template.cloneNode(true);
+        node.setAttribute('data-dsh-tweaks-overflow-item', '');
+        for (const span of [...node.querySelectorAll('span')]) {
+          if (span.querySelector('svg') !== null) span.remove();
+        }
+        const text = [...node.querySelectorAll('span')].find((span) => span.textContent !== '');
+        if (text !== undefined) text.textContent = label;
+        else node.textContent = label;
+        node.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          moreOf()?.click();
+          window.setTimeout(run, 0);
+        });
+        return node;
+      }
+
+      /**
+       * Удержать меню верхнего «…» на экране: на телефоне примитив иногда
+       * ставит его ниже viewport (top ≈ innerHeight + gap). Позиционируем
+       * fixed по кнопке и прижимаем к видимой области над клавиатурой.
+       * @param {object} menu - меню.
+       * @param {object} trigger - кнопка «…».
+       * @returns {void}
+       */
+      function clampHeaderMenu(menu, trigger) {
+        if (menu === null || trigger === null) return;
+        const viewport = typeof window.visualViewport === 'object' && window.visualViewport !== null ? window.visualViewport : null;
+        const height = viewport?.height ?? window.innerHeight;
+        const top = viewport?.offsetTop ?? 0;
+        const width = viewport?.width ?? window.innerWidth;
+        const rect = menu.getBoundingClientRect();
+        const button = trigger.getBoundingClientRect();
+        let y = button.bottom + 4;
+        if (y + rect.height > top + height - 8) y = button.top - rect.height - 4;
+        if (y < top + 8) y = top + 8;
+        const left = Math.min(Math.max(8, button.left), Math.max(8, width - rect.width - 8));
+        menu.style.position = 'fixed';
+        menu.style.left = `${Math.round(left)}px`;
+        menu.style.top = `${Math.round(y)}px`;
+        menu.style.maxHeight = `${Math.max(120, Math.round(height - 16))}px`;
+        menu.style.overflowY = 'auto';
+        menu.dataset.dshTweaksClamped = '';
+      }
+
+      /** Добавить пункты в открытое меню верхнего «…». */
+      function inject() {
+        if (document.documentElement?.getAttribute?.(MOBILE_DRAWER_ATTR) !== 'on') return;
+        const trigger = moreOf();
+        if (trigger === null) return;
+        if (trigger.getAttribute('aria-expanded') !== 'true') { probeViews = 0; return; }
+        const menu = [...document.querySelectorAll('[role="menu"]')].find((node) => {
+          if (node.querySelector('[class*="viewsMoreMenu"]') !== null) return false;
+          return node.querySelector('button[role="menuitem"]') !== null;
+        });
+        if (menu === undefined) return;
+        const template = menu.querySelector('button[role="menuitem"]');
+        if (template === null) return;
+        const host = menu.querySelector('[role="presentation"]') ?? menu;
+        const seen = new Set(['More actions', translate('session.copyId')]);
+        for (const node of menu.querySelectorAll('[data-dsh-tweaks-overflow-item]')) seen.add(node.textContent.trim());
+        if (menu.getAttribute('data-dsh-tweaks-overflow-base') === null) {
+          menu.setAttribute('data-dsh-tweaks-overflow-base', '');
+          const separator = document.createElement('div');
+          separator.setAttribute('role', 'separator');
+          separator.setAttribute('data-dsh-tweaks-overflow-item', '');
+          separator.style.cssText = 'height:.5px;margin:4px 8px;background:var(--dsw-alias-border-l2)';
+          host.appendChild(separator);
+          host.appendChild(makeItem(template, translate('session.copyId'), copySessionId));
+        }
+        // Пункты меню видов (Browse other plugins / Create your plugin)
+        // переносим отдельными строками: открываем скрытое меню, читаем
+        // подписи и закрываем. Само меню в мобильном режиме скрыто CSS-ом.
+        const viewsTrigger = document.querySelector('button[class*="_viewsMore"]');
+        if (viewsTrigger !== null && menu.getAttribute('data-dsh-tweaks-views-done') === null) {
+          const viewsMenu = document.querySelector('[class*="_viewsMoreMenu"]');
+          if (viewsMenu !== null) {
+            menu.setAttribute('data-dsh-tweaks-views-done', '');
+            for (const item of viewsMenu.querySelectorAll('button[role="menuitem"]')) {
+              const label = item.textContent.trim();
+              if (label === '' || seen.has(label)) continue;
+              seen.add(label);
+              host.appendChild(makeItem(template, label, () => {
+                viewsTrigger.click();
+                window.setTimeout(() => {
+                  const next = document.querySelector('[class*="_viewsMoreMenu"]');
+                  [...(next?.querySelectorAll('button[role="menuitem"]') ?? [])]
+                    .find((button) => button.textContent.trim() === label)?.click();
+                }, 0);
+              }));
+            }
+            viewsTrigger.click();
+          } else if (probeViews < 3) {
+            probeViews += 1;
+            viewsTrigger.click();
+            window.setTimeout(inject, 30);
+          }
+        }
+        const originals = [
+          ...document.querySelectorAll('[data-slot="conversation.session.header.actions"] button'),
+          ...document.querySelectorAll('[data-slot="conversation.session.header.utilities"] > *:not(:has([class*="_moreButton"])) button'),
+        ];
+        for (const original of originals) {
+          const label = (original.getAttribute('aria-label') || original.getAttribute('title') || original.textContent || '').trim();
+          if (label === '' || seen.has(label) || label.length > 48) continue;
+          if (original.getAttribute('data-dsh-mobile-sidebar-toggle') !== null) continue;
+          seen.add(label);
+          host.appendChild(makeItem(template, label, () => original.click()));
+        }
+        clampHeaderMenu(menu, trigger);
+      }
+
+      /** Запланировать инъекцию после перерисовки меню. */
+      const schedule = () => {
+        if (scheduled) return;
+        scheduled = true;
+        const run = () => {
+          scheduled = false;
+          inject();
+        };
+        if (typeof window?.requestAnimationFrame === 'function') window.requestAnimationFrame(run);
+        else window.setTimeout(run, 0);
+      };
+
+      const observer = new MutationObserver(schedule);
+      observer.observe(document.body ?? document.documentElement, { childList: true, subtree: true });
+      const onClick = (event) => {
+        if (event.target?.closest?.('[class*="_moreButton"]') !== null) schedule();
+      };
+      document.addEventListener('click', onClick, true);
+      return () => {
+        observer.disconnect();
+        document.removeEventListener('click', onClick, true);
+      };
+    }
+
+    /* #endregion tweak-mobile-sidebar */
+
+    /* #region tweak-mobile-right-tabs */
+
+    /** Сколько держать вкладку, прежде чем начнётся перенос. */
+    const RIGHT_TAB_LONG_PRESS_MS = 1000;
+    /** Порог жеста-перелистывания вкладок. */
+    const RIGHT_TAB_SWIPE_PX = 48;
+    /** Смещение, после которого жест уже не считается удержанием. */
+    const RIGHT_TAB_HOLD_SLOP = 10;
+
+    /**
+     * Активная панель правого докера: жест работает только по видимой панели.
+     * @returns {object|null} панель или null.
+     */
+    function rightActivePane() {
+      const panes = [...document.querySelectorAll('[data-dockkit-pane]')];
+      const active = panes.find((pane) => pane.hasAttribute('data-dockkit-pane-active'));
+      const pane = active ?? panes[0];
+      if (!pane || pane.closest('[hidden], [aria-hidden="true"]') !== null) return null;
+      const rect = pane.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 ? pane : null;
+    }
+
+    /**
+     * Полоса вкладок активной панели и её чипы по порядку.
+     * @param {object|null} pane - панель.
+     * @returns {object[]} чипы.
+     */
+    function rightTabChips(pane) {
+      if (!pane) return [];
+      const strip = pane.querySelector('[data-dockkit-strip-tabs]');
+      if (!strip) return [];
+      return [...strip.querySelectorAll('[data-dockkit-tab]')];
+    }
+
+    /**
+     * Переключить активную вкладку на соседнюю.
+     * @param {object} pane - панель.
+     * @param {number} delta - +1 следующая, -1 предыдущая.
+     * @returns {boolean} был ли переход.
+     */
+    function switchRightTab(pane, delta) {
+      const chips = rightTabChips(pane);
+      if (chips.length < 2) return false;
+      const index = chips.findIndex((chip) => chip.getAttribute('aria-selected') === 'true');
+      const next = chips[index + delta];
+      if (!next) return false;
+      next.click();
+      return true;
+    }
+
+    /**
+     * Горизонтально прокручиваемый предок: по такому месту свайп листает
+     * контент, а не вкладки.
+     * @param {object} target - цель.
+     * @param {object} pane - панель.
+     * @returns {boolean} есть ли горизонтальный скролл.
+     */
+    function rightHorizontalScroller(target, pane) {
+      let node = target;
+      while (node && node !== pane) {
+        if (node.scrollWidth > node.clientWidth + 4) {
+          const overflow = getComputedStyle(node).overflowX;
+          if (overflow === 'auto' || overflow === 'scroll') return true;
+        }
+        node = node.parentElement;
+      }
+      return false;
+    }
+
+    /** Интерактивный элемент, на котором свайп вкладок не перехватываем. */
+    function rightInteractiveTarget(target) {
+      return typeof target?.closest === 'function' && target.closest(
+        'input, textarea, select, [contenteditable="true"], [role="textbox"], [role="menu"], [role="listbox"], button, a, [role="button"], [data-dockkit-tab-close]',
+      ) !== null;
+    }
+
+    /**
+     * Свайпы по содержимому правой панели и по полосе вкладок + долгое
+     * нажатие для переноса вкладки. Свайп по полосе/телу листает вкладки;
+     * удержание чипа секунду разблокирует штатный drag докера.
+     * @param {object} ctx - клиентский контекст.
+     * @param {object} api - очистки твика.
+     * @returns {Function} очистка.
+     */
+    function setupMobileRightTabs(ctx, api) {
+      if (typeof window === 'undefined' || !mobileComposerDevice(window)) return () => {};
+      const doc = window.document;
+      let disposed = false;
+      let suppressClick = false;
+      let suppressChip = null;
+      let suppressTimer = null;
+      let bodyStart = null;
+      let hold = null;
+      let moveBlocker = null;
+
+      /** Не дать клику после свайпа/переноса выбрать вкладку. */
+      const onClickCapture = (event) => {
+        if (!suppressClick) return;
+        if (suppressChip !== null && !suppressChip.contains(event.target)) return;
+        suppressClick = false;
+        suppressChip = null;
+        if (suppressTimer !== null) window.clearTimeout(suppressTimer);
+        suppressTimer = null;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      };
+
+      /** Погасить следующий клик по исходному чипу. */
+      const armSuppress = (chip) => {
+        suppressClick = true;
+        suppressChip = chip;
+        if (suppressTimer !== null) window.clearTimeout(suppressTimer);
+        suppressTimer = window.setTimeout(() => {
+          suppressClick = false;
+          suppressChip = null;
+          suppressTimer = null;
+        }, 500);
+      };
+
+      /**
+       * Свайп по телу панели: влево — следующая вкладка, вправо — предыдущая.
+       * @param {object} event - pointerdown.
+       * @returns {void}
+       */
+      const onBodyDown = (event) => {
+        if (disposed || event.button > 0 || bodyStart !== null) return;
+        const pane = event.target?.closest?.('[data-dockkit-pane]');
+        if (pane === null || pane === undefined || pane !== rightActivePane()) return;
+        if (event.target.closest('[data-dockkit-strip]') !== null) return;
+        if (rightInteractiveTarget(event.target) || rightHorizontalScroller(event.target, pane)) return;
+        bodyStart = { id: event.pointerId, x: event.clientX, y: event.clientY, pane, horizontal: false, dead: false };
+      };
+
+      const onBodyMove = (event) => {
+        if (bodyStart === null || event.pointerId !== bodyStart.id) return;
+        const dx = event.clientX - bodyStart.x;
+        const dy = event.clientY - bodyStart.y;
+        if (Math.abs(dy) > 14 && Math.abs(dy) > Math.abs(dx)) bodyStart.dead = true;
+        if (!bodyStart.dead && Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy)) bodyStart.horizontal = true;
+      };
+
+      const onBodyUp = (event) => {
+        if (bodyStart === null || event.pointerId !== bodyStart.id) return;
+        const start = bodyStart;
+        bodyStart = null;
+        if (start.dead || !start.horizontal) return;
+        const dx = event.clientX - start.x;
+        if (Math.abs(dx) < RIGHT_TAB_SWIPE_PX) return;
+        if (switchRightTab(start.pane, dx < 0 ? 1 : -1)) armSuppress(start.pane.querySelector('[data-dockkit-tab][aria-selected="true"]'));
+      };
+
+      /**
+       * Нажатие на чип вкладки: удержание 1 с разрешает штатный перенос,
+       * короткий горизонтальный жест листает вкладки.
+       * @param {object} event - pointerdown.
+       * @returns {void}
+       */
+      const onStripDown = (event) => {
+        if (disposed || event.button > 0 || hold !== null || suppressClick) return;
+        const chip = event.target?.closest?.('[data-dockkit-tab]');
+        if (chip === null || chip === undefined || chip.closest('[data-dockkit-tab-close]') !== null) return;
+        const pane = chip.closest('[data-dockkit-pane]');
+        if (pane === null || pane === undefined) return;
+        const state = {
+          id: event.pointerId,
+          x: event.clientX,
+          y: event.clientY,
+          chip,
+          pane,
+          horizontal: false,
+          cancelled: false,
+          longFired: false,
+          movedAfterHold: false,
+          timer: null,
+        };
+        hold = state;
+        chip.setAttribute('data-dsh-tweaks-tab-hold', '');
+        // Пока идёт удержание, гасим движения: штатный drag докера не должен
+        // начаться раньше времени. После таймера отпускаем — докер сам решает.
+        moveBlocker = (moved) => {
+          if (state.id !== moved.pointerId) return;
+          moved.stopImmediatePropagation();
+          const dx = moved.clientX - state.x;
+          const dy = moved.clientY - state.y;
+          if (state.longFired) {
+            state.movedAfterHold = state.movedAfterHold || Math.abs(dx) + Math.abs(dy) > 4;
+            return;
+          }
+          if (Math.abs(dx) > RIGHT_TAB_HOLD_SLOP || Math.abs(dy) > RIGHT_TAB_HOLD_SLOP) {
+            state.cancelled = true;
+            if (state.timer !== null) { window.clearTimeout(state.timer); state.timer = null; }
+            chip.removeAttribute('data-dsh-tweaks-tab-hold');
+          }
+          if (!state.cancelled && Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy)) state.horizontal = true;
+        };
+        window.addEventListener('pointermove', moveBlocker, true);
+        state.timer = window.setTimeout(() => {
+          state.timer = null;
+          if (disposed || hold !== state) return;
+          state.longFired = true;
+          chip.removeAttribute('data-dsh-tweaks-tab-hold');
+          if (moveBlocker !== null) window.removeEventListener('pointermove', moveBlocker, true);
+          moveBlocker = null;
+        }, RIGHT_TAB_LONG_PRESS_MS);
+      };
+
+      /**
+       * Отпускание после нажатия на чип: убрать таймеры и решить,
+       * был ли это свайп (тогда переключаем вкладку и гасим клик).
+       * @param {object} event - pointerup.
+       * @returns {void}
+       */
+      const onStripUp = (event) => {
+        const state = hold;
+        if (state === null || event.pointerId !== state.id) return;
+        hold = null;
+        if (state.timer !== null) window.clearTimeout(state.timer);
+        state.chip.removeAttribute('data-dsh-tweaks-tab-hold');
+        if (moveBlocker !== null) {
+          window.removeEventListener('pointermove', moveBlocker, true);
+          moveBlocker = null;
+        }
+        const dx = event.clientX - state.x;
+        const dy = event.clientY - state.y;
+        if (state.longFired) {
+          // После снятия блокировщика движения уже не проходят через него:
+          // факт переноса определяем по смещению от точки нажатия.
+          if (state.movedAfterHold || Math.abs(dx) + Math.abs(dy) > 4) armSuppress(state.chip);
+          return;
+        }
+        if (Math.abs(dy) > Math.abs(dx)) return;
+        if (Math.abs(dx) < RIGHT_TAB_SWIPE_PX) return;
+        if (switchRightTab(state.pane, dx < 0 ? 1 : -1)) armSuppress(state.chip);
+      };
+
+      const onStripCancel = (event) => {
+        const state = hold;
+        if (state === null || (event.pointerId !== undefined && event.pointerId !== state.id)) return;
+        hold = null;
+        if (state.timer !== null) window.clearTimeout(state.timer);
+        state.chip.removeAttribute('data-dsh-tweaks-tab-hold');
+        if (moveBlocker !== null) {
+          window.removeEventListener('pointermove', moveBlocker, true);
+          moveBlocker = null;
+        }
+      };
+
+      doc.addEventListener('pointerdown', onBodyDown, true);
+      doc.addEventListener('pointerdown', onStripDown, true);
+      doc.addEventListener('pointermove', onBodyMove, true);
+      doc.addEventListener('pointerup', onBodyUp, true);
+      doc.addEventListener('pointerup', onStripUp, true);
+      doc.addEventListener('pointercancel', onStripCancel, true);
+      doc.addEventListener('click', onClickCapture, true);
+      return () => {
+        disposed = true;
+        if (hold !== null) {
+          if (hold.timer !== null) window.clearTimeout(hold.timer);
+          hold.chip.removeAttribute('data-dsh-tweaks-tab-hold');
+          hold = null;
+        }
+        if (moveBlocker !== null) {
+          window.removeEventListener('pointermove', moveBlocker, true);
+          moveBlocker = null;
+        }
+        if (suppressTimer !== null) window.clearTimeout(suppressTimer);
+        suppressTimer = null;
+        doc.removeEventListener('pointerdown', onBodyDown, true);
+        doc.removeEventListener('pointerdown', onStripDown, true);
+        doc.removeEventListener('pointermove', onBodyMove, true);
+        doc.removeEventListener('pointerup', onBodyUp, true);
+        doc.removeEventListener('pointerup', onStripUp, true);
+        doc.removeEventListener('pointercancel', onStripCancel, true);
+        doc.removeEventListener('click', onClickCapture, true);
+      };
+    }
+
+    /* #endregion tweak-mobile-right-tabs */
 
     const TWEAKS = {
       mobileComposer: {
@@ -3596,6 +5102,16 @@ window.__ModuleLoader__.load({
         defaultOn: true,
         activate(ctx, api) {
           setupMobileComposer(ctx, api);
+        },
+        // Собственных подписок нет: обработчики и слоты снимает own().
+      },
+      mobileSidebar: {
+        title: 'Мобильное меню: выдвижная панель',
+        titleKey: 'tweak.mobileSidebar',
+        // Лёгкий твик: CSS, кнопка в шапке и подавление фокуса; хост-части нет.
+        defaultOn: true,
+        activate(ctx, api) {
+          setupMobileSidebar(ctx, api);
         },
       },
       zoom: {

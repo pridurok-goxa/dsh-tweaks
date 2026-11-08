@@ -53,6 +53,9 @@ const TRAFFIC_LIGHT_HOLIDAYS_2026 = [
 export const Config = Schema.object({
   // Touch composer: Enter/paste use public InputActions; desktop keymap is untouched.
   mobileComposer: Schema.boolean().default(true).volatile(),
+  // Выдвижное левое меню на узком экране: рельсы нет, панель открывается
+  // иконкой в шапке и улетает влево при выборе чата. Хост-части нет.
+  mobileSidebar: Schema.boolean().default(true).volatile(),
   zoom: Schema.boolean().default(true).volatile(),
   contextMenu: Schema.boolean().default(true).volatile(),
   // Речь — тяжёлый твик: он поднимает Python-воркер и качает модель весов,

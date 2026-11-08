@@ -73,14 +73,14 @@ const req=createRequire(path.join(process.env.MOBILE_TEST_RUNTIME||path.resolve(
   assert(shell.beginCommand(claim,menuHit.span));await flush();assert.equal(text(),'/plan '+body);
  });
  await check('removing dock mode keeps body and does not open keyboard',async()=>{const active=w.document.activeElement;dock.querySelector('button').click();await flush();assert.equal(text(),body);assert.equal(state().claim,undefined);assert.equal(w.document.activeElement,active)});
- await check('412x915 touch scroll cap = 366px, menu adjacent and inside viewport',async()=>{
+ await check('412x915 touch scroll cap = 183px, menu adjacent and inside viewport',async()=>{
   const menu=w.document.createElement('div');menu.setAttribute('data-trigger-menu','');Object.defineProperty(menu,'scrollHeight',{value:250,configurable:true});menu.getBoundingClientRect=()=>({height:250});card.querySelector('#overlay').append(menu);await flush();
-  assert.equal(card.style.getPropertyValue('--dsh-mobile-text-cap'),'366px');assert.equal(menu.style.position,'fixed');const y=parseFloat(menu.style.top),x=parseFloat(menu.style.left);assert(y>=8&&y+250<=915-8);assert(x>=8&&x+parseFloat(menu.style.width)<=412-8);assert(y<anchor.top);
+  assert.equal(card.style.getPropertyValue('--dsh-mobile-text-cap'),'183px');assert.equal(menu.style.position,'fixed');const y=parseFloat(menu.style.top),x=parseFloat(menu.style.left);assert(y>=8&&y+250<=915-8);assert(x>=8&&x+parseFloat(menu.style.width)<=412-8);assert(y<anchor.top);
  });
- await check('visualViewport keyboard resize caps text at 40% and repositions menu',async()=>{viewport.height=400;anchor={...anchor,top:320,bottom:354};viewport.dispatchEvent(new w.Event('resize'));await flush();assert.equal(card.style.getPropertyValue('--dsh-mobile-text-cap'),'160px');const menu=card.querySelector('[data-trigger-menu]');assert(parseFloat(menu.style.top)>=8);assert(parseFloat(menu.style.top)+250<=392)});
+ await check('visualViewport keyboard resize caps text at 20% and repositions menu',async()=>{viewport.height=400;anchor={...anchor,top:320,bottom:354};viewport.dispatchEvent(new w.Event('resize'));await flush();assert.equal(card.style.getPropertyValue('--dsh-mobile-text-cap'),'80px');const menu=card.querySelector('[data-trigger-menu]');assert(parseFloat(menu.style.top)>=8);assert(parseFloat(menu.style.top)+250<=392)});
  await check('mobile geometry compensates the existing 150% app zoom',async()=>{
   appZoom=1.5;w.document.documentElement.style.setProperty('--dsh-ui-zoom','1.5');await flush();
-  assert(Math.abs(parseFloat(card.style.getPropertyValue('--dsh-mobile-text-cap'))*appZoom-160)<0.01);
+  assert(Math.abs(parseFloat(card.style.getPropertyValue('--dsh-mobile-text-cap'))*appZoom-80)<0.01);
   const menu=card.querySelector('[data-trigger-menu]');assert(parseFloat(menu.style.left)*appZoom>=8);assert(parseFloat(menu.style.width)*appZoom<=396);
   assert(parseFloat(menu.style.top)*appZoom>=7.99);assert(parseFloat(menu.style.top)*appZoom+parseFloat(menu.style.maxHeight)*appZoom<=392.01);
   appZoom=1;w.document.documentElement.style.setProperty('--dsh-ui-zoom','1');await flush();

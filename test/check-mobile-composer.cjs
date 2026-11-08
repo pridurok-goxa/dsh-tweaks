@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '..', 'client.js'), 'utf8');
 const region = source.split('/* #region tweak-mobile-composer */')[1].split('/* #endregion tweak-mobile-composer */')[0];
 const context = vm.createContext({AbortController});
-vm.runInContext(region + '\nthis.bind = bindMobileComposer; this.mobile = mobileComposerDevice;', context);
+vm.runInContext(region + '\nthis.bind = bindMobileComposer; this.mobile = mobileComposerDevice; this.queueEnter = queueEditorEnter; this.bindQueue = bindQueueEditorEnter; this.caretDelta = caretScrollDelta;', context);
 let passed = 0;
 function test(name, fn) { fn(); passed++; console.log('ok', name); }
 function fixture(coarse = true, mobile = false) {
@@ -70,5 +70,80 @@ test('overlay component binds public actions and cleans up on unmount', () => {
   const node=context.MobileComposerBinding({inputActions:{captureInsertion:()=>({start:0,end:0,draftRev:1}),insertText:()=>true}});
   assert.equal(node.props.hidden,true); const cleanup=effects[0](); assert.equal(f.listeners.size,6);cleanup();assert.equal(f.listeners.size,0);
 });
+test('caret scroll delta reveals the caret below and above the draft viewport', () => {
+  assert.equal(context.caretDelta({ top: 120, bottom: 140 }, { top: 0, bottom: 100 }), 40);
+  assert.equal(context.caretDelta({ top: -20, bottom: 0 }, { top: 0, bottom: 100 }), -20);
+  assert.equal(context.caretDelta({ top: 10, bottom: 30 }, { top: 0, bottom: 100 }), 0);
+});
+
+test('composer wiring keeps the new mobile behaviors', () => {
+  assert.match(source, /plusMenuOpen = true/);
+  assert.match(source, /function filterPlusMenu\(\)/);
+  assert.match(source, /guardSlash\(\)/);
+  assert.match(source, /dismissMenu\(\)/);
+  assert.match(source, /revealComposerSoon\(card, view\)/);
+  assert.match(source, /height \* 0\.2/, 'высота черновика вдвое меньше');
+  assert.ok(source.includes("setAttribute('spellcheck', 'false')"), 'подчёркивание проверки орфографии снято');
+  assert.ok(source.includes('webkit-composition-frame-color'), 'рамка IME-композиции скрыта');
+  assert.ok(source.includes("name: 'conversation.input.left'"), 'чип режима в строке композера');
+  assert.ok(source.includes("'session.copyId'"), 'пункт копирования id объявлен');
+});
+
+test('plus and @ do not blur the editor: keyboard stays in place', () => {
+  assert.doesNotMatch(source, /scheduleAtBlur/);
+  assert.doesNotMatch(source, /openReferenceMenu/);
+});
+
 test('schema/default/registration are inside the existing tweak package', () => { assert(source.includes("titleKey: 'tweak.mobileComposer'")); assert(source.includes("slots.inject('conversation.input.overlay'")); assert(fs.readFileSync(path.join(__dirname,'..','index.js'),'utf8').includes('mobileComposer: Schema.boolean().default(true).volatile()')); });
+
+// Очередь: Enter в InlineEditor сохранял сообщение; на touch он должен дать
+// браузеру перенос строки, а сохранение остаться кнопке-галочке.
+const touchView = { matchMedia: () => ({ matches: true }) };
+const desktopView = { matchMedia: () => ({ matches: false }) };
+function queueEvent(overrides = {}) {
+  return {
+    key: 'Enter',
+    defaultPrevented: false,
+    isComposing: false,
+    keyCode: 13,
+    target: { tagName: 'TEXTAREA', closest: (selector) => (selector === '[data-queue-dock]' ? {} : null) },
+    stopped: false,
+    prevented: false,
+    stopPropagation() { this.stopped = true; },
+    preventDefault() { this.prevented = true; },
+    ...overrides,
+  };
+}
+test('mobile Enter in queued-message editor is left as a newline', () => {
+  assert.equal(context.queueEnter(queueEvent(), touchView), true);
+});
+test('remote input / desktop / other keys keep the editor behavior', () => {
+  assert.equal(context.queueEnter(queueEvent({ target: { tagName: 'DIV', closest: () => null } }), touchView), false);
+  assert.equal(context.queueEnter(queueEvent({ target: { tagName: 'TEXTAREA', closest: () => null } }), touchView), false);
+  assert.equal(context.queueEnter(queueEvent(), desktopView), false);
+  assert.equal(context.queueEnter(queueEvent({ key: 'Escape' }), touchView), false);
+  assert.equal(context.queueEnter(queueEvent({ defaultPrevented: true }), touchView), false);
+});
+test('IME confirmation and keyCode 229 are not intercepted', () => {
+  assert.equal(context.queueEnter(queueEvent({ isComposing: true }), touchView), false);
+  assert.equal(context.queueEnter(queueEvent({ keyCode: 229 }), touchView), false);
+});
+test('queue wiring stops propagation without preventing the native newline', () => {
+  const listeners = new Map();
+  const doc = {
+    addEventListener(type, fn, capture) { assert.equal(type, 'keydown'); assert.equal(capture, true); listeners.set(type, fn); },
+    removeEventListener(type, fn, capture) { assert.equal(capture, true); if (listeners.get(type) === fn) listeners.delete(type); },
+  };
+  const off = context.bindQueue(doc, touchView);
+  assert.equal(listeners.size, 1, 'одна capture-подписка на документ');
+  const event = queueEvent();
+  listeners.get('keydown')(event);
+  assert.equal(event.stopped, true, 'React не получит keydown и не сохранит');
+  assert.equal(event.prevented, false, 'браузер сам вставит перевод строки');
+  off();
+  assert.equal(listeners.size, 0, 'подписка снимается');
+});
+test('queue listener is owned by the mobile composer setup', () => {
+  assert.match(source, /api\?\.own\?\.\(bindQueueEditorEnter\(document, window\)\)/);
+});
 console.log(`PASS ${passed} mobile composer contract tests`);

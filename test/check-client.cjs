@@ -296,6 +296,8 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
       return Promise.resolve({ ok: true, value: undefined });
     },
   };
+  /** Действия раскладки, которые твик мобильного меню отправил в службу layout. */
+  const layoutCalls = [];
   /** Куда плагин вешает масштаб: корень приложения, как в настоящей странице. */
   let zoomHostId = 'root';
 
@@ -472,6 +474,7 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
       // Шов распознавания — namespace-служба Remote-шины под ключом remote.speech.
       if (name === 'remote.speech') return speechNow;
       if (name === 'remote') return remoteFace;
+      if (name === 'layout') return { toggleSidebar: () => layoutCalls.push('toggle') };
       // Прежнее (неверное) имя хост-сервиса: швом оно не является и не должно
       // когда-либо подхватываться — проверка это стережёт.
       if (name === 'speechController') return legacySpeech;
@@ -566,6 +569,8 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     disposeListeners,
     reactCleanups,
     remoteSelects,
+    /** Действия раскладки, которые запросил твик мобильного меню. */
+    layoutCalls: () => layoutCalls,
     /** Сколько обработчиков этого типа висит на window. */
     listenerCount: (type) => (listeners.get(type) ?? []).length,
     /** Изменить флаги конфигурации и уведомить плагин (как служба конфигурации). */
@@ -970,7 +975,7 @@ check('без службы конфигурации работают дефол�
   const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
   assert.ok(entry, 'форма флагов всё равно зарегистрирована');
   const form = entry.entry.component({ ...entry.entry.options.inject(), view: 'page', t: (key) => key, translate: (key) => key });
-  assert.equal(form.children.filter((child) => child.props?.['data-tweak']).length, 7, 'показывает состояние всех твиков');
+  assert.equal(form.children.filter((child) => child.props?.['data-tweak']).length, 8, 'показывает состояние всех твиков');
   const texts = form.children.map((child) => child.children?.[0]).filter((text) => typeof text === 'string');
   assert.ok(texts.includes('form.unavailable'), `форма говорит о недоступности настроек (${texts.join(' | ')})`);
   for (const row of form.children.filter((child) => child.props?.['data-tweak'])) {
@@ -978,20 +983,20 @@ check('без службы конфигурации работают дефол�
   }
 });
 
-check('реестр знает семь твиков', () => {
+check('реестр знает восемь твиков', () => {
   const env = loadPlugin();
   const ids = formRows(env).map((row) => row.props['data-tweak']);
   assert.deepEqual(
     ids,
-    ['mobileComposer', 'zoom', 'contextMenu', 'whisper', 'trafficLight', 'freePanels', 'imageModelFallback'],
-    'в реестре семь твиков: mobileComposer, zoom, contextMenu, whisper, trafficLight, freePanels, imageModelFallback',
+    ['mobileComposer', 'mobileSidebar', 'zoom', 'contextMenu', 'whisper', 'trafficLight', 'freePanels', 'imageModelFallback'],
+    'в реестре восемь твиков: mobileComposer, mobileSidebar, zoom, contextMenu, whisper, trafficLight, freePanels, imageModelFallback',
   );
 });
 
-check('форма рисует семь галочек', () => {
+check('форма рисует восемь галочек', () => {
   const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: true, trafficLight: true, imageModelFallback: true } });
   const rows = formRows(env);
-  assert.equal(rows.length, 7, 'по галочке на каждый твик');
+  assert.equal(rows.length, 8, 'по галочке на каждый твик');
   for (const row of rows) {
     const id = row.props['data-tweak'];
     assert.equal(row.children.length, 2, `строка ${id}: подпись и переключатель`);
@@ -1005,14 +1010,14 @@ check('whisper по умолчанию выключен', () => {
   // Дефолты реестра работают, пока конфигурация не готова: тяжёлый твик не
   // включается сам — иначе он поднимал бы Python-воркер и качал модель весов.
   const env = loadPlugin({ configFormsAvailable: false });
-  assert.deepEqual(readyTweaks(env), ['mobileComposer', 'zoom', 'contextMenu', 'trafficLight', 'freePanels', 'imageModelFallback'], 'активны только твики с defaultOn');
+  assert.deepEqual(readyTweaks(env), ['mobileComposer', 'mobileSidebar', 'zoom', 'contextMenu', 'trafficLight', 'freePanels', 'imageModelFallback'], 'активны только твики с defaultOn');
   const row = formRows(env).find((child) => child.props['data-tweak'] === 'whisper');
   assert.equal(row.children[1].props.checked, false, 'галочка whisper снята');
 });
 
 check('включённый флаг вызывает клиентский activate, выключение снимает твик', () => {
   const env = loadPlugin({ flags: { zoom: true, contextMenu: true, whisper: false } });
-  assert.deepEqual(readyTweaks(env), ['mobileComposer', 'zoom', 'contextMenu', 'trafficLight', 'freePanels', 'imageModelFallback'], 'пока флаг снят, твик не активен');
+  assert.deepEqual(readyTweaks(env), ['mobileComposer', 'mobileSidebar', 'zoom', 'contextMenu', 'trafficLight', 'freePanels', 'imageModelFallback'], 'пока флаг снят, твик не активен');
   /** Ресурсы соседей и формы: переключение whisper их трогать не должно. */
   const resources = () => ({
     keydown: env.listenerCount('keydown'),
@@ -1025,12 +1030,77 @@ check('включённый флаг вызывает клиентский activ
   const before = resources();
 
   env.setFlags({ whisper: true });
-  assert.deepEqual(readyTweaks(env), ['mobileComposer', 'zoom', 'contextMenu', 'trafficLight', 'freePanels', 'imageModelFallback', 'whisper'], 'флаг включил твик без клиентского кода');
+  assert.deepEqual(readyTweaks(env), ['mobileComposer', 'mobileSidebar', 'zoom', 'contextMenu', 'trafficLight', 'freePanels', 'imageModelFallback', 'whisper'], 'флаг включил твик без клиентского кода');
   assert.deepEqual(resources(), before, 'включение whisper не задело соседей');
 
   env.setFlags({ whisper: false });
-  assert.deepEqual(readyTweaks(env), ['mobileComposer', 'zoom', 'contextMenu', 'trafficLight', 'freePanels', 'imageModelFallback'], 'выключение убрало твик из активных');
+  assert.deepEqual(readyTweaks(env), ['mobileComposer', 'mobileSidebar', 'zoom', 'contextMenu', 'trafficLight', 'freePanels', 'imageModelFallback'], 'выключение убрало твик из активных');
   assert.deepEqual(resources(), before, 'выключение ничего не оставило висеть');
+});
+
+check('мобильное меню: узкая рамка включает выдвижной режим', () => {
+  /** Рамка приложения: у неё читается ширина и сетка, её и правит приложение. */
+  const frame = {
+    style: {
+      gridTemplateColumns: '56px minmax(400px, 1fr) minmax(0px, 0px)',
+      getPropertyValue: () => '',
+      setProperty: () => {},
+    },
+    offsetWidth: 390,
+    getBoundingClientRect: () => ({ width: 390 }),
+    hasAttribute: () => false,
+  };
+  const env = loadPlugin({
+    frame,
+    columns: { sidebar: { offsetLeft: 0, offsetWidth: 280 } },
+    flags: { zoom: true, contextMenu: true, mobileSidebar: true },
+  });
+  assert.equal(env.documentAttribute('data-dsh-tweaks-mobile-drawer'), 'on', 'узкая рамка включает режим');
+
+  const row = { closest: (selector) => (selector === '[data-row-key^="session:"]' ? {} : null) };
+  env.fireDocument('click', { target: row });
+  env.runTimers();
+  assert.equal(env.layoutCalls().length, 1, 'тап по чату закрывает ящик действием раскладки');
+
+  const dots = {
+    closest: (selector) =>
+      selector === '[class*="_rowActions"]' || selector === '[data-row-key^="session:"]' ? {} : null,
+  };
+  env.fireDocument('click', { target: dots });
+  assert.equal(env.layoutCalls().length, 1, 'точки строки ящик не закрывают');
+
+  env.setFlags({ mobileSidebar: false });
+  assert.equal(env.documentAttribute('data-dsh-tweaks-mobile-drawer'), null, 'выключение снимает режим');
+});
+
+check('общая шапка: меню, светофор и название одним слоем', () => {
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, mobileSidebar: true } });
+  const parts = headerParts(env);
+  assert.ok(parts.length >= 3, 'в шапке три части');
+  assert.equal(typeof parts[0].props?.host, 'object', 'первым идёт меню');
+  assert.equal(parts[1].props?.variant, 'header', 'вторым — светофор');
+  assert.ok(parts.some((node) => node?.type?.name === 'MobileHeaderTitle' || node?.props?.useSessions !== undefined), 'третьим — название чата');
+  env.setFlags({ trafficLight: false });
+  const withoutLight = headerParts(env);
+  assert.equal(withoutLight.some((node) => node.props?.variant === 'header'), false, 'выключение светофора убирает лампу');
+  assert.equal(typeof withoutLight[0].props?.host, 'object', 'меню остаётся');
+  env.setFlags({ mobileSidebar: false });
+  assert.equal(env.slotEntries.some((row) => row.name === 'conversation.header.leading'), false, 'без частей слот снят');
+});
+
+check('мобильное меню: широкая рамка режим не включает', () => {
+  const frame = {
+    style: {
+      gridTemplateColumns: '280px minmax(400px, 1fr) minmax(0px, 0px)',
+      getPropertyValue: () => '',
+      setProperty: () => {},
+    },
+    offsetWidth: 1400,
+    getBoundingClientRect: () => ({ width: 1400 }),
+    hasAttribute: () => false,
+  };
+  const env = loadPlugin({ frame, columns: { sidebar: { offsetLeft: 0, offsetWidth: 280 } } });
+  assert.equal(env.documentAttribute('data-dsh-tweaks-mobile-drawer'), null, 'на широкой рамке штатная раскладка');
 });
 
 check('неготовый снимок конфигурации тоже даёт дефолты', () => {
@@ -1732,7 +1802,7 @@ checkAsync('форма пишет флаг операцией set с прочи�
   const injected = entry.entry.options.inject();
   const form = entry.entry.component({ ...injected, view: 'page', t: (key) => key, translate: (key) => key });
   const rows = form.children.filter((child) => child.props?.['data-tweak']);
-  assert.equal(rows.length, 7, 'по переключателю на твик');
+  assert.equal(rows.length, 8, 'по переключателю на твик');
   assert.ok(
     rows.some((row) => row.props['data-tweak'] === 'imageModelFallback'),
     'в форме есть твик «отправить с Flash»',
@@ -1974,6 +2044,28 @@ function renderSlot(row, props = {}) {
 }
 
 /**
+ * Части общего слота шапки: каждая часть обёрнута во фрагмент с ключом.
+ * @param {object} env - песочница плагина.
+ * @returns {Array<object>} элементы частей.
+ */
+function headerParts(env) {
+  const row = env.slotEntries.find((entry) => entry.name === 'conversation.header.leading') ?? null;
+  const seat = renderSlot(row);
+  return (seat?.children ?? []).map((fragment) => fragment?.children?.[0]).filter(Boolean);
+}
+
+/**
+ * Отрисовать светофор из общего слота (эффекты индикатора выполняются здесь же).
+ * @param {object} env - песочница плагина.
+ * @returns {object} дерево индикатора.
+ */
+function headerLight(env) {
+  const light = headerParts(env).find((node) => node?.props?.variant === 'header') ?? null;
+  assert.ok(light, 'светофор зарегистрирован в общей шапке');
+  return light.type(light.props);
+}
+
+/**
  * Тексты, которые индикатор выводит рядом с лампой (подписи и отсчёты).
  * @param {object} node - дерево элементов.
  * @returns {string[]} найденные тексты.
@@ -2003,7 +2095,7 @@ check('в шапке индикатор без текста, у нижнего �
     env.slotEntries.find((row) => row.name === 'conversation.composer.dock' && row.entry.options.id === 'traffic-light') ?? null;
 
   const header = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
-  assert.deepEqual(indicatorTexts(renderSlot(headerRow(header))), [], 'в шапке только лампа, без подписей');
+  assert.deepEqual(indicatorTexts(headerLight(header)), [], 'в шапке только лампа, без подписей');
   assert.ok(dockRow(header).entry.options.order < 0, 'в доке светофор идёт первым: порядок отрицательный');
 
   const expected = { lamp: 0, 'lamp-time': 1, time: 1, 'lamp-time-label': 2 };
@@ -2082,7 +2174,7 @@ check('настройки твика предлагают режим индик�
 check('панель светофора открывается только по нажатию', () => {
   const env = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
   const row = env.slotEntries.find((entry) => entry.name === 'conversation.header.leading');
-  const tree = renderSlot(row);
+  const tree = headerLight(env);
   const button = tree.children[0];
   assert.equal(button.type, 'button', 'индикатор — кнопка');
   assert.equal(typeof button.props.onClick, 'function', 'нажатие переключает панель');
@@ -2167,8 +2259,7 @@ check('на красном свете индикатор работы сесси
     },
     fixedNow: peak,
   });
-  const redRow = redEnv.slotEntries.find((entry) => entry.name === 'conversation.header.leading');
-  renderSlot(redRow);
+  headerLight(redEnv);
   assert.equal(redEnv.documentAttribute('data-dsh-light-red'), '', 'на красном признак выставлен на корне');
 
   // Тот же момент вне окна пика — зелёный, признак снят.
@@ -2176,8 +2267,7 @@ check('на красном свете индикатор работы сесси
     flags: { zoom: true, contextMenu: true, trafficLight: true },
     fixedNow: Date.UTC(2026, 9, 14, 17, 0),
   });
-  const greenRow = greenEnv.slotEntries.find((entry) => entry.name === 'conversation.header.leading');
-  renderSlot(greenRow);
+  headerLight(greenEnv);
   assert.equal(greenEnv.documentAttribute('data-dsh-light-red'), null, 'на зелёном признак отсутствует');
 });
 
