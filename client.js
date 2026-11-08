@@ -4448,6 +4448,7 @@ window.__ModuleLoader__.load({
         // Чуть компактнее и шире: меньше боковых полей в ленте, шире сообщения,
         // компактнее пузырь. Центральная панель занимает почти всю ширину.
         `${root} [class*="_scroll"]:has(> [class*="_column"]){padding:8px 8px!important}`,
+        `${root} [class*="_userStack"]{max-width:96%!important}`,
         `${root} [class*="_stack"]:has(> [class*="_bubble"]){max-width:94%!important}`,
         `${root} [class*="_bubble"]{padding:8px 12px!important}`,
         `${root} [class*="_sidebarCol"]{position:fixed!important;top:var(--dsh-windows-titlebar-height,0px);bottom:0;left:0;width:280px!important;max-width:86vw;` +
@@ -4982,7 +4983,8 @@ window.__ModuleLoader__.load({
      */
     function installHeaderOverflow(translate) {
       if (typeof MutationObserver === 'undefined') return;
-      const moreOf = () => document.querySelector('[data-slot="conversation.session.header.utilities"] [class*="_moreButton"]');
+      const moreOf = () => document.querySelector('[data-slot="conversation.session.header.utilities"] [class*="_moreButton"]')
+        ?? document.querySelector('[data-dsh-tweaks-more-slot] [class*="_moreButton"]');
       let scheduled = false;
       let probeViews = 0;
 
@@ -5852,7 +5854,9 @@ window.__ModuleLoader__.load({
       const style = document.createElement('style');
       style.dataset.dshTabsActions = '';
       style.textContent = [
-        '.dsh-tweaks-tabs-actions{display:inline-flex;align-items:center;gap:2px;margin-left:0;min-width:0;flex:none;position:relative;top:-6px}',
+        '.dsh-tweaks-tabs-actions{display:inline-flex;align-items:center;gap:2px;margin-left:0;min-width:0;flex:1;position:relative;top:-6px}',
+        '.dsh-tweaks-tabs-actions [data-dsh-tweaks-more-slot]{margin-left:auto;display:inline-flex;align-items:center;flex:none}',
+        '[data-slot="conversation.session.header.utilities"] > *:empty{display:none!important}',
         '@media (max-width:720px){',
         'div:has(> [data-conversation-tabs]){gap:4px!important}',
         '[data-conversation-tabs]{gap:8px!important}',
@@ -5907,21 +5911,40 @@ window.__ModuleLoader__.load({
           const label = `${button.getAttribute?.('aria-label') ?? ''} ${button.textContent ?? ''}`;
           return /subagents?|субагент/i.test(label);
         })) ?? null;
-        const utilities = document.querySelector('[data-slot="conversation.session.header.utilities"]');
-        const job = utilities === null ? null : [...utilities.children].find((node) => [...node.querySelectorAll?.('button') ?? []].some((button) => {
+        const jobButton = [...document.querySelectorAll('[data-slot] button')].find((button) => {
           const label = `${button.getAttribute?.('aria-label') ?? ''} ${button.textContent ?? ''}`;
           return /background jobs?|background job running|фонов\w* задач/i.test(label);
-        })) ?? null;
+        }) ?? null;
+        let job = null;
+        if (jobButton !== null && jobButton !== undefined) {
+          const inHost = jobButton.closest('[data-dsh-tweaks-tabs-actions]');
+          if (inHost !== null) {
+            job = jobButton.parentElement;
+          } else {
+            let node = jobButton;
+            while (node.parentElement !== null && !node.parentElement.hasAttribute?.('data-slot')) node = node.parentElement;
+            job = node.parentElement?.hasAttribute?.('data-slot') ? node : null;
+          }
+        }
+        const moreButton = document.querySelector('[data-slot="conversation.session.header.utilities"] [class*="_moreButton"]')
+          ?? document.querySelector('button[class*="_moreButton"]');
+        const moreSlot = host.querySelector('[data-dsh-tweaks-more-slot]') ?? (() => {
+          const node = document.createElement('span');
+          node.setAttribute('data-dsh-tweaks-more-slot', '');
+          host.appendChild(node);
+          return node;
+        })();
+        if (moreButton !== null && moreButton !== undefined) move(moreButton, moreSlot);
         const teamButton = team?.querySelector?.('button');
         if (teamButton !== null && teamButton !== undefined) {
           if (teamButton.getAttribute('aria-label') !== 'Team') teamButton.setAttribute('aria-label', 'Team');
           const label = teamButton.querySelector('[class*="_triggerLabel"]');
           if (label !== null && label.textContent !== 'Team') label.textContent = 'Team';
         }
-        const jobButton = job?.querySelector?.('button');
-        if (jobButton !== null && jobButton !== undefined) {
-          if (jobButton.getAttribute('aria-label') !== 'Job') jobButton.setAttribute('aria-label', 'Job');
-          const count = jobButton.querySelector('[class*="_count"]');
+        const jobTrigger = job?.querySelector?.('button') ?? jobButton;
+        if (jobTrigger !== null && jobTrigger !== undefined) {
+          if (jobTrigger.getAttribute('aria-label') !== 'Job') jobTrigger.setAttribute('aria-label', 'Job');
+          const count = jobTrigger.querySelector('[class*="_count"]');
           if (count !== null && count.textContent !== 'Job') count.textContent = 'Job';
         }
         if (team !== null) move(team, host);
@@ -5932,6 +5955,7 @@ window.__ModuleLoader__.load({
         const desired = [team, subagents, job].filter((node) => node !== null && node.parentElement === host);
         const current = [...host.children].filter((node) => desired.includes(node));
         if (desired.some((node, index) => current[index] !== node)) host.append(...desired);
+        if (moreSlot.parentElement === host) host.append(moreSlot);
       };
 
       const schedule = () => {

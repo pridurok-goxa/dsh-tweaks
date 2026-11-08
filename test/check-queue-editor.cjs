@@ -101,6 +101,9 @@ test('вкладки: Agent Team и Subagents переносятся реаль�
   assert.match(source, /getAttribute\('aria-label'\) !== 'Job'/, 'background jobs переименован в Job');
   assert.match(source, /background jobs\?/, 'триггер фоновых задач ищется и переносится');
   assert.match(source, /gap:2px;margin-left:0/, 'компактные отступы панели');
+  assert.match(source, /data-dsh-tweaks-more-slot/, 'три точки закреплены в панели');
+  assert.match(source, /data-dsh-tweaks-more-slot\] \[class\*="_moreButton"\]/, 'меню три точки ищется после переноса');
+  assert.doesNotMatch(source, /const utilities = document.querySelector/, 'job ищется по всей шапке, а не только в utilities');
 });
 
 console.log(`PASS ${passed} queue-editor client contract tests`);

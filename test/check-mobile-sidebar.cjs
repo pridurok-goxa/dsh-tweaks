@@ -188,6 +188,7 @@ test('CSS режима: атрибут, нулевой трек, fixed-ящик 
   assert.ok(css.includes('[class*="_scroll"]:has(> [class*="_column"]){padding:8px 8px!important}'), 'лента компактнее');
   assert.ok(css.includes('[class*="_stack"]:has(> [class*="_bubble"]){max-width:94%!important}'), 'сообщения шире');
   assert.ok(css.includes('[class*="_bubble"]{padding:8px 12px!important}'), 'пузырь компактнее');
+  assert.ok(css.includes('[class*="_userStack"]{max-width:96%!important}'), 'пользовательские сообщения ещё шире');
   assert.ok(css.includes('data-dsh-tweaks-drawer-leaving'), 'есть состояние анимированного закрытия');
   assert.ok(css.includes('data-dsh-tweaks-panel-menu'), 'есть поповер глобальных панелей');
   assert.ok(css.includes('data-dsh-tweaks-panel-toggle'), 'есть нижняя кнопка панелей');
