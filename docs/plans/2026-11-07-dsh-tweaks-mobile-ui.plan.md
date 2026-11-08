@@ -137,3 +137,10 @@
 - Headless: в строке видны два child'а rowActions, второй display:none, dots
   x=244 при правом крае 268; вложенные строки с indent 0→padding 4px.
   Версия 2.3.6.
+
+## Дополнение 2026-11-08 12:45 MSK
+
+- Enter во всех `textarea` на touch — перенос строки (stopPropagation в capture,
+  без preventDefault). Покрывает свой вариант ответа в вопроснике, очередь,
+  goal-редактор и прочие поля; submit/next остаются кнопками.
+- Версия 2.3.7; контракт `textareaEnterNewline` добавлен в тесты.

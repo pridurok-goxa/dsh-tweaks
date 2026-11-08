@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '..', 'client.js'), 'utf8');
 const region = source.split('/* #region tweak-mobile-composer */')[1].split('/* #endregion tweak-mobile-composer */')[0];
 const context = vm.createContext({AbortController});
-vm.runInContext(region + '\nthis.bind = bindMobileComposer; this.mobile = mobileComposerDevice; this.queueEnter = queueEditorEnter; this.bindQueue = bindQueueEditorEnter; this.caretDelta = caretScrollDelta; this.goalEnter = goalEditorEnter;', context);
+vm.runInContext(region + '\nthis.bind = bindMobileComposer; this.mobile = mobileComposerDevice; this.queueEnter = queueEditorEnter; this.bindQueue = bindQueueEditorEnter; this.caretDelta = caretScrollDelta; this.goalEnter = goalEditorEnter; this.textareaEnter = textareaEnterNewline;', context);
 let passed = 0;
 function test(name, fn) { fn(); passed++; console.log('ok', name); }
 function fixture(coarse = true, mobile = false) {
@@ -89,6 +89,15 @@ test('composer wiring keeps the new mobile behaviors', () => {
   assert.ok(source.includes('webkit-composition-frame-color'), 'рамка IME-композиции скрыта');
   assert.ok(source.includes("name: 'conversation.input.left'"), 'чип режима в строке композера');
   assert.ok(source.includes("'session.copyId'"), 'пункт копирования id объявлен');
+});
+
+test('any textarea on touch keeps Enter as a newline', () => {
+  const view = { matchMedia: () => ({ matches: true }) };
+  assert.equal(context.textareaEnter({ key: 'Enter', target: { tagName: 'TEXTAREA' } }, view), true);
+  assert.equal(context.textareaEnter({ key: 'Enter', target: { tagName: 'INPUT' } }, view), false);
+  assert.equal(context.textareaEnter({ key: 'Enter', isComposing: true, target: { tagName: 'TEXTAREA' } }, view), false);
+  assert.equal(context.textareaEnter({ key: 'Enter', target: { tagName: 'TEXTAREA' } }, { matchMedia: () => ({ matches: false }) }), false);
+  assert.match(source, /bindTextareaEnterNewline\(document, window\)/);
 });
 
 test('goal editor Enter inserts a newline instead of saving', () => {

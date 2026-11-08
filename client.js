@@ -3981,6 +3981,37 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Enter в любом textarea на touch — перенос строки, а не submit/next.
+     * Специальные поля (очередь, goal) больше не теряют перенос из-за
+     * собственных keydown-обработчиков приложения.
+     * @param {object} event - keydown.
+     * @param {object} view - окно.
+     * @returns {boolean} наш ли Enter.
+     */
+    function textareaEnterNewline(event, view) {
+      if (!event || event.defaultPrevented || event.key !== 'Enter') return false;
+      if (event.isComposing || event.keyCode === 229) return false;
+      if (event.target?.tagName !== 'TEXTAREA') return false;
+      return mobileComposerDevice(view);
+    }
+
+    /**
+     * Подписаться на Enter во всех textarea.
+     * @param {object} doc - документ.
+     * @param {object} view - окно.
+     * @returns {Function} снятие подписки.
+     */
+    function bindTextareaEnterNewline(doc, view) {
+      const onKeyDown = (event) => {
+        if (!textareaEnterNewline(event, view)) return;
+        // Только всплытие: перенос строки остаётся браузеру, submit не срабатывает.
+        event.stopPropagation();
+      };
+      doc?.addEventListener?.('keydown', onKeyDown, true);
+      return () => doc?.removeEventListener?.('keydown', onKeyDown, true);
+    }
+
+    /**
      * Enter в редакторе goal должен вставлять перенос строки, а не сохранять:
      * на мобильном сохраняет кнопка-галочка.
      * @param {object} event - keydown.
@@ -4216,6 +4247,7 @@ window.__ModuleLoader__.load({
       // работает и без слота, поэтому ставим её до проверки службы слотов.
       api?.own?.(bindQueueEditorEnter(document, window));
       api?.own?.(bindGoalEditorEnter(document, window));
+      api?.own?.(bindTextareaEnterNewline(document, window));
       api?.own?.(installSmallMenuSearchHider(window));
       installStuckQueueRecovery(ctx, api);
       const slots = typeof ctx?.get === 'function' ? ctx.get('slots') : undefined;
