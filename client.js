@@ -6009,7 +6009,13 @@ window.__ModuleLoader__.load({
           host.appendChild(node);
           return node;
         })();
-        if (moreButton !== null && moreButton !== undefined) move(moreButton, moreSlot);
+        if (moreButton !== null && moreButton !== undefined) {
+          // Переносим весь компонент Menu вместе с якорем: если вырвать только
+          // кнопку, React при открытии меню теряет родителя и клик не срабатывает.
+          let moreRoot = moreButton;
+          while (moreRoot.parentElement !== null && !moreRoot.parentElement.hasAttribute?.('data-slot')) moreRoot = moreRoot.parentElement;
+          move(moreRoot.parentElement?.hasAttribute?.('data-slot') ? moreRoot : moreButton, moreSlot);
+        }
         const teamButton = team?.querySelector?.('button');
         if (teamButton !== null && teamButton !== undefined) {
           if (teamButton.getAttribute('aria-label') !== 'Team') teamButton.setAttribute('aria-label', 'Team');
