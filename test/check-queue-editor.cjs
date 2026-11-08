@@ -96,6 +96,7 @@ test('вкладки: Agent Team и Subagents переносятся реаль�
   assert.match(source, /data-team-action/);
   assert.match(source, /subagents\?\|субагент/);
   assert.match(source, /own\(setupTabActions\(\)\)/);
+  assert.match(source, /top:-6px/, 'кнопки подняты на уровень подписей вкладок');
 });
 
 console.log(`PASS ${passed} queue-editor client contract tests`);

@@ -1085,19 +1085,22 @@ check('мобильное меню: узкая рамка включает вы�
   assert.equal(env.documentAttribute('data-dsh-tweaks-mobile-drawer'), null, 'выключение снимает режим');
 });
 
-check('общая шапка: меню, светофор и название одним слоем', () => {
-  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, mobileSidebar: true } });
+check('в шапке светофора нет: индикатор только под полем ввода', () => {
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true, mobileSidebar: true }, lightPrefs: { dockMode: 'time' } });
   const parts = headerParts(env);
-  assert.ok(parts.length >= 3, 'в шапке три части');
+  assert.equal(parts.some((node) => node?.props?.variant === 'header'), false, 'в шапку индикатор не регистрируется');
   assert.equal(typeof parts[0].props?.host, 'object', 'первым идёт меню');
-  assert.equal(parts[1].props?.variant, 'header', 'вторым — светофор');
-  assert.ok(parts.some((node) => node?.type?.name === 'MobileHeaderTitle' || node?.props?.useSessions !== undefined), 'третьим — название чата');
-  env.setFlags({ trafficLight: false });
-  const withoutLight = headerParts(env);
-  assert.equal(withoutLight.some((node) => node.props?.variant === 'header'), false, 'выключение светофора убирает лампу');
-  assert.equal(typeof withoutLight[0].props?.host, 'object', 'меню остаётся');
+  assert.ok(parts.some((node) => node?.type?.name === 'MobileHeaderTitle'), 'название чата остаётся');
+  const dock = dockLight(env);
+  assert.ok(dock, 'нижний индикатор на месте');
   env.setFlags({ mobileSidebar: false });
   assert.equal(env.slotEntries.some((row) => row.name === 'conversation.header.leading'), false, 'без частей слот снят');
+  assert.ok(
+    env.slotEntries.some(
+      (row) => row.name === 'conversation.composer.dock' && row.entry.options.id === 'traffic-light',
+    ),
+    'нижний индикатор живёт отдельно от шапки',
+  );
 });
 
 check('мобильное меню: широкая рамка режим не включает', () => {
@@ -2067,14 +2070,17 @@ function headerParts(env) {
 }
 
 /**
- * Отрисовать светофор из общего слота (эффекты индикатора выполняются здесь же).
+ * Отрисовать нижний индикатор из дока под полем ввода.
  * @param {object} env - песочница плагина.
  * @returns {object} дерево индикатора.
  */
-function headerLight(env) {
-  const light = headerParts(env).find((node) => node?.props?.variant === 'header') ?? null;
-  assert.ok(light, 'светофор зарегистрирован в общей шапке');
-  return light.type(light.props);
+function dockLight(env) {
+  const row =
+    env.slotEntries.find(
+      (entry) => entry.name === 'conversation.composer.dock' && entry.entry.options.id === 'traffic-light',
+    ) ?? null;
+  assert.ok(row, 'светофор зарегистрирован под полем ввода');
+  return renderSlot(row);
 }
 
 /**
@@ -2101,13 +2107,16 @@ function indicatorTexts(node) {
   return texts;
 }
 
-check('в шапке индикатор без текста, у нижнего режим из настроек устройства', () => {
-  const headerRow = (env) => env.slotEntries.find((row) => row.name === 'conversation.header.leading') ?? null;
+check('нижний индикатор: режим из настроек устройства', () => {
   const dockRow = (env) =>
     env.slotEntries.find((row) => row.name === 'conversation.composer.dock' && row.entry.options.id === 'traffic-light') ?? null;
 
   const header = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
-  assert.deepEqual(indicatorTexts(headerLight(header)), [], 'в шапке только лампа, без подписей');
+  assert.deepEqual(
+    headerParts(header).filter((node) => node?.props?.variant === 'header'),
+    [],
+    'светофор в шапку не проникает',
+  );
   assert.ok(dockRow(header).entry.options.order < 0, 'в доке светофор идёт первым: порядок отрицательный');
 
   const expected = { lamp: 0, 'lamp-time': 1, time: 1, 'lamp-time-label': 2 };
@@ -2185,14 +2194,24 @@ check('настройки твика предлагают режим индик�
 
 check('панель светофора открывается только по нажатию', () => {
   const env = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
-  const row = env.slotEntries.find((entry) => entry.name === 'conversation.header.leading');
-  const tree = headerLight(env);
+  const tree = dockLight(env);
   const button = tree.children[0];
   assert.equal(button.type, 'button', 'индикатор — кнопка');
   assert.equal(typeof button.props.onClick, 'function', 'нажатие переключает панель');
   assert.equal(button.props.onMouseEnter, undefined, 'наведение панель не открывает');
   assert.equal(button.props.onFocus, undefined, 'фокус панель не открывает');
   assert.equal(tree.children[1], null, 'до нажатия панель закрыта');
+});
+
+check('панель раскрывается вверх и остаётся в окне', () => {
+  const source = fs.readFileSync(CLIENT, 'utf8');
+  assert.ok(source.includes('function panelPosition(anchorRef, panelRef)'), 'позиция считается без направления «вниз»');
+  assert.ok(source.includes('rect.top - Math.min(height, room) - margin'), 'панель встаёт над якорем');
+  assert.ok(source.includes('maxHeight: `${position === null ? LIGHT_PANEL_MIN_HEIGHT : position.maxHeight}px`'), 'высота ограничена местом над якорем');
+  assert.ok(source.includes("overflowY: 'auto'"), 'длинная панель прокручивается');
+  assert.equal(source.includes('rect.bottom + margin'), false, 'нисходящего положения больше нет');
+  assert.equal(source.includes("variant === 'header'"), false, 'индикатор в шапку не регистрируется');
+  assert.ok(source.includes('LIGHT_PANEL_MIN_HEIGHT = 200'), 'минимальная высота панели задана');
 });
 
 check('шкала часов — горизонтальная полоска из красных и зелёных кружочков', () => {
@@ -2271,7 +2290,7 @@ check('на красном свете индикатор работы сесси
     },
     fixedNow: peak,
   });
-  headerLight(redEnv);
+  dockLight(redEnv);
   assert.equal(redEnv.documentAttribute('data-dsh-light-red'), '', 'на красном признак выставлен на корне');
 
   // Тот же момент вне окна пика — зелёный, признак снят.
@@ -2279,7 +2298,7 @@ check('на красном свете индикатор работы сесси
     flags: { zoom: true, contextMenu: true, trafficLight: true },
     fixedNow: Date.UTC(2026, 9, 14, 17, 0),
   });
-  headerLight(greenEnv);
+  dockLight(greenEnv);
   assert.equal(greenEnv.documentAttribute('data-dsh-light-red'), null, 'на зелёном признак отсутствует');
 });
 

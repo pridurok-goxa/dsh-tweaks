@@ -2735,29 +2735,33 @@ window.__ModuleLoader__.load({
 
     /** Ширина панели-тултипа в пикселях. */
     const LIGHT_PANEL_WIDTH = 364;
+    /** Минимальная высота панели-тултипа: меньше не сжимаем — включаем прокрутку. */
+    const LIGHT_PANEL_MIN_HEIGHT = 200;
 
     /**
      * Позиция панели-тултипа у якоря.
+     *
+     * Панель раскрывается только вверх: якорь — нижний индикатор под полем ввода,
+     * снизу места нет (край панели уходил за окно). Если места над якорем мало,
+     * панель ограничивается по высоте и прокручивается внутри.
      * @param {object} anchorRef - ref кнопки.
      * @param {object} panelRef - ref панели.
-     * @param {boolean} preferUp - предпочитать положение над кнопкой.
-     * @returns {object} left/top вьюпортных пикселей.
+     * @returns {object} left/top и допустимая высота во вьюпортных пикселях.
      */
-    function panelPosition(anchorRef, panelRef, preferUp) {
+    function panelPosition(anchorRef, panelRef) {
       const rect = anchorRef?.current?.getBoundingClientRect?.();
       const margin = 8;
-      if (rect === undefined) return { left: margin, top: margin };
+      if (rect === undefined) return { left: margin, top: margin, maxHeight: LIGHT_PANEL_MIN_HEIGHT };
       const width = panelRef?.current?.offsetWidth ?? LIGHT_PANEL_WIDTH;
-      const height = panelRef?.current?.offsetHeight ?? 260;
+      // Высота содержимого, а не отрисованная: panel уже ограничен maxHeight,
+      // иначе позиция считалась бы по обрезанной высоте и панель залезала на док.
+      const height = panelRef?.current?.scrollHeight ?? 260;
       const viewportWidth =
         typeof window === 'undefined' || !Number.isFinite(window.innerWidth) ? 1024 : window.innerWidth;
-      const viewportHeight =
-        typeof window === 'undefined' || !Number.isFinite(window.innerHeight) ? 768 : window.innerHeight;
       const left = Math.max(margin, Math.min(rect.left + rect.width / 2 - width / 2, viewportWidth - width - margin));
-      const top = preferUp
-        ? Math.max(margin, rect.top - height - margin)
-        : Math.min(rect.bottom + margin, viewportHeight - height - margin);
-      return { left, top };
+      const room = Math.max(LIGHT_PANEL_MIN_HEIGHT, Math.round(rect.top - 2 * margin));
+      const top = Math.max(margin, rect.top - Math.min(height, room) - margin);
+      return { left, top, maxHeight: room };
     }
 
     /** Геометрия горизонтальной шкалы часов: 24 кружочка от 0 до 24. */
@@ -2877,9 +2881,14 @@ window.__ModuleLoader__.load({
        * @returns {void}
        */
       const measure = () => {
-        const next = panelPosition(anchorRef, panelRef, variant === 'dock');
+        const next = panelPosition(anchorRef, panelRef);
         setPosition((current) =>
-          current !== null && current.left === next.left && current.top === next.top ? current : next,
+          current !== null &&
+          current.left === next.left &&
+          current.top === next.top &&
+          current.maxHeight === next.maxHeight
+            ? current
+            : next,
         );
       };
       // Замер до первой отрисовки: React выполняет layout-эффект синхронно,
@@ -2943,6 +2952,8 @@ window.__ModuleLoader__.load({
         style: {
           left: `${position === null ? 0 : position.left}px`,
           top: `${position === null ? 0 : position.top}px`,
+          maxHeight: `${position === null ? LIGHT_PANEL_MIN_HEIGHT : position.maxHeight}px`,
+          overflowY: 'auto',
           visibility: position === null ? 'hidden' : 'visible',
         },
         role: 'dialog',
@@ -3234,12 +3245,6 @@ window.__ModuleLoader__.load({
         slots = undefined;
       }
       if (typeof slots?.inject === 'function' && typeof slots?.register === 'function') {
-        try {
-          headerLeadingSeat.set(ctx, 'trafficLight', 1, (props) => React.createElement(TrafficLightIndicator, { ...props, variant: 'header' }));
-          own(() => headerLeadingSeat.clear('trafficLight'));
-        } catch (error) {
-          console.error('dsh-tweaks: индикатор светофора в шапке не подключён', error);
-        }
         try {
           // Отрицательный order ставит светофор первым в строке дока: у системных
           // записей порядок 0, а сортировка идёт по возрастанию.
@@ -5841,7 +5846,7 @@ window.__ModuleLoader__.load({
     function setupTabActions() {
       const style = document.createElement('style');
       style.dataset.dshTabsActions = '';
-      style.textContent = '.dsh-tweaks-tabs-actions{display:inline-flex;align-items:center;gap:6px;margin-left:8px;min-width:0;flex:none}';
+      style.textContent = '.dsh-tweaks-tabs-actions{display:inline-flex;align-items:center;gap:6px;margin-left:8px;min-width:0;flex:none;position:relative;top:-6px}';
       document.head?.appendChild(style);
       const moved = new Map();
       let scheduled = false;
