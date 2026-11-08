@@ -165,6 +165,9 @@ function createContext(options = {}) {
         if (index >= 0) list.splice(index, 1);
       };
     },
+    inject(_deps, _callback) {
+      return () => {};
+    },
     effect(callback) {
       const dispose = callback();
       if (typeof dispose === 'function') cleanups.push(dispose);
@@ -227,6 +230,9 @@ async function main() {
   assert.ok(dict.mobileSidebar, 'в схеме Config есть поле mobileSidebar');
   assert.equal(dict.mobileSidebar.options.default, true, 'mobileSidebar включён по умолчанию');
   assert.equal(dict.mobileSidebar.options.volatile, true, 'mobileSidebar — volatile-поле');
+  assert.ok(dict.queueEditor, 'в схеме Config есть поле queueEditor');
+  assert.equal(dict.queueEditor.options.default, true, 'queueEditor включён по умолчанию');
+  assert.equal(dict.queueEditor.options.volatile, true, 'queueEditor — volatile-поле');
 
   // 2) Флаг снят: хост-часть даже не импортируется.
   const idle = createContext();

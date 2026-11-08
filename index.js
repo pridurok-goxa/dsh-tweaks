@@ -56,6 +56,9 @@ export const Config = Schema.object({
   // Выдвижное левое меню на узком экране: рельсы нет, панель открывается
   // иконкой в шапке и улетает влево при выборе чата. Хост-части нет.
   mobileSidebar: Schema.boolean().default(true).volatile(),
+  // Единая форма редактирования очереди (текст + вложения) с сохранением позиции.
+  // Клиентская часть — в TWEAKS; хост-роут живёт всегда, пока плагин включён.
+  queueEditor: Schema.boolean().default(true).volatile(),
   zoom: Schema.boolean().default(true).volatile(),
   contextMenu: Schema.boolean().default(true).volatile(),
   // Речь — тяжёлый твик: он поднимает Python-воркер и качает модель весов,
@@ -100,6 +103,9 @@ export const Config = Schema.object({
   imageFallbackModel: Schema.string().default('deepseek-flash').volatile(),
   imageFallbackLabel: Schema.string().default('Flash').volatile(),
 });
+
+/** Модуль хост-части редактора очереди. */
+const QUEUE_EDIT_HOST = './tweaks/queue-edit-host.js';
 
 /** Модуль хост-части твика «речь»: путь относительно нашего index.js. */
 const WHISPER_HOST = './tweaks/whisper-host.js';
@@ -507,6 +513,21 @@ function attachTrafficLight(ctx, config) {
 }
 
 /**
+ * Подключить хост-роут редактора очереди. Роут один и не зависит от
+ * volatile-поля: клиентская галочка `queueEditor` только показывает форму.
+ * @param {object} ctx - хост-контекст плагина.
+ * @returns {void}
+ */
+function attachQueueEditor(ctx) {
+  import(QUEUE_EDIT_HOST)
+    .then((host) => {
+      if (typeof host?.activate === 'function') host.activate(ctx);
+      else warn(ctx, `dsh-tweaks: в хост-части редактора очереди (${QUEUE_EDIT_HOST}) нет activate`);
+    })
+    .catch((error) => warn(ctx, `dsh-tweaks: хост-часть редактора очереди (${QUEUE_EDIT_HOST}) недоступна`, error));
+}
+
+/**
  * Хост-половина бандла: твики интерфейса живут в браузере, а у твиков «речь»
  * и «светофор» есть хост-части — их поднимает и снимает этот apply по флагам.
  * @param {object} ctx - хост-контекст плагина.
@@ -516,4 +537,5 @@ function attachTrafficLight(ctx, config) {
 export function apply(ctx, config) {
   attachWhisper(ctx, config);
   attachTrafficLight(ctx, config);
+  attachQueueEditor(ctx);
 }

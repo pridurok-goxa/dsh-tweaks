@@ -72,6 +72,13 @@ test('свайп влево выбирает следующую вкладку �
   assert.equal(context.switch(pane, -1), false, 'первая вкладка не заворачивается');
 });
 
+test('выбор вкладки не сдвигает полосу: позиция пользователя возвращается', () => {
+  assert.match(region, /savedStripScroll = new WeakMap/);
+  assert.match(region, /const onChipClick = \(event\)/);
+  assert.match(region, /strip\.scrollLeft = left/);
+  assert.match(region, /\[40, 120, 260\]/);
+});
+
 test('долгое удержание и свайп описаны в регионе', () => {
   assert.match(region, /RIGHT_TAB_LONG_PRESS_MS = 1000/);
   assert.match(region, /RIGHT_TAB_SWIPE_PX = 48/);

@@ -361,6 +361,7 @@ window.__ModuleLoader__.load({
         'menu.paste': 'Paste',
         'menu.selectAll': 'Select All',
         'tweak.mobileComposer': 'Mobile composer: Enter inserts a newline',
+        'tweak.queueEditor': 'Queue: edit messages with attachments',
         'tweak.mobileSidebar': 'Mobile menu: slide-out sidebar',
         'mobileSidebar.open': 'Open menu',
         'mobilePanels.open': 'Global panels',
@@ -421,6 +422,7 @@ window.__ModuleLoader__.load({
         'menu.paste': 'Вставить',
         'menu.selectAll': 'Выделить всё',
         'tweak.mobileComposer': 'Мобильный ввод: Enter переносит строку',
+        'tweak.queueEditor': 'Очередь: редактирование с вложениями',
         'tweak.mobileSidebar': 'Мобильное меню: выдвижная панель',
         'mobileSidebar.open': 'Открыть меню',
         'mobilePanels.open': 'Глобальные панели',
@@ -4357,6 +4359,12 @@ window.__ModuleLoader__.load({
       if (target.closest('[class*="_searchResultRow"]') !== null) return 'close';
       if (target.closest('[class*="_panelRow"]') !== null) return 'close';
       if (target.closest('[class*="_newSession"]') !== null) return 'close';
+      // Плюс на строке workspace: «New session in <проект>».
+      const labelled = target.closest('button[aria-label]');
+      if (labelled !== null) {
+        const label = labelled.getAttribute('aria-label') || '';
+        if (/^New session in\b/i.test(label) || /Новая сессия в/i.test(label) || /Новый чат в/i.test(label)) return 'close';
+      }
       return null;
     }
 
@@ -4616,6 +4624,7 @@ window.__ModuleLoader__.load({
 
       own(installMobileFocusPatch(typeof window === 'undefined' ? undefined : window, suppressor));
       own(setupMobileRightTabs(ctx, api));
+      own(setupTabActions());
 
       let disposed = false;
       let leaving = false;
@@ -5220,6 +5229,9 @@ window.__ModuleLoader__.load({
       let bodyStart = null;
       let hold = null;
       let moveBlocker = null;
+      /** Где пользователь оставил полосу вкладок до выбора. */
+      const savedStripScroll = new WeakMap();
+      const restoreTimers = new Set();
 
       /** Не дать клику после свайпа/переноса выбрать вкладку. */
       const onClickCapture = (event) => {
@@ -5256,6 +5268,8 @@ window.__ModuleLoader__.load({
         if (pane === null || pane === undefined || pane !== rightActivePane()) return;
         if (event.target.closest('[data-dockkit-strip]') !== null) return;
         if (rightInteractiveTarget(event.target) || rightHorizontalScroller(event.target, pane)) return;
+        const strip = pane.querySelector('[data-dockkit-strip-tabs]');
+        if (strip !== null) savedStripScroll.set(strip, strip.scrollLeft);
         bodyStart = { id: event.pointerId, x: event.clientX, y: event.clientY, pane, horizontal: false, dead: false };
       };
 
@@ -5289,6 +5303,8 @@ window.__ModuleLoader__.load({
         if (chip === null || chip === undefined || chip.closest('[data-dockkit-tab-close]') !== null) return;
         const pane = chip.closest('[data-dockkit-pane]');
         if (pane === null || pane === undefined) return;
+        const strip = chip.closest('[data-dockkit-strip-tabs]');
+        if (strip !== null) savedStripScroll.set(strip, strip.scrollLeft);
         const state = {
           id: event.pointerId,
           x: event.clientX,
@@ -5373,6 +5389,34 @@ window.__ModuleLoader__.load({
         }
       };
 
+      /**
+       * После выбора вкладки вернуть полосу туда, где пользователь её оставил:
+       * useActiveChipInView иначе «придвигает» активный чип к правому краю.
+       * @param {object} event - click.
+       * @returns {void}
+       */
+      const onChipClick = (event) => {
+        if (disposed) return;
+        const chip = event.target?.closest?.('[data-dockkit-tab]');
+        if (chip === null || chip === undefined) return;
+        const strip = chip.closest('[data-dockkit-strip-tabs]');
+        if (strip === null) return;
+        const left = savedStripScroll.get(strip);
+        if (left === undefined) return;
+        const restore = () => {
+          if (!disposed && strip.isConnected) strip.scrollLeft = left;
+        };
+        if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(restore);
+        for (const delay of [40, 120, 260]) {
+          const timer = window.setTimeout(() => {
+            restoreTimers.delete(timer);
+            restore();
+          }, delay);
+          restoreTimers.add(timer);
+        }
+      };
+      doc.addEventListener('click', onChipClick, true);
+
       doc.addEventListener('pointerdown', onBodyDown, true);
       doc.addEventListener('pointerdown', onStripDown, true);
       doc.addEventListener('pointermove', onBodyMove, true);
@@ -5393,8 +5437,11 @@ window.__ModuleLoader__.load({
         }
         if (suppressTimer !== null) window.clearTimeout(suppressTimer);
         suppressTimer = null;
+        doc.removeEventListener('click', onChipClick, true);
         doc.removeEventListener('pointerdown', onBodyDown, true);
         doc.removeEventListener('pointerdown', onStripDown, true);
+        for (const timer of restoreTimers) window.clearTimeout(timer);
+        restoreTimers.clear();
         doc.removeEventListener('pointermove', onBodyMove, true);
         doc.removeEventListener('pointerup', onBodyUp, true);
         doc.removeEventListener('pointerup', onStripUp, true);
@@ -5405,6 +5452,480 @@ window.__ModuleLoader__.load({
 
     /* #endregion tweak-mobile-right-tabs */
 
+    /* #region tweak-queue-editor */
+
+    /** Относительный путь host-роута: работает и под /dev/. */
+    const QUEUE_EDIT_ROUTE = 'dsh-tweaks/queue/edit';
+    /** Предел одного нового вложения до base64 (как на хосте). */
+    const QUEUE_EDIT_MAX_ATTACHMENT = 32 * 1024 * 1024;
+    /** Разрешённые типы картинок (совпадают с attachment-store). */
+    const QUEUE_EDIT_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+
+    /** Состояние открытой формы: payload и подписчики. */
+    const queueEditorState = {
+      value: null,
+      listeners: new Set(),
+      get() { return this.value; },
+      open(value) {
+        this.value = value;
+        for (const listener of this.listeners) listener(this.value);
+      },
+      close() {
+        this.value = null;
+        for (const listener of this.listeners) listener(null);
+      },
+      subscribe(listener) {
+        this.listeners.add(listener);
+        return () => this.listeners.delete(listener);
+      },
+    };
+
+    /** Durable-строки очереди: pending-echo сюда не входят. */
+    function queueEditorRows() {
+      return [...document.querySelectorAll('[data-queue-dock] li:not([data-submission-echo])')];
+    }
+
+    /**
+     * Видимые элементы durable-очереди в том же порядке, что рисует QueueDock:
+     * inbox next-turn минус транскриптные локальные echo.
+     * @param {object} session - клиентская Session.
+     * @returns {object[]} элементы очереди.
+     */
+    function queueEditorItems(session) {
+      try {
+        const inbox = session?.projections?.faceOf?.('inbox')?.getSnapshot?.();
+        const rows = Array.isArray(inbox?.['next-turn']) ? inbox['next-turn'] : [];
+        const pending = session?.getSnapshot?.()?.pendingSubmissions ?? [];
+        const inChat = new Set(pending.filter((item) => item.placement === 'transcript').map((item) => item.requestId));
+        if (inChat.size === 0) return [...rows];
+        return rows.filter(({ source }) => source?.kind !== 'user' || !('rpcId' in source) || !inChat.has(source.rpcId));
+      } catch (_error) {
+        return [];
+      }
+    }
+
+    /** Текущая Session по DOM-маркеру. */
+    function queueEditorSession(ctx) {
+      try {
+        const sessions = typeof ctx?.get === 'function' ? ctx.get('sessions') : undefined;
+        const id = document.querySelector('[data-conversation-session]')?.getAttribute('data-conversation-session');
+        if (!id || typeof sessions?.scope !== 'function' || typeof sessions?.sessionOf !== 'function') return undefined;
+        const actx = sessions.scope(id);
+        return actx === undefined ? undefined : sessions.sessionOf(actx);
+      } catch (_error) {
+        return undefined;
+      }
+    }
+
+    /** Первая кнопка actions в durable-строке — это карандаш. */
+    function queueEditorEditButton(row) {
+      const actions = row?.querySelector?.('[class*="_actions"]');
+      return actions?.querySelector?.('button') ?? null;
+    }
+
+    /** Собрать JSON-payload формы. */
+    function queueEditorPayload(text, attachments) {
+      return {
+        text,
+        attachments: attachments.map((item) => item.kind === 'existing'
+          ? { kind: 'existing', type: item.type, attachment: item.attachment }
+          : {
+            kind: 'new',
+            type: item.type,
+            name: item.name,
+            ...(item.type === 'image' ? { mediaType: item.mediaType } : {}),
+            data: item.data,
+          }),
+      };
+    }
+
+    /** base64 из байтов без переполнения стека. */
+    function queueEditorBase64(bytes) {
+      let binary = '';
+      const chunk = 0x8000;
+      for (let index = 0; index < bytes.length; index += chunk) {
+        binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
+      }
+      return btoa(binary);
+    }
+
+    /** Прочитать File в base64. */
+    async function queueEditorReadFile(file) {
+      const buffer = await file.arrayBuffer();
+      return queueEditorBase64(new Uint8Array(buffer));
+    }
+
+    /** Миниатюра существующего изображения из durable-ссылки. */
+    function QueueEditExistingImage({ attachment, imageUrl }) {
+      const [url, setUrl] = React.useState(null);
+      React.useEffect(() => {
+        let alive = true;
+        try {
+          Promise.resolve(imageUrl?.(attachment)).then((next) => {
+            if (alive && typeof next === 'string') setUrl(next);
+          }, () => {});
+        } catch (_error) {
+          /* превью необязательно */
+        }
+        return () => { alive = false; };
+      }, [attachment, imageUrl]);
+      return url === null ? React.createElement('span', { className: 'dsh-tweaks-queue-att-placeholder' }) : React.createElement('img', { src: url, alt: '', className: 'dsh-tweaks-queue-att-image' });
+    }
+
+    /** Строка вложения с удалением. */
+    function QueueEditAttachment({ item, imageUrl, onRemove }) {
+      const name = item.kind === 'existing' ? item.attachment?.name : item.name;
+      return React.createElement(
+        'span',
+        { className: `dsh-tweaks-queue-att dsh-tweaks-queue-att-${item.type}` },
+        item.type === 'image'
+          ? (item.kind === 'existing'
+            ? React.createElement(QueueEditExistingImage, { attachment: item.attachment, imageUrl })
+            : React.createElement('img', { src: item.previewUrl, alt: '', className: 'dsh-tweaks-queue-att-image' }))
+          : React.createElement(primitives?.FileTypeIcon ?? 'span', { path: name ?? '', size: 16 }),
+        React.createElement('span', { className: 'dsh-tweaks-queue-att-name', title: name }, name ?? 'file'),
+        React.createElement('button', { type: 'button', className: 'dsh-tweaks-queue-att-remove', 'aria-label': 'Удалить вложение', onClick: onRemove }, '×'),
+      );
+    }
+
+    /**
+     * Единая форма редактирования очереди: composer-стиль, текст и вложения.
+     * @param {object} props - payload, sessionId, imageUrl, onClose, onSaved.
+     * @returns {object} форма.
+     */
+    function QueueEditForm({ payload, sessionId, imageUrl, onClose }) {
+      const [text, setText] = React.useState(() => (payload.content ?? []).filter((block) => block.type === 'text').map((block) => block.text).join(''));
+      const [attachments, setAttachments] = React.useState(() => (payload.content ?? [])
+        .filter((block) => block.type === 'image' || block.type === 'file')
+        .map((block, index) => ({
+          kind: 'existing',
+          type: block.type,
+          attachment: block.attachment,
+          key: `${block.attachment?.attachmentId ?? 'ref'}:${index}`,
+        })));
+      const [error, setError] = React.useState(null);
+      const [busy, setBusy] = React.useState(false);
+      const inputRef = React.useRef(null);
+      const newUrls = React.useRef(new Set());
+      React.useEffect(() => () => {
+        for (const url of newUrls.current) URL.revokeObjectURL?.(url);
+        newUrls.current.clear();
+      }, []);
+      const addFiles = async (files) => {
+        const next = [];
+        for (const file of files) {
+          if (file.size > QUEUE_EDIT_MAX_ATTACHMENT) {
+            setError(`Файл «${file.name}» больше ${Math.round(QUEUE_EDIT_MAX_ATTACHMENT / 1024 / 1024)} МБ`);
+            continue;
+          }
+          try {
+            const data = await queueEditorReadFile(file);
+            const type = QUEUE_EDIT_IMAGE_TYPES.has(file.type) ? 'image' : 'file';
+            let previewUrl;
+            if (type === 'image') {
+              previewUrl = URL.createObjectURL(file);
+              newUrls.current.add(previewUrl);
+            }
+            next.push({ kind: 'new', type, name: file.name || 'file', mediaType: type === 'image' ? file.type : undefined, data, previewUrl });
+          } catch (_error) {
+            setError(`Не удалось прочитать «${file.name}»`);
+          }
+        }
+        if (next.length > 0) setAttachments((current) => [...current, ...next]);
+      };
+      const removeAt = (index) => {
+        setAttachments((current) => {
+          const removed = current[index];
+          if (removed?.previewUrl) URL.revokeObjectURL?.(removed.previewUrl);
+          return current.filter((_item, itemIndex) => itemIndex !== index);
+        });
+      };
+      const save = async () => {
+        if (busy) return;
+        setBusy(true);
+        setError(null);
+        try {
+          const response = await fetch(QUEUE_EDIT_ROUTE, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId, itemId: payload.itemId, ...queueEditorPayload(text, attachments) }),
+          });
+          const result = await response.json().catch(() => null);
+          if (!response.ok || result?.ok !== true) {
+            setError(result?.message ?? `Не удалось сохранить (${response.status})`);
+            return;
+          }
+          onClose();
+        } catch (_error) {
+          setError('Нет связи с хостом: сообщение не изменено');
+        } finally {
+          setBusy(false);
+        }
+      };
+      return React.createElement(
+        'section',
+        { className: 'dsh-tweaks-queue-editor', 'data-queue-editor': '' },
+        React.createElement('div', { className: 'dsh-tweaks-queue-editor-head' },
+          React.createElement('span', { className: 'dsh-tweaks-queue-editor-title' }, 'Редактирование очереди'),
+          React.createElement('button', { type: 'button', className: 'dsh-tweaks-queue-editor-close', 'aria-label': 'Закрыть', onClick: onClose }, '×')),
+        React.createElement('textarea', {
+          className: 'dsh-tweaks-queue-editor-text',
+          value: text,
+          placeholder: 'Текст сообщения',
+          rows: 3,
+          onChange: (event) => setText(event.target.value),
+        }),
+        React.createElement('div', { className: 'dsh-tweaks-queue-editor-atts' },
+          attachments.map((item, index) => React.createElement(QueueEditAttachment, { key: item.key ?? `${item.name}:${index}`, item, imageUrl, onRemove: () => removeAt(index) }))),
+        React.createElement('div', { className: 'dsh-tweaks-queue-editor-actions' },
+          React.createElement('button', { type: 'button', className: 'dsh-tweaks-queue-editor-add', onClick: () => inputRef.current?.click() }, '+ Вложение'),
+          React.createElement('input', {
+            ref: inputRef,
+            type: 'file',
+            multiple: true,
+            className: 'dsh-tweaks-queue-editor-file',
+            onChange: (event) => {
+              const files = [...(event.target.files ?? [])];
+              event.target.value = '';
+              addFiles(files);
+            },
+          })),
+        error === null ? null : React.createElement('div', { className: 'dsh-tweaks-queue-editor-error', role: 'alert' }, error),
+        React.createElement('div', { className: 'dsh-tweaks-queue-editor-footer' },
+          React.createElement('button', { type: 'button', className: 'dsh-tweaks-queue-editor-cancel', disabled: busy, onClick: onClose }, 'Отмена'),
+          React.createElement('button', { type: 'button', className: 'dsh-tweaks-queue-editor-save', disabled: busy || (text.trim() === '' && attachments.length === 0), onClick: save }, busy ? 'Сохраняем…' : 'Сохранить')),
+      );
+    }
+
+    /** Панель формы: подписка на store + текущая сессия. */
+    function QueueEditPanel({ sessionId, imageUrl }) {
+      const [payload, setPayload] = React.useState(queueEditorState.get());
+      React.useEffect(() => queueEditorState.subscribe(setPayload), []);
+      React.useEffect(() => {
+        if (payload !== null && payload.sessionId !== sessionId) queueEditorState.close();
+      }, [payload, sessionId]);
+      if (payload === null || payload.sessionId !== sessionId) return null;
+      return React.createElement(QueueEditForm, {
+        key: payload.itemId,
+        payload,
+        sessionId,
+        imageUrl,
+        onClose: () => queueEditorState.close(),
+      });
+    }
+
+    /**
+     * Включить единый редактор: снять disabled с карандаша durable-строк,
+     * перехватить клик и отрисовать форму в доке композера.
+     * @param {object} ctx - клиентский контекст.
+     * @param {object} api - очистки твика.
+     * @returns {void}
+     */
+    function setupQueueEditor(ctx, api) {
+      const own = typeof api?.own === 'function' ? api.own : () => {};
+      const style = document.createElement('style');
+      style.dataset.dshQueueEditor = '';
+      style.textContent = [
+        '.dsh-tweaks-queue-editor{box-sizing:border-box;width:100%;max-width:var(--dsh-composer-card-max-width,748px);margin:0 auto 6px;padding:10px 12px 8px;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-xl);background:var(--dsw-specific-input-major);box-shadow:var(--dsw-elevation-panel);color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:6px}',
+        '.dsh-tweaks-queue-editor-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:var(--dsw-alias-label-tertiary)}',
+        '.dsh-tweaks-queue-editor-title{font-weight:500}',
+        '.dsh-tweaks-queue-editor-close{border:0;background:transparent;color:var(--dsw-alias-label-secondary);font-size:18px;line-height:1;cursor:pointer;padding:2px 4px}',
+        '.dsh-tweaks-queue-editor-text{box-sizing:border-box;width:100%;min-height:84px;max-height:36vh;resize:none;border:0;outline:none;background:transparent;color:inherit;font:400 var(--dsh-content-font-size,14px)/1.5 system-ui,sans-serif;white-space:pre-wrap;word-break:break-word}',
+        '.dsh-tweaks-queue-editor-atts{display:flex;gap:6px;flex-wrap:wrap;max-height:140px;overflow:auto}',
+        '.dsh-tweaks-queue-att{position:relative;display:inline-flex;align-items:center;gap:4px;max-width:200px;padding:3px 22px 3px 4px;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);font-size:12px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-overlay)}',
+        '.dsh-tweaks-queue-att-image{width:36px;height:36px;object-fit:cover;border-radius:var(--dsw-radius-sm);flex:none}',
+        '.dsh-tweaks-queue-att-placeholder{width:36px;height:36px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-skeleton);flex:none}',
+        '.dsh-tweaks-queue-att-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px}',
+        '.dsh-tweaks-queue-att-remove{position:absolute;right:2px;top:0;bottom:0;border:0;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;font-size:14px}',
+        '.dsh-tweaks-queue-editor-actions{display:flex;align-items:center;gap:6px}',
+        '.dsh-tweaks-queue-editor-add{border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;padding:4px 8px;cursor:pointer}',
+        '.dsh-tweaks-queue-editor-file{display:none}',
+        '.dsh-tweaks-queue-editor-error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:16px}',
+        '.dsh-tweaks-queue-editor-footer{display:flex;justify-content:flex-end;gap:8px;padding-top:2px}',
+        '.dsh-tweaks-queue-editor-cancel,.dsh-tweaks-queue-editor-save{font:inherit;font-size:13px;padding:5px 12px;border-radius:var(--dsw-radius-md);cursor:pointer}',
+        '.dsh-tweaks-queue-editor-cancel{border:.5px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-secondary)}',
+        '.dsh-tweaks-queue-editor-save{border:0;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-foreground)}',
+        '.dsh-tweaks-queue-editor-save:disabled,.dsh-tweaks-queue-editor-cancel:disabled{opacity:.5;cursor:default}',
+        '@media (max-width:720px){.dsh-tweaks-queue-editor{max-width:100%;border-radius:0;margin-bottom:4px}}',
+      ].join('\n');
+      document.head?.appendChild(style);
+      own(() => style.remove());
+      own(() => queueEditorState.close());
+
+      let scheduled = false;
+      /** Разрешить карандаш у durable-строк (React снова ставит disabled). */
+      const enablePencils = () => {
+        scheduled = false;
+        for (const row of queueEditorRows()) {
+          const button = queueEditorEditButton(row);
+          if (button === null) continue;
+          button.disabled = false;
+          button.removeAttribute('title');
+          button.setAttribute('data-dsh-tweaks-queue-edit', '');
+        }
+      };
+      const schedule = () => {
+        if (scheduled) return;
+        scheduled = true;
+        if (typeof window?.requestAnimationFrame === 'function') window.requestAnimationFrame(enablePencils);
+        else window.setTimeout(enablePencils, 0);
+      };
+
+      const onClick = (event) => {
+        const target = event.target;
+        const row = target?.closest?.('[data-queue-dock] li');
+        if (row === null || row === undefined || row.hasAttribute('data-submission-echo')) return;
+        const button = target.closest?.('button');
+        if (button === null || button === undefined) return;
+        const actions = row.querySelector('[class*="_actions"]');
+        if (actions === null || !actions.contains(button)) return;
+        if (actions.querySelector('button') !== button) return;
+        const rows = queueEditorRows();
+        const index = rows.indexOf(row);
+        if (index < 0) return;
+        const session = queueEditorSession(ctx);
+        const items = queueEditorItems(session);
+        const item = items[index];
+        if (item === undefined) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        queueEditorState.open({ sessionId: row.ownerDocument?.querySelector?.('[data-conversation-session]')?.getAttribute('data-conversation-session'), itemId: item.id, content: item.content });
+      };
+      document.addEventListener?.('click', onClick, true);
+      own(() => document.removeEventListener?.('click', onClick, true));
+
+      const observer = typeof MutationObserver === 'function' ? new MutationObserver(schedule) : null;
+      observer?.observe(document.body ?? document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] });
+      own(() => observer?.disconnect());
+      schedule();
+
+      let slots = undefined;
+      try {
+        slots = typeof ctx?.get === 'function' ? ctx.get('slots') : undefined;
+      } catch (_error) {
+        slots = undefined;
+      }
+      if (typeof slots?.inject === 'function' && typeof slots?.register === 'function') {
+        own(slots.inject('conversation.input.dock', () => slots.register(
+          {
+            name: 'conversation.input.dock',
+            id: 'queue-editor',
+            order: -10,
+            inject: (sessionId) => ({
+              imageUrl: (attachment) => {
+                try {
+                  return ctx.get('uiConversation')?.imageUrl?.(sessionId, attachment);
+                } catch (_error) {
+                  return undefined;
+                }
+              },
+            }),
+          },
+          (props) => React.createElement(QueueEditPanel, props),
+        )));
+      }
+    }
+
+    /* #endregion tweak-queue-editor */
+
+    /* #region tweak-mobile-tabs-actions */
+
+    /**
+     * Перенести штатные триггеры Agent Team и Subagents из шапки в строку
+     * вкладок Chat/Trajectory, справа от них. Переносятся реальные DOM-узлы,
+     * поэтому сохраняются стандартный вид, порталы меню и анимация работы
+     * (StateDot/спиннеры внутри триггеров).
+     * @returns {Function} восстановление DOM.
+     */
+    function setupTabActions() {
+      const style = document.createElement('style');
+      style.dataset.dshTabsActions = '';
+      style.textContent = '.dsh-tweaks-tabs-actions{display:inline-flex;align-items:center;gap:6px;margin-left:8px;min-width:0;flex:none}';
+      document.head?.appendChild(style);
+      const moved = new Map();
+      let scheduled = false;
+      let disposed = false;
+
+      /** Строка вкладок разговора (не путать с вкладками правого докера). */
+      const tabRow = () => {
+        const tabs = document.querySelector('[data-conversation-tabs]');
+        return tabs?.parentElement ?? null;
+      };
+
+      /** Контейнер для перенесённых кнопок. */
+      const hostFor = (row) => {
+        let host = row.querySelector(':scope > [data-dsh-tweaks-tabs-actions]');
+        if (host === null) {
+          host = document.createElement('div');
+          host.className = 'dsh-tweaks-tabs-actions';
+          host.setAttribute('data-dsh-tweaks-tabs-actions', '');
+          const tabs = row.querySelector('[data-conversation-tabs]');
+          if (tabs === null) return null;
+          tabs.after(host);
+        }
+        return host;
+      };
+
+      /** Запомнить исходное место узла и перенести его. */
+      const move = (node, host) => {
+        if (node === null || node === undefined) return;
+        if (node.parentElement === host) return;
+        if (!moved.has(node)) moved.set(node, { parent: node.parentElement, next: node.nextSibling });
+        host.appendChild(node);
+      };
+
+      const place = () => {
+        scheduled = false;
+        if (disposed) return;
+        const row = tabRow();
+        const actions = document.querySelector('[data-slot="conversation.session.header.actions"]');
+        if (row === null || actions === null) return;
+        const host = hostFor(row);
+        if (host === null) return;
+        const direct = [...actions.children];
+        const team = direct.find((node) => node.hasAttribute?.('data-team-action') || node.querySelector?.('[data-team-action]') !== null) ?? null;
+        const subagents = direct.find((node) => node !== team && [...node.querySelectorAll?.('button') ?? []].some((button) => {
+          const label = `${button.getAttribute?.('aria-label') ?? ''} ${button.textContent ?? ''}`;
+          return /subagents?|субагент/i.test(label);
+        })) ?? null;
+        if (team !== null) move(team, host);
+        if (subagents !== null) move(subagents, host);
+        // Порядок: Agent Team, затем Subagents. Переставляем только если он
+        // реально нарушен, иначе MutationObserver зациклится на своих же вставках.
+        const desired = [team, subagents].filter((node) => node !== null && node.parentElement === host);
+        const current = [...host.children].filter((node) => desired.includes(node));
+        if (desired.some((node, index) => current[index] !== node)) host.append(...desired);
+      };
+
+      const schedule = () => {
+        if (scheduled || disposed) return;
+        scheduled = true;
+        if (typeof window?.requestAnimationFrame === 'function') window.requestAnimationFrame(place);
+        else window.setTimeout(place, 0);
+      };
+
+      const observer = typeof MutationObserver === 'function' ? new MutationObserver(schedule) : null;
+      observer?.observe(document.body ?? document.documentElement, { childList: true, subtree: true });
+      schedule();
+      return () => {
+        disposed = true;
+        observer?.disconnect();
+        style.remove();
+        for (const [node, origin] of moved) {
+          const parent = origin.parent?.isConnected ? origin.parent : document.querySelector('[data-slot="conversation.session.header.actions"]');
+          if (parent !== null && node.isConnected) {
+            const next = origin.next?.isConnected ? origin.next : null;
+            parent.insertBefore(node, next);
+          }
+        }
+        moved.clear();
+        for (const host of document.querySelectorAll('[data-dsh-tweaks-tabs-actions]')) host.remove();
+      };
+    }
+
+    /* #endregion tweak-mobile-tabs-actions */
+
     const TWEAKS = {
       mobileComposer: {
         title: 'Мобильный ввод: Enter переносит строку',
@@ -5414,6 +5935,15 @@ window.__ModuleLoader__.load({
           setupMobileComposer(ctx, api);
         },
         // Собственных подписок нет: обработчики и слоты снимает own().
+      },
+      queueEditor: {
+        title: 'Очередь: редактирование с вложениями',
+        titleKey: 'tweak.queueEditor',
+        // Единая форма с сохранением позиции; host-роут в tweaks/queue-edit-host.js.
+        defaultOn: true,
+        activate(ctx, api) {
+          setupQueueEditor(ctx, api);
+        },
       },
       mobileSidebar: {
         title: 'Мобильное меню: выдвижная панель',

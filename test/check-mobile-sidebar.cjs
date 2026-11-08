@@ -87,6 +87,17 @@ test('навигация панелей и новая сессия закрыв�
   assert.equal(context.intent(target('[class*="_newSession"]')), 'close');
 });
 
+test('плюс на строке workspace создаёт чат и закрывает ящик', () => {
+  const target = {
+    closest: (selector) => (selector === 'button[aria-label]' ? { getAttribute: (name) => (name === 'aria-label' ? 'New session in goxa' : null) } : null),
+  };
+  assert.equal(context.intent(target), 'close');
+  const ru = {
+    closest: (selector) => (selector === 'button[aria-label]' ? { getAttribute: (name) => (name === 'aria-label' ? 'Новая сессия в goxa' : null) } : null),
+  };
+  assert.equal(context.intent(ru), 'close');
+});
+
 test('остальные клики в панели не наши', () => {
   assert.equal(context.intent(target()), null);
   assert.equal(context.intent(null), null);
