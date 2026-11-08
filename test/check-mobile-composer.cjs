@@ -87,7 +87,7 @@ test('composer wiring keeps the new mobile behaviors', () => {
   assert.ok(source.includes("setAttribute('autocorrect', 'off')"), 'автокоррекция не подчёркивает слово');
   assert.match(source, /finishCompositionEnter\(\)/, 'перенос после IME-композиции');
   assert.ok(source.includes('webkit-composition-frame-color'), 'рамка IME-композиции скрыта');
-  assert.ok(source.includes("name: 'conversation.input.left'"), 'чип режима в строке композера');
+  assert.equal(source.includes("name: 'conversation.input.left'"), false, 'кастомного чипа режима нет — остаётся системный');
   assert.ok(source.includes("'session.copyId'"), 'пункт копирования id объявлен');
 });
 

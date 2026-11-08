@@ -34,13 +34,11 @@ const req=createRequire(path.join(process.env.MOBILE_TEST_RUNTIME||path.resolve(
  const bridge=w.mobileCommandBridge({get:name=>services[name]},'test-session');assert(bridge);
  const card=w.document.createElement('div');card.setAttribute('data-composer-card','');
  card.innerHTML='<div id="overlay"></div><div data-input-scroll><div data-composer-input contenteditable="true" role="textbox" aria-multiline="true" style="white-space:pre-wrap"></div></div><div><button id="plus" aria-haspopup="listbox">+</button><button id="send">Send</button></div>';
- w.document.body.append(card);const dock=w.document.createElement('div');w.document.body.append(dock);
+ w.document.body.append(card);
  const root=card.querySelector('[data-composer-input]'),plus=card.querySelector('#plus');shell.editor.setRootElement(root);
  plus.addEventListener('click',()=>{unsafeFocus++;root.focus()});
  let anchor={top:800,bottom:834,left:14,right:48,width:34,height:34};plus.getBoundingClientRect=()=>anchor;
- const style=w.document.createElement('style');style.textContent='[data-tweaks-mode-chip] [data-composer-command]{display:none!important}';w.document.head.append(style);
  const overlayRoot=createRoot(card.querySelector('#overlay'));overlayRoot.render(React.createElement(React.Fragment,null,React.createElement(w.MobileComposerBinding,{inputActions:shell.actions,commandBridge:bridge}),React.createElement(api.DecoratorPortals,{editor:shell.editor})));
- const dockRoot=createRoot(dock);const useInput=select=>select(React.useSyncExternalStore(shell.state.subscribe,shell.state.getSnapshot));dockRoot.render(React.createElement(w.ComposerModeChip,{useInput,commandBridge:bridge}));
  const keymapOff=api.registerComposerKeymap(shell.editor,{arbitrate:()=> 'pass',dismissPopup(){},space:()=>false,canSubmit:()=>true,submit(){sends++},intakeFiles(){},pasteText(text){shell.paste(text)}});
  const flush=async()=>{await w.happyDOM.waitUntilComplete();await new Promise(setImmediate);await new Promise(setImmediate)};
  await flush();
@@ -52,7 +50,7 @@ const req=createRequire(path.join(process.env.MOBILE_TEST_RUNTIME||path.resolve(
  const paste=async(plain,html)=>{const data=new w.DataTransfer();if(plain!==null)data.setData('text/plain',plain);if(html)data.setData('text/html',html);const e=new w.ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true});root.dispatchEvent(e);await flush();return e};
  const before=async(type,data,cancelable=true)=>{const e=new w.InputEvent('beforeinput',{inputType:type,data,bubbles:true,cancelable,isComposing:type==='insertCompositionText'});root.dispatchEvent(e);if(!cancelable)root.dispatchEvent(new w.InputEvent('input',{inputType:type,data,bubbles:true}));await flush();return e};
  let count=0;const check=async(name,fn)=>{await fn();count++;console.log('PASS',name)};
- await check('3084-char leading /plan + blank paragraphs becomes one native mode, complete body',async()=>{await reset('');await paste(payload);assert.equal(text(),payload);assert.equal(state().claim.name,'plan');assert.equal(root.querySelectorAll('[data-composer-command]').length,1);assert.equal(dock.querySelectorAll('[data-tweaks-command-mode]').length,1);assert(!root.innerText.includes('/plan'));assert(root.innerText.includes('Вот тут прочитай'));});
+ await check('3084-char leading /plan + blank paragraphs becomes one native mode, complete body',async()=>{await reset('');await paste(payload);assert.equal(text(),payload);assert.equal(state().claim.name,'plan');assert.equal(root.querySelectorAll('[data-composer-command]').length,1);assert.equal(w.document.querySelectorAll('[data-tweaks-command-mode]').length,0,'кастомного чипа режима нет');assert(root.querySelector('[data-composer-command]')?.textContent?.toLowerCase().includes('plan'),'системный чип Plan виден');assert(root.innerText.includes('Вот тут прочитай'));});
  await check('existing empty /plan mode does not duplicate pasted prefix',async()=>{await reset('');shell.beginCommand(claim,{start:0,end:0,draftRev:state().draftRev});await paste(payload);assert.equal(text(),payload);assert.equal(root.querySelectorAll('[data-composer-command]').length,1)});
  await check('native mode submission receives the whole body once, not a pasted /plan duplicate',async()=>{shell.actions.submit();await flush();assert.equal(sentArgs.length,1);assert.equal(sentArgs[0],body)});
  await check('Android insertText-only clipboard',async()=>{await reset('');await before('insertText',payload);assert.equal(text(),payload);assert.equal(state().claim.name,'plan')});
@@ -72,7 +70,6 @@ const req=createRequire(path.join(process.env.MOBILE_TEST_RUNTIME||path.resolve(
   assert.equal(unsafeFocus,0);assert.equal(w.document.activeElement,active);assert.equal(menuHit.position,'leading');assert.equal(menuHit.span.start,0);assert.equal(menuHit.span.end,0);
   assert(shell.beginCommand(claim,menuHit.span));await flush();assert.equal(text(),'/plan '+body);
  });
- await check('removing dock mode keeps body and does not open keyboard',async()=>{const active=w.document.activeElement;dock.querySelector('button').click();await flush();assert.equal(text(),body);assert.equal(state().claim,undefined);assert.equal(w.document.activeElement,active)});
  await check('412x915 touch scroll cap = 183px, menu adjacent and inside viewport',async()=>{
   const menu=w.document.createElement('div');menu.setAttribute('data-trigger-menu','');Object.defineProperty(menu,'scrollHeight',{value:250,configurable:true});menu.getBoundingClientRect=()=>({height:250});card.querySelector('#overlay').append(menu);await flush();
   assert.equal(card.style.getPropertyValue('--dsh-mobile-text-cap'),'183px');assert.equal(menu.style.position,'fixed');const y=parseFloat(menu.style.top),x=parseFloat(menu.style.left);assert(y>=8&&y+250<=915-8);assert(x>=8&&x+parseFloat(menu.style.width)<=412-8);assert(y<anchor.top);
@@ -96,6 +93,6 @@ const req=createRequire(path.join(process.env.MOBILE_TEST_RUNTIME||path.resolve(
   const temp=w.document.createElement('div'),ed=w.document.createElement('div');ed.setAttribute('data-composer-input','');ed.setAttribute('contenteditable','true');temp.append(ed);w.document.body.append(temp);
   const off=w.bindMobileComposer(temp,shell.actions,w,slow);const data=new w.DataTransfer();data.setData('text/plain','/plan start');ed.dispatchEvent(new w.ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));shell.actions.setDraft('edited afterwards');resolve(claim);await flush();assert.equal(text(),'edited afterwards');off();temp.remove();
  });
- await check('all component effects detach cleanly',async()=>{overlayRoot.unmount();dockRoot.unmount();await flush();assert(!card.hasAttribute('data-tweaks-mode-chip'));assert(!card.hasAttribute('data-mobile-composer'));});
+ await check('all component effects detach cleanly',async()=>{overlayRoot.unmount();await flush();assert(!card.hasAttribute('data-mobile-composer'));assert.equal(w.document.querySelectorAll('[data-tweaks-command-mode]').length,0);});
  keymapOff();shell.dispose();w.happyDOM.cancelAsync();console.log(`PASS ${count} native mode / clipboard / mobile geometry checks (DOM simulation, not a real Android browser)`);
 })().catch(e=>{console.error(e);process.exitCode=1});

@@ -33,6 +33,17 @@ window.__ModuleLoader__.load({
     /** Ключ отметки этапа инициализации в хранилище устройства. */
     const READY_KEY = 'dsh.ui-zoom.ready.v1';
     /**
+     * Ключ диагностического выключателя всех твиков в хранилище устройства.
+     *
+     * Выключатель нужен, чтобы на телефоне отличить зависание приложения от
+     * зависания, которое даёт наш слой: `?tweaks=off` гасит все твики разом,
+     * `?tweaks=on` возвращает их. Значение переживает перезагрузку страницы,
+     * рестарт профиля не нужен.
+     */
+    const SWITCH_KEY = 'dsh.tweaks.disabled.v1';
+    /** Значение выключателя в хранилище: твики выключены. */
+    const SWITCH_OFF = '1';
+    /**
      * Переменная с текущим масштабом: её читает `calc()` попапов.
      * Живёт на корне документа, поэтому наследуется и слоями в `body`.
      */
@@ -418,6 +429,7 @@ window.__ModuleLoader__.load({
         'form.unavailable': 'Settings are unavailable: this deployment has no configuration service.',
         'form.readOnly': 'This deployment stores settings read-only.',
         'form.saveFailed': 'The value was not saved. Try again.',
+        'form.switchOff': 'All tweaks are off: page opened with ?tweaks=off. Good for checking whether freezes come from our layer; ?tweaks=on turns them back on.',
       },
       ru: {
         'zoom.in': 'Увеличить размер интерфейса',
@@ -480,6 +492,7 @@ window.__ModuleLoader__.load({
         'form.unavailable': 'Настройки недоступны: в этой сборке нет службы конфигурации.',
         'form.readOnly': 'Эта сборка хранит настройки только для чтения.',
         'form.saveFailed': 'Значение не сохранилось. Попробуйте ещё раз.',
+        'form.switchOff': 'Все твики выключены: страница открыта с ?tweaks=off. Так проверяют, не зависание ли это нашего слоя; ?tweaks=on включает твики обратно.',
       },
     };
 
@@ -873,7 +886,11 @@ window.__ModuleLoader__.load({
          * @returns {void}
          */
         function scalePopup(node, zoom) {
-          node.style.zoom = zoom === 1 ? '' : String(zoom);
+          // Пишем только при изменении: наблюдатель следит и за своими слоями,
+          // а запись «того же значения» рождает новую запись и лишний круг
+          // observer → style → observer.
+          const next = zoom === 1 ? '' : String(zoom);
+          if (node.style.zoom !== next) node.style.zoom = next;
           pickUp(node);
         }
 
@@ -978,7 +995,10 @@ window.__ModuleLoader__.load({
          * @returns {void}
          */
         function pinHandles() {
-          for (const handle of document.querySelectorAll('[data-side="sidebar"], [data-side="rightbar"]')) {
+          // Список полосок кэшируется: он же нужен наблюдателю, чтобы отличить
+          // правку стиля слоя раскладки от сотни правок в поддереве приложения.
+          handleCache = [...document.querySelectorAll('[data-side="sidebar"], [data-side="rightbar"]')];
+          for (const handle of handleCache) {
             const side = handle.dataset.side;
             const column =
               side === 'sidebar'
@@ -989,6 +1009,32 @@ window.__ModuleLoader__.load({
             const next = `${left}px`;
             if (handle.style.left !== next) handle.style.left = next;
           }
+        }
+
+        /** Полоски, найденные последним `pinHandles`: нужны проверке записей стиля. */
+        let handleCache = [];
+
+        /**
+         * Правка стиля пришла от узла раскладки, а не от содержимого чата.
+         *
+         * Полоски стоят на границах колонок внутри рамки, поэтому пересчёт нужен,
+         * когда стиль поменялся у самой полоски, у рамки или у её предка. Проверка
+         * поднимается по родителям полосок (короткий путь) и не трогает дерево
+         * чата — иначе каждая правка стиля в ленте дёргала бы раскладку.
+         * @param {Element} node - узел, у которого поменялся стиль.
+         * @returns {boolean} да или нет.
+         */
+        function touchesHandles(node) {
+          if (node === null || node === undefined) return false;
+          for (const handle of handleCache) {
+            if (handle === node) return true;
+            let parent = handle.parentElement ?? null;
+            while (parent !== null && parent !== undefined && parent !== document.body) {
+              if (parent === node) return true;
+              parent = parent.parentElement ?? null;
+            }
+          }
+          return false;
         }
 
         /**
@@ -1023,36 +1069,180 @@ window.__ModuleLoader__.load({
         }
 
         /**
+         * Сколько узлов слоя осматривать за один проход.
+         *
+         * Слои приложения (меню, подсказки, панели) маленькие, а корень
+         * приложения — нет. Предел не даёт одному неожиданно огромному слою
+         * съесть кадр: остальное досмотрят следующие проходы.
+         */
+        const LAYER_SCAN_LIMIT = 1500;
+
+        /** Корень приложения: слои порталов лежат мимо него. */
+        let appRootCache = null;
+
+        /**
+         * Корень приложения, если он уже отрисован.
+         * @returns {Element | null} корень либо null до первого рендера.
+         */
+        function appRootNode() {
+          if (appRootCache === null || appRootCache.isConnected === false) {
+            appRootCache = document.getElementById('root') ?? null;
+          }
+          return appRootCache;
+        }
+
+        /**
+         * Добавленный узел лежит в корне приложения.
+         *
+         * Всё, что появляется внутри `#root`, слоем попапа быть не может (это
+         * проверяет `isPopup`), поэтому такие записи наблюдатель пропускает
+         * сразу: именно они идут сотнями при отрисовке чата на телефоне.
+         * @param {Element} node - добавленный узел.
+         * @returns {boolean} да или нет.
+         */
+        function insideAppRoot(node) {
+          const root = appRootNode();
+          if (root === null) return false;
+          if (root === node) return true;
+          return typeof root.contains === 'function' && root.contains(node);
+        }
+
+        /** Служебные теги: слоями попапов они не бывают. */
+        function isLayerTag(node) {
+          const tag = String(node?.tagName ?? '');
+          return tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK' || tag === 'TEMPLATE' || tag === 'META';
+        }
+
+        /**
+         * Взять слой и его потомков под масштаб.
+         *
+         * Обход только внутри слоя. Раньше `querySelectorAll('*')` вызывался на
+         * каждый добавленный узел всего документа, то есть отрисовка длинной
+         * ленты давала квадратичную работу по числу узлов кадра — на телефоне
+         * это и есть полное зависание.
+         * @param {Element} node - узел слоя.
+         * @returns {number} сколько узлов просмотрено (для общего предела прохода).
+         */
+        function scanLayer(node) {
+          if (node === null || node === undefined || node.nodeType !== 1 || isLayerTag(node)) return 0;
+          mark(node);
+          if (typeof node.querySelectorAll !== 'function') return 1;
+          const descendants = node.querySelectorAll('*');
+          const limit = Math.min(descendants.length, LAYER_SCAN_LIMIT);
+          for (let index = 0; index < limit; index += 1) mark(descendants[index]);
+          return descendants.length + 1;
+        }
+
+        /**
+         * Пройти по слоям в `body`: его дети — корни порталов приложения.
+         * @returns {void}
+         */
+        function scanLayers() {
+          const root = appRootNode();
+          let budget = LAYER_SCAN_LIMIT * 2;
+          for (const node of document.body?.children ?? []) {
+            if (node === root || budget <= 0) continue;
+            budget -= scanLayer(node);
+          }
+        }
+
+        /**
          * Следить за слоями, которые приложение добавляет в `body` после загрузки.
+         *
+         * Наблюдатель видит весь `body` (иначе не поймать слой, вложенный в
+         * контейнер портала), но реагирует только на то, что может быть слоем:
+         * добавленные узлы вне `#root`, и правки стиля самих слоёв или раскладки.
+         * Работа по добавленным узлам отложена в кадр и идёт по одному разу:
+         * покадровое слияние вместо обработки каждой записи.
          * @returns {void}
          */
         function attachPopupZoom() {
-          for (const node of document.body?.children ?? []) mark(node);
+          scanLayers();
           patchFrameMetrics();
           pinHandles();
           patchPointerCoordinates();
+          let observing = false;
+          let disposed = false;
+          let scanFrame = 0;
+          let scanPending = false;
+
+          /** Догнать изменения после паузы: один проход по слоям. */
+          function runScan() {
+            scanFrame = 0;
+            scanPending = false;
+            if (disposed) return;
+            scanLayers();
+            // Полоски нужны только под масштабом: на 100% приложение ставит их само.
+            if (readScale() !== 1) pinHandles();
+          }
+
+          /** Попросить пересмотр слоёв в следующем кадре, не чаще раза в кадр. */
+          function requestScan() {
+            if (scanPending || disposed) return;
+            scanPending = true;
+            if (typeof window.requestAnimationFrame === 'function') scanFrame = window.requestAnimationFrame(runScan);
+            else scanFrame = window.setTimeout(runScan, 16);
+          }
+
+          /** Включить наблюдение и один раз догнать изменения. */
+          function connectObserver() {
+            if (observing === true) return;
+            observing = true;
+            observer.observe(document.body ?? html, {
+              childList: true,
+              subtree: true,
+              attributes: true,
+              attributeFilter: ['style'],
+            });
+            requestScan();
+          }
+
+          /** Выключить наблюдение, пока вкладка скрыта. */
+          function disconnectObserver() {
+            if (observing === false) return;
+            observing = false;
+            observer.disconnect();
+          }
+
           const observer = new MutationObserver((records) => {
+            let nested = false;
             for (const record of records) {
               if (record.type === 'attributes') {
-                handleStyle(record.target);
-                pinHandles();
+                const target = record.target;
+                if (target === null || target === undefined) continue;
+                // Слой сам поменял координаты — это наша работа, здесь она короткая.
+                handleStyle(target);
+                // Раскладка поехала — полоски переставляются. На 100% это не нужно.
+                if (readScale() !== 1 && touchesHandles(target)) pinHandles();
                 continue;
               }
-              for (const node of record.addedNodes) {
+              for (const node of record.addedNodes ?? []) {
                 if (!node || node.nodeType !== 1) continue;
-                mark(node);
-                for (const child of node.querySelectorAll('*')) mark(child);
+                if (insideAppRoot(node)) continue;
+                if (node.parentElement === document.body) {
+                  // Слой приложения рождается прямо в body — берём сразу.
+                  scanLayer(node);
+                } else {
+                  // Вложенный слой досмотрит общий проход в кадре.
+                  nested = true;
+                }
               }
             }
-            pinHandles();
+            if (nested) requestScan();
           });
-          observer.observe(document.body ?? html, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['style'],
+
+          const stopWatchingVisibility = pauseWhenHidden(document, connectObserver, disconnectObserver);
+          connectObserver();
+          own(() => {
+            disposed = true;
+            disconnectObserver();
+            stopWatchingVisibility();
+            if (scanFrame !== 0) {
+              if (typeof window.cancelAnimationFrame === 'function') window.cancelAnimationFrame(scanFrame);
+              else window.clearTimeout?.(scanFrame);
+              scanFrame = 0;
+            }
           });
-          own(() => observer.disconnect());
         }
         /* #endregion popup-zoom */
 
@@ -1658,18 +1848,47 @@ window.__ModuleLoader__.load({
 
       markReady?.('free-panels: ready');
       firstApply();
+      // Наблюдатель уже привязан к рамке, поэтому пауза при скрытой вкладке
+      // не теряет изменений: при возврате включение идёт с пересчёта сетки.
+      let observing = false;
+      let observedFrame = null;
+
+      /** Включить наблюдение за рамкой и пересчёт по изменению окна. */
+      const connectObserver = () => {
+        if (observing) return;
+        observing = true;
+        const frame = frameOf();
+        if (frame !== null && frame !== observedFrame) {
+          if (observedFrame !== null) observer.disconnect();
+          observer.observe(frame, { attributes: true, attributeFilter: ['style'] });
+          observedFrame = frame;
+        }
+        window.addEventListener('resize', schedule);
+        schedule();
+      };
+
+      /** Выключить наблюдение, пока вкладка скрыта. */
+      const disconnectObserver = () => {
+        if (!observing) return;
+        observing = false;
+        observer.disconnect();
+        observedFrame = null;
+        window.removeEventListener('resize', schedule);
+      };
+
       // Ждём отрисовку рамки, если плагин поднялся раньше приложения.
       const startTimer = window.setTimeout(() => {
         firstApply();
-        const frame = frameOf();
-        if (frame !== null) observer.observe(frame, { attributes: true, attributeFilter: ['style'] });
-        window.addEventListener('resize', schedule);
+        connectObserver();
       }, 60);
+      const stopWatchingVisibility = pauseWhenHidden(document, connectObserver, disconnectObserver);
       window.addEventListener('pointerdown', onPointerDown, true);
 
       /** Откатить твик: снять слушатели, вернуть сетку приложения. */
       freePanelsBridge.reset = () => {
         window.clearTimeout(startTimer);
+        stopWatchingVisibility();
+        disconnectObserver();
         window.removeEventListener('pointerdown', onPointerDown, true);
         window.removeEventListener('resize', schedule);
         window.removeEventListener('pointermove', onPointerMove, true);
@@ -1899,6 +2118,83 @@ window.__ModuleLoader__.load({
         },
       };
     }
+
+    /* #region tweak-watch-helpers */
+
+    /**
+     * Наблюдать за документом, только пока вкладка видима.
+     *
+     * На телефоне страница часто уходит в фон, а наблюдатели продолжают
+     * получать записи и будить кадр: работа идёт, интерфейса не видно, батарея
+     * и CPU тратятся. При возврате наблюдатели включаются заново и догоняют
+     * изменения одним проходом — поведение твика от паузы не меняется.
+     * @param {object} doc - документ страницы.
+     * @param {Function} connect - включить наблюдение (идемпотентно).
+     * @param {Function} disconnect - выключить наблюдение.
+     * @returns {Function} снятие подписки на видимость.
+     */
+    function pauseWhenHidden(doc, connect, disconnect) {
+      if (typeof doc?.addEventListener !== 'function') return () => {};
+      const onVisibility = () => {
+        // Заглушки без visibilityState считаются видимой страницей.
+        if (doc.visibilityState === 'hidden') disconnect();
+        else connect();
+      };
+      doc.addEventListener('visibilitychange', onVisibility);
+      return () => doc.removeEventListener('visibilitychange', onVisibility);
+    }
+
+    /**
+     * Стоит ли реагировать на запись наблюдателя: узел внутри известного корня.
+     *
+     * Дешёвая проверка `closest` по предкам вместо обхода добавленного поддерева:
+     * на телефоне в кадре появляются сотни узлов чата, и обходить каждый незачем.
+     * @param {object} node - узел из записи наблюдателя.
+     * @param {string} selector - селектор корня, изменения которого интересны.
+     * @returns {boolean} да или нет.
+     */
+    function touchesRoot(node, selector) {
+      if (node === null || node === undefined || node.nodeType !== 1) return false;
+      if (typeof node.closest === 'function') return node.closest(selector) !== null;
+      const root = typeof document?.querySelector === 'function' ? document.querySelector(selector) : null;
+      return root === null ? false : root.contains?.(node) === true;
+    }
+
+    /**
+     * Прочитать диагностический выключатель твиков.
+     *
+     * Порядок: сохранённое в устройстве значение, затем параметр адреса.
+     * `?tweaks=off` выключает все твики разом и запоминает это, `?tweaks=on`
+     * снимает отметку. Параметр действует сразу при загрузке страницы: рестарт
+     * профиля DSH для диагностики не нужен, живой прод не трогаем.
+     * @param {object | null} storage - хранилище устройства.
+     * @returns {boolean} выключены ли все твики.
+     */
+    function readTweaksSwitch(storage) {
+      let disabled = false;
+      try {
+        disabled = storage?.getItem?.(SWITCH_KEY) === SWITCH_OFF;
+      } catch (_error) {
+        disabled = false;
+      }
+      const location = typeof window === 'undefined' ? undefined : window.location;
+      const search = typeof location?.search === 'string' ? location.search : '';
+      // Разбор без URLSearchParams: адресная строка бывает и в тестовой заглушке.
+      const match = /[?&]tweaks=(off|on)(?:&|#|$)/i.exec(search);
+      if (match !== null) {
+        const off = match[1].toLowerCase() === 'off';
+        disabled = off;
+        try {
+          if (off) storage?.setItem?.(SWITCH_KEY, SWITCH_OFF);
+          else storage?.removeItem?.(SWITCH_KEY);
+        } catch (_error) {
+          /* хранилище недоступно: значение действует до перезагрузки */
+        }
+      }
+      return disabled;
+    }
+
+    /* #endregion tweak-watch-helpers */
 
     /**
      * Реестр твиков пакета.
@@ -3972,7 +4268,6 @@ window.__ModuleLoader__.load({
       }
 
       const position = () => {
-        if (command) card.setAttribute('data-tweaks-mode-chip', ''); else card.removeAttribute('data-tweaks-mode-chip');
         if (!mobileComposerDevice(view)) { card.removeAttribute('data-mobile-composer'); restoreMenus(); return; }
         filterPlusMenu();
         const vp = view.visualViewport, height = vp?.height || view.innerHeight, width = vp?.width || view.innerWidth;
@@ -4051,7 +4346,7 @@ window.__ModuleLoader__.load({
         document.removeEventListener?.('pointerdown', onOutsidePointer, true);
         document.removeEventListener?.('keydown', onEscape, true);
         view.removeEventListener?.('resize', schedule); view.visualViewport?.removeEventListener?.('resize', schedule); view.visualViewport?.removeEventListener?.('scroll', schedule); media?.removeEventListener?.('change', schedule);
-        card.removeAttribute('data-mobile-composer'); card.removeAttribute('data-tweaks-mode-chip'); card.style.removeProperty('--dsh-mobile-text-cap'); restoreMenus();
+        card.removeAttribute('data-mobile-composer'); card.style.removeProperty('--dsh-mobile-text-cap'); restoreMenus();
         plusMenuOpen = false; plusMenuSeen = false;
       };
     }
@@ -4169,18 +4464,6 @@ window.__ModuleLoader__.load({
       }, [inputActions]);
       return React.createElement('span', { ref: marker, hidden: true, 'data-mobile-composer-binding': '' });
     }
-    function ComposerModeChip({ useInput, commandBridge }) {
-      const state = typeof useInput === 'function' ? useInput((input) => input) : undefined;
-      if (!state?.claim || !commandBridge) return null;
-      const raw = String(state.claim.name || state.claim.token.replace(/^\//, '')).trim();
-      const label = raw === '' ? 'Mode' : raw.charAt(0).toUpperCase() + raw.slice(1);
-      const remove = `Remove ${label}`;
-      return React.createElement('button', {
-        type: 'button', 'data-tweaks-command-mode': '', title: remove, 'aria-label': remove,
-        onPointerDown: (event) => event.preventDefault(), onMouseDown: (event) => event.preventDefault(),
-        onClick: (event) => { event.preventDefault(); commandBridge.clear(); },
-      }, label + ' ×');
-    }
     /**
      * Убрать поиск из маленьких меню на touch: он нужен большим спискам,
      * а в меню прав/команд только занимает место. Скрытый input не получает
@@ -4214,29 +4497,69 @@ window.__ModuleLoader__.load({
           }
         }
       }
-      /** Пройти по всем открытым меню. */
+      /** Селектор меню, которые обходит твик. */
+      const MENU_SELECTOR = '[role="menu"], [role="listbox"], [data-trigger-menu]';
+      /**
+       * Пройти по всем открытым меню.
+       * @returns {void}
+       */
       function sweep() {
-        for (const menu of doc.querySelectorAll('[role="menu"], [role="listbox"], [data-trigger-menu]')) hide(menu);
+        if (disposed) return;
+        for (const menu of doc.querySelectorAll(MENU_SELECTOR)) hide(menu);
       }
       let frame = null;
+      let scheduled = false;
+      let observing = false;
+      let disposed = false;
+      const run = () => {
+        frame = null;
+        scheduled = false;
+        sweep();
+      };
       const schedule = () => {
-        if (frame !== null) return;
-        const run = () => { frame = null; sweep(); };
+        if (scheduled || disposed) return;
+        scheduled = true;
         if (typeof view.requestAnimationFrame === 'function') frame = view.requestAnimationFrame(run);
         else frame = view.setTimeout(run, 0);
       };
-      const observer = new view.MutationObserver(schedule);
-      observer.observe(doc.body ?? doc.documentElement, { childList: true, subtree: true });
+      const observer = new view.MutationObserver((records) => {
+        // Интересуют только узлы меню: чат перерисовывается постоянно, и каждая
+        // его запись иначе заказывала бы проход по всем меню документа.
+        for (const record of records) {
+          for (const node of record.addedNodes ?? []) {
+            if (touchesRoot(node, MENU_SELECTOR)) {
+              schedule();
+              return;
+            }
+          }
+        }
+      });
+      /** Включить наблюдение и один раз пройти по меню. */
+      const connectObserver = () => {
+        if (observing) return;
+        observing = true;
+        observer.observe(doc.body ?? doc.documentElement, { childList: true, subtree: true });
+        schedule();
+      };
+      /** Выключить наблюдение, пока вкладка скрыта. */
+      const disconnectObserver = () => {
+        if (!observing) return;
+        observing = false;
+        observer.disconnect();
+      };
+      const stopWatchingVisibility = pauseWhenHidden(doc, connectObserver, disconnectObserver);
       const onFocus = (event) => {
         const input = event.target;
         if (input?.getAttribute?.('data-dsh-tweaks-search-hidden') === null) return;
-        const menu = input.closest?.('[role="menu"], [role="listbox"], [data-trigger-menu]');
+        const menu = input.closest?.(MENU_SELECTOR);
         menu?.querySelector('button, [role="option"], [role="menuitem"]')?.focus?.();
       };
       doc.addEventListener('focusin', onFocus, true);
-      sweep();
+      connectObserver();
       return () => {
-        observer.disconnect();
+        disposed = true;
+        disconnectObserver();
+        stopWatchingVisibility();
         doc.removeEventListener('focusin', onFocus, true);
         if (frame !== null) view.cancelAnimationFrame?.(frame);
       };
@@ -4339,14 +4662,39 @@ window.__ModuleLoader__.load({
         else window.setTimeout(run, 50);
       };
 
-      const observer = typeof MutationObserver === 'function' ? new MutationObserver(schedule) : null;
-      observer?.observe(doc.body ?? doc.documentElement, { childList: true, subtree: true });
-      timer = window.setInterval(sweep, 1500);
-      schedule();
+      const observer = typeof MutationObserver === 'function' ? new MutationObserver((records) => {
+        // Застрявшая строка живёт в доке очереди, а не в любом узле ленты:
+        // без этого фильтра каждая отрисовка чата заказывала бы проход.
+        for (const record of records) {
+          for (const node of record.addedNodes ?? []) {
+            if (touchesRoot(node, '[data-queue-dock], [data-submission-echo]')) {
+              schedule();
+              return;
+            }
+          }
+        }
+      }) : null;
+      /** Включить наблюдение и опрос, пока вкладка видима. */
+      const connectObserver = () => {
+        if (disposed || timer !== null) return;
+        observer?.observe(doc.body ?? doc.documentElement, { childList: true, subtree: true });
+        timer = window.setInterval(sweep, 1500);
+        schedule();
+      };
+      /** Выключить наблюдение и опрос, пока вкладка скрыта. */
+      const disconnectObserver = () => {
+        observer?.disconnect();
+        if (timer !== null) {
+          window.clearInterval(timer);
+          timer = null;
+        }
+      };
+      const stopWatchingVisibility = pauseWhenHidden(doc, connectObserver, disconnectObserver);
+      connectObserver();
       own(() => {
         disposed = true;
-        observer?.disconnect();
-        if (timer !== null) window.clearInterval(timer);
+        stopWatchingVisibility();
+        disconnectObserver();
         for (const button of enabled) {
           button.removeAttribute('data-dsh-tweaks-pending-edit');
           button.disabled = true;
@@ -4365,16 +4713,12 @@ window.__ModuleLoader__.load({
       const slots = typeof ctx?.get === 'function' ? ctx.get('slots') : undefined;
       if (typeof slots?.inject !== 'function' || typeof slots?.register !== 'function') return;
       const style = document.createElement('style');
-      style.textContent = '[data-tweaks-mode-chip] [data-composer-command]{display:none!important}[data-mobile-composer] [data-input-scroll]{max-height:var(--dsh-mobile-text-cap)!important;overflow-y:auto!important;overscroll-behavior:contain;min-height:0}[data-mobile-composer]>div:last-child{flex-shrink:0}[data-mobile-composer] [data-composer-input]{-webkit-composition-fill-color:transparent!important;-webkit-composition-frame-color:transparent!important}[data-tweaks-command-mode]{border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:2px 8px;font-size:12px;line-height:18px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);cursor:pointer;flex:none}';
+      style.textContent = '[data-mobile-composer] [data-input-scroll]{max-height:var(--dsh-mobile-text-cap)!important;overflow-y:auto!important;overscroll-behavior:contain;min-height:0}[data-mobile-composer]>div:last-child{flex-shrink:0}[data-mobile-composer] [data-composer-input]{-webkit-composition-fill-color:transparent!important;-webkit-composition-frame-color:transparent!important}';
       document.head?.appendChild(style); api.own(() => style.remove());
       const inject = (sessionId) => ({ commandBridge: mobileCommandBridge(ctx, sessionId) });
       api.own(slots.inject('conversation.input.overlay', () => slots.register(
         { name: 'conversation.input.overlay', id: 'mobile-composer-newlines', order: -1000, inject },
         (props) => React.createElement(MobileComposerBinding, props),
-      )));
-      api.own(slots.inject('conversation.input.left', () => slots.register(
-        { name: 'conversation.input.left', id: 'composer-command-mode-chip', order: -100, inject },
-        (props) => React.createElement(ComposerModeChip, props),
       )));
     }
 
@@ -4748,6 +5092,7 @@ window.__ModuleLoader__.load({
       own(installMobileFocusPatch(typeof window === 'undefined' ? undefined : window, suppressor));
       own(setupMobileRightTabs(ctx, api));
       own(setupTabActions());
+      own(setupMobileOverlays());
 
       let disposed = false;
       let leaving = false;
@@ -5322,14 +5667,48 @@ window.__ModuleLoader__.load({
         else window.setTimeout(run, 0);
       };
 
-      const observer = new MutationObserver(schedule);
-      observer.observe(document.body ?? document.documentElement, { childList: true, subtree: true });
+      // Только шапка и её меню: собирать меню заново из-за перерисовки ленты ни к чему.
+      const HEADER_WATCH = [
+        '[class*="_moreButton"]',
+        '[role="menu"]',
+        '[class*="_viewsMoreMenu"]',
+        '[data-slot="conversation.session.header.actions"]',
+        '[data-slot="conversation.session.header.utilities"]',
+        '[data-dsh-tweaks-more-slot]',
+      ].join(', ');
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          for (const node of record.addedNodes ?? []) {
+            if (touchesRoot(node, HEADER_WATCH)) {
+              schedule();
+              return;
+            }
+          }
+        }
+      });
+      let observing = false;
+      /** Включить наблюдение и один раз собрать меню. */
+      const connectObserver = () => {
+        if (observing) return;
+        observing = true;
+        observer.observe(document.body ?? document.documentElement, { childList: true, subtree: true });
+        schedule();
+      };
+      /** Выключить наблюдение, пока вкладка скрыта. */
+      const disconnectObserver = () => {
+        if (!observing) return;
+        observing = false;
+        observer.disconnect();
+      };
+      const stopWatchingVisibility = pauseWhenHidden(document, connectObserver, disconnectObserver);
       const onClick = (event) => {
         if (event.target?.closest?.('[class*="_moreButton"]') !== null) schedule();
       };
       document.addEventListener('click', onClick, true);
+      connectObserver();
       return () => {
-        observer.disconnect();
+        disconnectObserver();
+        stopWatchingVisibility();
         document.removeEventListener('click', onClick, true);
       };
     }
@@ -5998,10 +6377,39 @@ window.__ModuleLoader__.load({
       document.addEventListener?.('click', onClick, true);
       own(() => document.removeEventListener?.('click', onClick, true));
 
-      const observer = typeof MutationObserver === 'function' ? new MutationObserver(schedule) : null;
-      observer?.observe(document.body ?? document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] });
-      own(() => observer?.disconnect());
-      schedule();
+      const observer = typeof MutationObserver === 'function' ? new MutationObserver((records) => {
+        // Карандаш живёт в доке очереди: остальные правки документа не повод
+        // перебирать строки очереди на каждом кадре.
+        for (const record of records) {
+          const nodes = record.type === 'attributes' ? [record.target] : [...(record.addedNodes ?? [])];
+          for (const node of nodes) {
+            if (touchesRoot(node, '[data-queue-dock]')) {
+              schedule();
+              return;
+            }
+          }
+        }
+      }) : null;
+      let observing = false;
+      /** Включить наблюдение и один раз разрешить карандаши. */
+      const connectObserver = () => {
+        if (observing) return;
+        observing = true;
+        observer?.observe(document.body ?? document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] });
+        schedule();
+      };
+      /** Выключить наблюдение, пока вкладка скрыта. */
+      const disconnectObserver = () => {
+        if (!observing) return;
+        observing = false;
+        observer?.disconnect();
+      };
+      const stopWatchingVisibility = pauseWhenHidden(document, connectObserver, disconnectObserver);
+      own(() => {
+        disconnectObserver();
+        stopWatchingVisibility();
+      });
+      connectObserver();
 
       let slots = undefined;
       try {
@@ -6176,12 +6584,68 @@ window.__ModuleLoader__.load({
         else window.setTimeout(place, 0);
       };
 
-      const observer = typeof MutationObserver === 'function' ? new MutationObserver(schedule) : null;
-      observer?.observe(document.body ?? document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['aria-label'] });
-      schedule();
+      // Строка вкладок и слоты шапки: их правки и текст переносим, остальное не наше.
+      const TABS_WATCH = [
+        '[data-conversation-tabs]',
+        '[data-dsh-tweaks-tabs-actions]',
+        '[data-slot="conversation.session.header.actions"]',
+        '[data-slot="conversation.session.header.utilities"]',
+      ].join(', ');
+      const observer = typeof MutationObserver === 'function' ? new MutationObserver((records) => {
+        for (const record of records) {
+          if (record.type === 'characterData') {
+            if (touchesRoot(record.target?.parentElement, TABS_WATCH)) {
+              schedule();
+              return;
+            }
+            continue;
+          }
+          if (record.type === 'attributes') {
+            if (touchesRoot(record.target, TABS_WATCH)) {
+              schedule();
+              return;
+            }
+            continue;
+          }
+          for (const node of record.addedNodes ?? []) {
+            if (touchesRoot(node, TABS_WATCH)) {
+              schedule();
+              return;
+            }
+          }
+        }
+      }) : null;
+      let observing = false;
+      let keepTimer = 0;
+      /** Включить наблюдение и один раз расставить кнопки. */
+      const connectObserver = () => {
+        if (observing || disposed) return;
+        observing = true;
+        observer?.observe(document.body ?? document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['aria-label'] });
+        // Страховка от полного ремоунта шапки: записи наблюдателя по отфильтрованным
+        // узлам могли не прийти, а контейнер кнопок пропал. Раз в 2 с — одна проверка.
+        keepTimer = window.setInterval(() => {
+          if (disposed) return;
+          if (document.querySelector('[data-dsh-tweaks-tabs-actions]') === null) schedule();
+        }, 2000);
+        schedule();
+      };
+      /** Выключить наблюдение, пока вкладка скрыта. */
+      const disconnectObserver = () => {
+        if (!observing) return;
+        observing = false;
+        observer?.disconnect();
+        if (keepTimer !== 0) {
+          window.clearInterval(keepTimer);
+          keepTimer = 0;
+        }
+      };
+      const stopWatchingVisibility = pauseWhenHidden(document, connectObserver, disconnectObserver);
+      connectObserver();
       return () => {
         disposed = true;
-        observer?.disconnect();
+        disconnectObserver();
+        stopWatchingVisibility();
         style.remove();
         for (const [node, origin] of moved) {
           const parent = origin.parent?.isConnected ? origin.parent : document.querySelector('[data-slot="conversation.session.header.actions"]');
@@ -6196,6 +6660,268 @@ window.__ModuleLoader__.load({
     }
 
     /* #endregion tweak-mobile-tabs-actions */
+
+    /* #region tweak-mobile-overlays */
+
+    /** Стили мобильной рамки для тяжёлых body-оверлеев приложения. */
+    const MOBILE_OVERLAY_STYLE = [
+      '@media (max-width:720px){',
+      '[data-dsh-tweaks-mobile-overlay]{box-sizing:border-box;position:fixed!important;',
+      'top:var(--dsh-tweaks-mobile-overlay-top,8px)!important;left:8px!important;right:8px!important;',
+      'width:auto!important;min-width:0!important;max-width:none!important;height:auto!important;',
+      'max-height:calc(100vh - var(--dsh-tweaks-mobile-overlay-top,8px) - 16px)!important;',
+      'max-height:calc(100dvh - var(--dsh-tweaks-mobile-overlay-top,8px) - 16px)!important;',
+      'margin:0!important;padding-bottom:0!important;display:flex!important;flex-direction:column!important;',
+      'overflow:hidden!important;border-radius:var(--dsw-radius-lg)!important;',
+      'z-index:130!important;zoom:1!important;transform:none!important}',
+      '[data-dsh-tweaks-mobile-overlay] > *{min-height:0}',
+      '[data-dsh-tweaks-mobile-overlay] > [class*="_body"],[data-dsh-tweaks-mobile-overlay] > [class*="_menuBody"]{',
+      'flex:1 1 auto!important;min-height:0!important;overflow-y:auto!important;overscroll-behavior:contain}',
+      '[data-dsh-tweaks-overlay-backdrop]{position:fixed;inset:0;z-index:129;',
+      'background:color-mix(in srgb,var(--dsw-alias-bg-base) 55%,transparent);',
+      'backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px)}',
+      '[data-dsh-tweaks-overlay-close]{position:fixed;top:calc(var(--dsh-tweaks-mobile-overlay-top,8px) + 6px);right:16px;',
+      'z-index:131;box-sizing:border-box;width:30px;height:30px;padding:0;border:.5px solid var(--dsw-alias-border-l2);',
+      'border-radius:999px;background:var(--dsw-specific-menu);color:var(--dsw-alias-label-primary);',
+      'box-shadow:var(--dsw-elevation-prominent);font:18px/28px system-ui,sans-serif;cursor:pointer;',
+      'display:inline-flex;align-items:center;justify-content:center}',
+      '}',
+    ].join('');
+
+    /**
+     * На телефоне вписать body-оверлеи Agent Team и Subagents в экран и дать
+     * видимый выход. Оба окна приложение порталит в body, поэтому они не
+     * подчиняются мобильной сетке; при зуме их размеры ещё и умножаются.
+     * @returns {Function} очистка наблюдателя и добавленных слоёв.
+     */
+    function setupMobileOverlays() {
+      if (typeof window === 'undefined' || !mobileComposerDevice(window)) return () => {};
+      const doc = window.document;
+      const style = doc.createElement('style');
+      style.dataset.dshMobileOverlays = '';
+      style.textContent = MOBILE_OVERLAY_STYLE;
+      doc.head?.appendChild(style);
+      let backdrop = null;
+      let closeButton = null;
+      let activeKind = null;
+      let scheduled = false;
+      let disposed = false;
+      const marked = new Set();
+
+      /** Сейчас телефонный (узкий) режим? */
+      const isPhone = () => (Number(window.innerWidth) || 0) <= 720;
+
+      /** Панель Agent Team. */
+      const teamPanel = () => doc.querySelector('[data-team-panel]');
+
+      /**
+       * Меню субагентов: рисуется в body как fixed-предок `[role="tree"]`.
+       * @returns {object | null} корень меню либо null.
+       */
+      const subagentMenu = () => {
+        for (const tree of doc.querySelectorAll('[role="tree"]')) {
+          let node = tree;
+          while (node !== null && node !== doc.body && getComputedStyle(node).position !== 'fixed') {
+            node = node.parentElement;
+          }
+          if (node !== null && node !== doc.body) return node;
+        }
+        return null;
+      };
+
+      /** Пометить живой оверлей и вернуть его тип. */
+      const mark = (node, kind) => {
+        if (node === null || node === undefined) return null;
+        if (!marked.has(node)) {
+          marked.add(node);
+          node.setAttribute('data-dsh-tweaks-mobile-overlay', '');
+          node.setAttribute('data-dsh-tweaks-overlay-kind', kind);
+        }
+        return kind;
+      };
+
+      /** Убрать затемнение и крестик. */
+      const clearChrome = () => {
+        if (backdrop !== null) backdrop.remove();
+        if (closeButton !== null) closeButton.remove();
+        backdrop = null;
+        closeButton = null;
+        activeKind = null;
+      };
+
+      /**
+       * Закрыть активное окно штатным способом приложения.
+       * @returns {void}
+       */
+      const closeActive = () => {
+        if (activeKind === 'subagents') {
+          const trigger = doc.querySelector('button[aria-haspopup="tree"][aria-expanded="true"]');
+          if (trigger !== null) {
+            trigger.click();
+            return;
+          }
+        }
+        // Agent Team слушает Escape на document; для subagents это запасной путь.
+        try {
+          doc.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        } catch (_error) {
+          /* остаётся observer: панель закроется другим способом */
+        }
+      };
+
+      /** Создать затемнение и кнопку закрытия один раз. */
+      const ensureChrome = () => {
+        if (backdrop === null) {
+          backdrop = doc.createElement('div');
+          backdrop.setAttribute('data-dsh-tweaks-overlay-backdrop', '');
+          backdrop.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            closeActive();
+            schedule();
+          });
+          doc.body?.appendChild(backdrop);
+        }
+        if (closeButton === null) {
+          closeButton = doc.createElement('button');
+          closeButton.type = 'button';
+          closeButton.setAttribute('data-dsh-tweaks-overlay-close', '');
+          closeButton.setAttribute('aria-label', 'Закрыть');
+          closeButton.textContent = '×';
+          closeButton.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            closeActive();
+            schedule();
+          });
+          doc.body?.appendChild(closeButton);
+        }
+      };
+
+      /** Актуализировать верхнюю границу/слои по текущей шапке. */
+      const update = () => {
+        scheduled = false;
+        if (disposed) return;
+        if (!isPhone()) {
+          clearChrome();
+          return;
+        }
+        // data-slot шапки — display:contents, у него нет rect. Берём реальный
+        // header и строку вкладок: их низ и есть граница, ниже которой окно
+        // не должно перекрывать Chat/Trajectory/Team/Subagents.
+        const headerCandidates = [
+          doc.querySelector('[data-conversation-tabs]')?.parentElement,
+          doc.querySelector('header'),
+        ];
+        let headerBottom = 0;
+        for (const candidate of headerCandidates) {
+          const rect = candidate?.getBoundingClientRect?.();
+          if (rect !== undefined && rect.width > 0 && rect.bottom > headerBottom) headerBottom = rect.bottom;
+        }
+        const top = Math.max(8, Math.round(headerBottom > 0 ? headerBottom + 4 : 8));
+        const team = teamPanel();
+        const subagents = subagentMenu();
+        const visible = (node) => {
+          if (node === null || node === undefined) return false;
+          const rect = node.getBoundingClientRect?.();
+          return rect !== undefined && rect.width > 1 && rect.height > 1;
+        };
+        const teamKind = visible(team) ? mark(team, 'team') : null;
+        const subagentKind = visible(subagents) ? mark(subagents, 'subagents') : null;
+        const kind = subagentKind ?? teamKind;
+        if (kind === null) {
+          clearChrome();
+          return;
+        }
+        doc.documentElement?.style?.setProperty('--dsh-tweaks-mobile-overlay-top', `${top}px`);
+        activeKind = kind;
+        ensureChrome();
+      };
+
+      const schedule = () => {
+        if (disposed || scheduled) return;
+        scheduled = true;
+        if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(update);
+        else window.setTimeout(update, 0);
+      };
+
+      // Только сами оверлеи, их меню и триггер меню субагентов: перерисовка
+      // ленты и правки стилей чата не повод пересобирать рамку окон.
+      const OVERLAY_WATCH = '[data-team-panel], [role="tree"], [aria-haspopup="tree"], [data-dsh-tweaks-mobile-overlay]';
+      /**
+       * Добавленный узел — оверлей или его меню.
+       *
+       * Оверлеи приложение порталит в `body` мимо `#root`, поэтому осмотр
+       * поддерева ограничен слоями: внутри `#root` смотрим только предков.
+       * @param {Element} node - добавленный узел.
+       * @returns {boolean} да или нет.
+       */
+      const overlayAdded = (node) => {
+        if (node === null || node === undefined || node.nodeType !== 1) return false;
+        if (touchesRoot(node, OVERLAY_WATCH)) return true;
+        if (typeof node.closest !== 'function' || node.closest('#root') !== null) return false;
+        return typeof node.querySelector === 'function' && node.querySelector(OVERLAY_WATCH) !== null;
+      };
+      const observer = typeof MutationObserver === 'function' ? new MutationObserver((records) => {
+        for (const record of records) {
+          if (record.type === 'attributes') {
+            if (touchesRoot(record.target, OVERLAY_WATCH)) {
+              schedule();
+              return;
+            }
+            continue;
+          }
+          for (const node of record.addedNodes ?? []) {
+            if (overlayAdded(node)) {
+              schedule();
+              return;
+            }
+          }
+        }
+      }) : null;
+      let observing = false;
+      /** Включить наблюдение и один раз пересобрать рамку окон. */
+      const connectObserver = () => {
+        if (observing || disposed) return;
+        observing = true;
+        observer?.observe(doc.body ?? doc.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'aria-expanded'] });
+        schedule();
+      };
+      /** Выключить наблюдение, пока вкладка скрыта. */
+      const disconnectObserver = () => {
+        if (!observing) return;
+        observing = false;
+        observer?.disconnect();
+      };
+      const stopWatchingVisibility = pauseWhenHidden(doc, connectObserver, disconnectObserver);
+      window.addEventListener('resize', schedule);
+      window.addEventListener('dsh-ui-zoom-change', schedule);
+      doc.addEventListener('scroll', schedule, true);
+      const visual = window.visualViewport;
+      visual?.addEventListener?.('resize', schedule);
+      visual?.addEventListener?.('scroll', schedule);
+      connectObserver();
+      return () => {
+        disposed = true;
+        stopWatchingVisibility();
+        disconnectObserver();
+        style.remove();
+        window.removeEventListener('resize', schedule);
+        window.removeEventListener('dsh-ui-zoom-change', schedule);
+        doc.removeEventListener('scroll', schedule, true);
+        visual?.removeEventListener?.('resize', schedule);
+        visual?.removeEventListener?.('scroll', schedule);
+        clearChrome();
+        for (const node of marked) {
+          node.removeAttribute?.('data-dsh-tweaks-mobile-overlay');
+          node.removeAttribute?.('data-dsh-tweaks-overlay-kind');
+        }
+        marked.clear();
+        doc.documentElement?.style?.removeProperty('--dsh-tweaks-mobile-overlay-top');
+      };
+    }
+
+    /* #endregion tweak-mobile-overlays */
 
     /* #region tweak-file-download */
 
@@ -6645,6 +7371,12 @@ window.__ModuleLoader__.load({
     const activeTweaks = new Map();
 
     /**
+     * Диагностический выключатель: все твики выключены через `?tweaks=off`.
+     * Форма флагов показывает по нему, почему включённые галочки ничего не делают.
+     */
+    let tweaksSwitchOff = false;
+
+    /**
      * Включить твик, если он ещё не включён.
      * @param {object} ctx - клиентский контекст плагина.
      * @param {string} id - id твика в реестре.
@@ -6704,11 +7436,18 @@ window.__ModuleLoader__.load({
      * Прочитать флаги твиков из снимка конфигурации.
      *
      * Пока конфигурация не готова, работают дефолты реестра: пакет ведёт себя так,
-     * как вёл до появления флагов.
+     * как вёл до появления флагов. Диагностический выключатель `?tweaks=off`
+     * гасит все твики независимо от галочек: он и нужен, чтобы проверить
+     * зависание без нашего слоя, не снимая флаги по одному.
      * @param {object | undefined} controller - форма записи сервиса configForms.
      * @returns {object} id твика → включён ли он.
      */
     function readFlags(controller) {
+      if (tweaksSwitchOff) {
+        const off = {};
+        for (const id of Object.keys(TWEAKS)) off[id] = false;
+        return off;
+      }
       const snapshot = controller?.getSnapshot?.();
       const value =
         snapshot?.status === 'ready' && typeof snapshot.value === 'object' && snapshot.value !== null
@@ -6821,11 +7560,16 @@ window.__ModuleLoader__.load({
         );
         // Твик может показать рядом со своим переключателем дополнительную строку:
         // например, «речь» — кнопку загрузки модели с прогрессом.
-        if (checked && typeof tweak.renderDetail === 'function') {
+        if (checked && !tweaksSwitchOff && typeof tweak.renderDetail === 'function') {
           rows.push(React.createElement('div', { key: `${id}-detail` }, tweak.renderDetail({ controller, t, translate })));
         }
       }
       const notices = [React.createElement('p', { key: 'hint', style: FORM_NOTICE_STYLE }, copy('form.hint'))];
+      if (tweaksSwitchOff) {
+        notices.push(
+          React.createElement('p', { key: 'switch-off', style: FORM_NOTICE_STYLE }, copy('form.switchOff')),
+        );
+      }
       if (!ready) {
         notices.push(
           React.createElement('p', { key: 'off', style: FORM_NOTICE_STYLE }, copy('form.unavailable')),
@@ -6866,6 +7610,9 @@ window.__ModuleLoader__.load({
         } catch (_error) {
           storage = null;
         }
+        // Диагностический выключатель читается до первого reconcile: `?tweaks=off`
+        // должен не дать включиться ни одному твику, а не погасить их после старта.
+        tweaksSwitchOff = readTweaksSwitch(storage);
         /**
          * Записать этап инициализации в хранилище устройства.
          * @param {string} stage - этап инициализации.
@@ -6946,8 +7693,14 @@ window.__ModuleLoader__.load({
             }
           }
           // Отметка пишется и здесь, а не только на старте: по ней видно, какие
-          // твики активны после каждой правки флагов.
-          markReady(`applied: ${[...activeTweaks.keys()].join(',') || 'none'}`);
+          // твики активны после каждой правки флагов. Состояние выключателя
+          // пишется отдельно: по отметке на реальном телефоне видно, применён ли
+          // `?tweaks=off` — иначе выключенные твики неотличимы от сломанных.
+          markReady(
+            tweaksSwitchOff
+              ? 'applied: none (tweaks=off)'
+              : `applied: ${[...activeTweaks.keys()].join(',') || 'none'}`,
+          );
         };
         reconcile();
         if (typeof controller?.subscribe === 'function') scope.own(controller.subscribe(reconcile));

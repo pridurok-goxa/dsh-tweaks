@@ -2142,13 +2142,15 @@ check('нижний индикатор: режим из настроек уст�
     assert.equal(lampText.length, 1, `режим ${dockMode}: лампа на месте`);
   }
 
-  // Настройка по умолчанию — «Только время»: лампа и голый отсчёт без «ещё» и адреса.
+  // Настройка по умолчанию — «Индикатор и время»: лампа и текущее время браузера.
+  // Отсчёт до смены тарифа живёт в подсказке (aria-label) и в панели; в доке
+  // показывается время (c68a31e «время в доке»), а не «N ч MM мин».
   const fresh = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
   const freshTree = renderSlot(dockRow(fresh));
   const freshTexts = indicatorTexts(freshTree);
-  assert.equal(freshTexts.length, 1, 'по умолчанию показывается только отсчёт');
-  assert.match(freshTexts[0], /^\d+ ч \d{2} мин$/, 'по умолчанию — голое время, без «ещё» и адреса');
-  assert.match(JSON.stringify(freshTree), /-lamp/, 'в варианте «только время» лампа тоже показывается');
+  assert.equal(freshTexts.length, 1, 'по умолчанию показывается только время: одно текстовое поле');
+  assert.match(freshTexts[0], /^\d{2}:\d{2}$/, 'по умолчанию — голое время без «ещё» и адреса');
+  assert.match(JSON.stringify(freshTree), /-lamp/, 'в варианте «индикатор и время» лампа тоже показывается');
 });
 
 check('настройки твика предлагают режим индикатора и время предупреждения', () => {
@@ -2220,6 +2222,28 @@ check('панель раскрывается вверх, ограничена о
   assert.ok(source.includes('LIGHT_PANEL_MIN_HEIGHT = 200'), 'минимальная высота панели задана');
 });
 
+check('план-режим: только системный чип, вход из плюс-меню', () => {
+  const source = fs.readFileSync(CLIENT, 'utf8');
+  assert.equal(source.includes('ComposerModeChip'), false, 'кастомный чип удалён');
+  assert.equal(source.includes('composer-command-mode-chip'), false, 'слот кастомного чипа не регистрируется');
+  assert.equal(source.includes('data-tweaks-mode-chip'), false, 'карточка больше не помечается для скрытия нативного чипа');
+  assert.equal(source.includes("id: 'composer-command-mode-chip'"), false, 'старый id не остался');
+  assert.ok(source.includes("new Set(['File', 'Goal', 'Plan'"), 'Plan остаётся в плюс-меню');
+});
+
+check('мобильные окна Agent Team и Subagents вписаны в экран и закрываются', () => {
+  const source = fs.readFileSync(CLIENT, 'utf8');
+  assert.ok(source.includes('function setupMobileOverlays'), 'есть менеджер мобильных оверлеев');
+  assert.ok(source.includes("doc.querySelector('[data-team-panel]')"), 'Agent Team находится по data-team-panel');
+  assert.ok(source.includes(`doc.querySelectorAll('[role="tree"]')`), 'меню субагентов находится по role=tree');
+  assert.ok(source.includes("'data-dsh-tweaks-mobile-overlay'"), 'оверлей получает маркер');
+  assert.ok(source.includes("'data-dsh-tweaks-overlay-backdrop'"), 'есть затемнение');
+  assert.ok(source.includes("'data-dsh-tweaks-overlay-close'"), 'есть кнопка закрытия');
+  assert.ok(source.includes('zoom:1!important'), 'попап-зум нейтрализован на телефоне');
+  assert.ok(source.includes('100dvh - var(--dsh-tweaks-mobile-overlay-top'), 'высота ограничена видимым экраном');
+  assert.ok(source.includes('own(setupMobileOverlays())'), 'менеджер подключён к мобильному твику');
+});
+
 check('шкала часов — горизонтальная полоска из красных и зелёных кружочков', () => {
   const css = fs.readFileSync(CLIENT, 'utf8');
   const stripStart = css.indexOf('function TrafficHourStrip');
@@ -2254,35 +2278,34 @@ check('подписи часов стоят под каждым кружком �
   assert.doesNotMatch(panel, /light\.currentSlot/, 'старого формата «сейчас» без диапазона нет');
 });
 
-check('волны ограничены лампой и синхронны с её пульсацией', () => {
+check('лампа статична: бесконечных анимаций в доке нет', () => {
+  // c68a31e убрал дыхание и волны вокруг лампы: бесконечные анимации заставляли
+  // софтверный рендер (headless Chrome, слабый телефон) перерисовывать кадр
+  // постоянно. Лампа меняет только цвет, размер задаёт тесный контейнер.
   const css = fs.readFileSync(CLIENT, 'utf8');
-  // Волна позиционируется в тесном контейнере лампы, а не в кнопке (у кнопки
-  // нет position:relative — иначе волна улетала на весь экран).
   assert.match(css, /-lamp-wrap\{position:relative[^}]*width:16px;height:16px/, 'контейнер лампы задаёт малый радиус');
-  assert.match(css, /-wave\{[^}]*position:absolute;inset:0[^}]*border:1\.5px solid/, 'волна занимает только контейнер лампы');
-  // В исходнике имена классов подставлены через ${LIGHT_CLASS} — сравниваем с этой формой.
-  assert.ok(
-    css.includes('${LIGHT_CLASS}-pulse{0%{transform:scale(.85);opacity:.8}60%{transform:scale(1);opacity:1}'),
-    'лампа дышит от меньшего размера до нормального',
-  );
-  assert.ok(
-    css.includes('${LIGHT_CLASS}-wave{0%,55%{transform:scale(1);opacity:0}62%{opacity:.5}100%{transform:scale(2.6);opacity:0}}'),
-    'волна уходит на пике роста и мягко гаснет на 2.6 диаметра',
-  );
   const indicator = css.slice(css.indexOf('function TrafficLightIndicator'), css.indexOf('function TrafficLightSettings'));
   assert.match(indicator, /-lamp-wrap/, 'разметка собирает контейнер лампы');
-  assert.match(indicator, /key: 'wave'/, 'волна — ребёнок контейнера лампы, а не кнопки');
+  assert.match(indicator, /className: `\$\{LIGHT_CLASS\}-lamp`/, 'лампа — круг с цветом статуса');
+  assert.doesNotMatch(indicator, /key: 'wave'/, 'волны вокруг лампы из разметки убраны');
   assert.doesNotMatch(indicator, /wave-a|wave-b/, 'двух разлетающихся колец из кнопки больше нет');
+  // Лампа и её контейнер не получают animation в индикаторе.
+  assert.doesNotMatch(indicator, /animation:/, 'лампа индикатора не анимируется');
 });
 
-check('на красном свете индикатор работы сессий краснеет и пульсирует', () => {
+check('на красном свете индикатор работы сессий краснеет без пульсации', () => {
+  // c68a31e убрал бесконечную пульсацию спиннера: цвет остался, анимации нет.
   const css = fs.readFileSync(CLIENT, 'utf8');
   assert.ok(
     css.includes('html[${LIGHT_RED_ATTR}] [class*="_sessionRow"] svg[data-state="ongoing"]{'),
     'правило целится в индикатор работы строки сессии',
   );
   assert.ok(css.includes('color:var(--dsw-alias-state-error-primary)'), 'спиннер красится токеном ошибки');
-  assert.ok(css.includes('${LIGHT_CLASS}-pulse 2s ease-in-out infinite}'), 'спиннер пульсирует в такт лампам');
+  assert.equal(
+    css.includes('${LIGHT_CLASS}-pulse 2s ease-in-out infinite}'),
+    false,
+    'пульсации спиннера нет: бесконечная анимация жгла CPU',
+  );
 
   // Замораживаем часы: среда 10:00 по Пекину — красное окно.
   const peak = Date.UTC(2026, 9, 14, 2, 0);
