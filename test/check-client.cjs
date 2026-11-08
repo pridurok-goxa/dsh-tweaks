@@ -290,6 +290,16 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
   const remoteFace = { $mount: () => Promise.resolve(() => {}), $stream: () => ({}) };
   /** Запросы смены модели, которые твик «отправить с Flash» отправил в Remote-шину. */
   const remoteSelects = [];
+  /** Запросы смены модели через штатный сервис `modelDirectories`. */
+  const directorySelects = [];
+  const modelDirectoriesFace = {
+    directoryFor: (sessionId) => ({
+      select: (request) => {
+        directorySelects.push({ sessionId, ...request });
+        return Promise.resolve({ ok: true, value: undefined });
+      },
+    }),
+  };
   remoteFace.session = {
     selectModel: (request) => {
       remoteSelects.push(request);
@@ -474,6 +484,7 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
       // Шов распознавания — namespace-служба Remote-шины под ключом remote.speech.
       if (name === 'remote.speech') return speechNow;
       if (name === 'remote') return remoteFace;
+      if (name === 'modelDirectories') return modelDirectoriesFace;
       if (name === 'layout') return { toggleSidebar: () => layoutCalls.push('toggle') };
       // Прежнее (неверное) имя хост-сервиса: швом оно не является и не должно
       // когда-либо подхватываться — проверка это стережёт.
@@ -569,6 +580,7 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     disposeListeners,
     reactCleanups,
     remoteSelects,
+    directorySelects,
     /** Действия раскладки, которые запросил твик мобильного меню. */
     layoutCalls: () => layoutCalls,
     /** Сколько обработчиков этого типа висит на window. */
@@ -1897,14 +1909,14 @@ checkAsync('кнопка «отправить с Flash» меняет модел
   assert.match(String((action.children ?? []).join('')), /Flash/, 'кнопка называет модель-замену');
   await action.props.onClick();
   assert.deepEqual(
-    plain(env.remoteSelects.at(-1)),
+    plain(env.directorySelects.at(-1)),
     {
       sessionId: 'session-test',
       provider: 'deepseek-account',
       model: 'deepseek-flash',
       reasoningEffort: 'max',
     },
-    'смена модели уходит в Remote-шину и сохраняет уровень рассуждений',
+    'смена модели идёт через штатный modelDirectories и сохраняет уровень рассуждений',
   );
   assert.deepEqual(submitted, ['submit'], 'после смены модели отправка повторяется');
 });
