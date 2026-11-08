@@ -119,3 +119,11 @@
   (карточка overflowy auto, `[data-question-scroll]` overflow visible), футер
   sticky. Headless на реальном ask_user_question: карточка 405/412 px, вопрос и
   варианты в одном скролле, Skip/Submit закреплены. Версия 2.3.4.
+
+## Дополнение 2026-11-08 12:15 MSK
+
+- Goal-редактор на телефоне: full-width bar/textarea (120 px, до 36vh), кнопки
+  справа вертикально (column-reverse: крестик сверху, галочка снизу), Enter
+  вставляет перенос (stopPropagation, сохранение — галочкой). Headless на
+  реальном goal: bar 412/412, textarea 362×120, кнопки x≈375 (Cancel y709,
+  Save y743), значение после Enter содержит `\n`. Версия 2.3.5.

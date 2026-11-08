@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '..', 'client.js'), 'utf8');
 const region = source.split('/* #region tweak-mobile-composer */')[1].split('/* #endregion tweak-mobile-composer */')[0];
 const context = vm.createContext({AbortController});
-vm.runInContext(region + '\nthis.bind = bindMobileComposer; this.mobile = mobileComposerDevice; this.queueEnter = queueEditorEnter; this.bindQueue = bindQueueEditorEnter; this.caretDelta = caretScrollDelta;', context);
+vm.runInContext(region + '\nthis.bind = bindMobileComposer; this.mobile = mobileComposerDevice; this.queueEnter = queueEditorEnter; this.bindQueue = bindQueueEditorEnter; this.caretDelta = caretScrollDelta; this.goalEnter = goalEditorEnter;', context);
 let passed = 0;
 function test(name, fn) { fn(); passed++; console.log('ok', name); }
 function fixture(coarse = true, mobile = false) {
@@ -89,6 +89,21 @@ test('composer wiring keeps the new mobile behaviors', () => {
   assert.ok(source.includes('webkit-composition-frame-color'), 'рамка IME-композиции скрыта');
   assert.ok(source.includes("name: 'conversation.input.left'"), 'чип режима в строке композера');
   assert.ok(source.includes("'session.copyId'"), 'пункт копирования id объявлен');
+});
+
+test('goal editor Enter inserts a newline instead of saving', () => {
+  const view = { matchMedia: () => ({ matches: true }) };
+  const textarea = (root) => ({ tagName: 'TEXTAREA', closest: (selector) => (root && selector === '[data-goal-bar]' ? {} : null) });
+  assert.equal(context.goalEnter({ key: 'Enter', target: textarea(true) }, view), true);
+  assert.equal(context.goalEnter({ key: 'Enter', target: textarea(false) }, view), false);
+  assert.equal(context.goalEnter({ key: 'Enter', isComposing: true, target: textarea(true) }, view), false);
+  assert.equal(context.goalEnter({ key: 'x', target: textarea(true) }, view), false);
+  assert.equal(context.goalEnter({ key: 'Enter', target: textarea(true) }, { matchMedia: () => ({ matches: false }) }), false);
+  assert.match(source, /bindGoalEditorEnter\(document, window\)/);
+  const css = source.split('function mobileDrawerStyleText')[1].split('function MobileSidebarIcon')[0];
+  assert.ok(css.includes('[data-goal-bar]{width:100vw!important'));
+  assert.ok(css.includes('column-reverse!important'), 'крестик сверху, галочка снизу');
+  assert.ok(css.includes('[data-goal-bar] textarea{width:100%!important'));
 });
 
 test('stuck pending queue echo can be returned to the editor', () => {

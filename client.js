@@ -3980,6 +3980,38 @@ window.__ModuleLoader__.load({
       return () => doc?.removeEventListener?.('keydown', onKeyDown, true);
     }
 
+    /**
+     * Enter в редакторе goal должен вставлять перенос строки, а не сохранять:
+     * на мобильном сохраняет кнопка-галочка.
+     * @param {object} event - keydown.
+     * @param {object} view - окно.
+     * @returns {boolean} наш ли Enter.
+     */
+    function goalEditorEnter(event, view) {
+      if (!event || event.defaultPrevented || event.key !== 'Enter') return false;
+      if (event.isComposing || event.keyCode === 229) return false;
+      const target = event.target;
+      if (target?.tagName !== 'TEXTAREA' || typeof target.closest !== 'function') return false;
+      if (target.closest('[data-goal-bar]') === null) return false;
+      return mobileComposerDevice(view);
+    }
+
+    /**
+     * Подписаться на Enter в редакторе goal.
+     * @param {object} doc - документ.
+     * @param {object} view - окно.
+     * @returns {Function} снятие подписки.
+     */
+    function bindGoalEditorEnter(doc, view) {
+      const onKeyDown = (event) => {
+        if (!goalEditorEnter(event, view)) return;
+        // Только всплытие: перенос строки остаётся браузеру.
+        event.stopPropagation();
+      };
+      doc?.addEventListener?.('keydown', onKeyDown, true);
+      return () => doc?.removeEventListener?.('keydown', onKeyDown, true);
+    }
+
     function MobileComposerBinding({ inputActions, commandBridge }) {
       const marker = React.useRef(null);
       React.useEffect(() => {
@@ -4183,6 +4215,7 @@ window.__ModuleLoader__.load({
       // Редактор очереди живёт вне карточки композера: своя подписка на документ
       // работает и без слота, поэтому ставим её до проверки службы слотов.
       api?.own?.(bindQueueEditorEnter(document, window));
+      api?.own?.(bindGoalEditorEnter(document, window));
       api?.own?.(installSmallMenuSearchHider(window));
       installStuckQueueRecovery(ctx, api);
       const slots = typeof ctx?.get === 'function' ? ctx.get('slots') : undefined;
@@ -4408,6 +4441,14 @@ window.__ModuleLoader__.load({
         `${root} [data-question-key] > section{width:100%!important;max-width:100%!important;border-radius:0!important;max-height:min(72vh,600px)!important;overflow-y:auto!important;overscroll-behavior:contain}`,
         `${root} [data-question-key] > section > [data-question-scroll]{overflow:visible!important;flex:0 0 auto!important;min-height:0}`,
         `${root} [data-question-key] > section > footer{position:sticky!important;bottom:0!important;z-index:2;background:var(--dsw-specific-input-major);box-shadow:0 -1px 0 var(--dsw-alias-border-l2)}`,
+        // Редактор goal: на всю ширину, кнопки справа вертикально
+        // (крестик сверху, галочка снизу), textarea заметно выше.
+        `${root} [data-goal-bar]{width:100vw!important;max-width:100vw!important;margin-left:calc(50% - 50vw)!important;margin-right:calc(50% - 50vw)!important;padding:0!important}`,
+        `${root} [data-goal-bar] > div{width:100%!important;max-width:100%!important;border-radius:0!important}`,
+        `${root} [data-goal-bar] > div:has(textarea){align-items:stretch!important;height:auto!important;min-height:0!important;padding:6px 6px 6px 10px!important;gap:6px!important}`,
+        `${root} [data-goal-bar] > div:has(textarea) > div:last-child{flex-direction:column-reverse!important;align-items:center!important;gap:6px!important;padding:2px 0!important}`,
+        `${root} [data-goal-bar] textarea{width:100%!important;min-height:120px!important;max-height:36vh!important;resize:none!important}`,
+
         `${root} [data-dockkit-split-button],${root} [data-sidebar-right-mode]{display:none!important}`,
         `${root} [data-dsh-tweaks-tab-hold]{opacity:.72;transform:scale(.97);transition:transform 120ms ease-out,opacity 120ms ease-out}`,
         `${root} [class*="_panelList"]{display:none!important}`,
