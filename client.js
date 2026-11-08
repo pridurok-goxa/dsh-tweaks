@@ -3464,6 +3464,9 @@ window.__ModuleLoader__.load({
 
     /* #region tweak-mobile-composer */
 
+    /** Публичные действия активного композера (setDraft и т.п.). */
+    let mobileComposerActions = null;
+
     function mobileComposerDevice(view) {
       return view?.matchMedia?.('(pointer: coarse)').matches === true || view?.navigator?.userAgentData?.mobile === true;
     }
@@ -3945,6 +3948,10 @@ window.__ModuleLoader__.load({
         const offLayout = bindMobileComposerLayout(card, view, commandBridge);
         return () => { offInput(); offLayout(); };
       }, [inputActions, commandBridge]);
+      React.useEffect(() => {
+        mobileComposerActions = inputActions;
+        return () => { if (mobileComposerActions === inputActions) mobileComposerActions = null; };
+      }, [inputActions]);
       return React.createElement('span', { ref: marker, hidden: true, 'data-mobile-composer-binding': '' });
     }
     function ComposerModeChip({ useInput, commandBridge }) {
@@ -4020,11 +4027,124 @@ window.__ModuleLoader__.load({
       };
     }
 
+    /**
+     * Вернуть застрявший pending-echo очереди в поле ввода. Приложение держит
+     * такие строки в `Sending...` с выключенными действиями, пока хост не
+     * подтвердит постановку в очередь; при writer-локе/обрыве это навсегда.
+     * Через 2.5 с разрешаем карандаш: он снимает локальный echo и кладёт его
+     * текст в композер, чтобы сообщение можно было отредактировать и отправить.
+     * @param {object} ctx - клиентский контекст.
+     * @param {object} api - очистки твика.
+     * @returns {void}
+     */
+    function installStuckQueueRecovery(ctx, api) {
+      if (typeof window === 'undefined' || !mobileComposerDevice(window)) return;
+      const own = typeof api?.own === 'function' ? api.own : () => {};
+      const doc = window.document;
+      const seen = new WeakMap();
+      const enabled = new Set();
+      let disposed = false;
+      let timer = null;
+      let scheduled = false;
+
+      /** Найти текущую сессию и её snapshot. */
+      const sessionNow = () => {
+        try {
+          const sessions = typeof ctx?.get === 'function' ? ctx.get('sessions') : undefined;
+          const id = doc.querySelector('[data-conversation-session]')?.getAttribute('data-conversation-session');
+          if (!id || typeof sessions?.scope !== 'function' || typeof sessions?.sessionOf !== 'function') return undefined;
+          const actx = sessions.scope(id);
+          if (actx === undefined) return undefined;
+          const session = sessions.sessionOf(actx);
+          return session && typeof session.getSnapshot === 'function' ? session : undefined;
+        } catch (_error) {
+          return undefined;
+        }
+      };
+
+      /** Подходящий pending-echo: без вложений, есть штатный retire. */
+      const pendingFor = (row, session) => {
+        const snapshot = session?.getSnapshot?.();
+        const pending = (snapshot?.pendingSubmissions ?? []).filter((item) => item.placement === 'queued');
+        if (pending.length === 0) return undefined;
+        const preview = row.querySelector('[class*="_preview"]')?.textContent?.trim() ?? '';
+        return pending.find((item) => preview !== '' && (item.text.startsWith(preview) || preview.startsWith(item.text))) ?? pending[0];
+      };
+
+      /**
+       * Разрешить карандаш у застрявшей строки.
+       * @param {object} row - pending-строка.
+       * @returns {void}
+       */
+      const enableRow = (row) => {
+        const button = row.querySelector('[class*="_actions"] button');
+        if (button === null || button === undefined) return;
+        const session = sessionNow();
+        if (session === undefined || typeof session.retireFailedSubmission !== 'function') return;
+        const item = pendingFor(row, session);
+        if (item === undefined || (Array.isArray(item.attachments) && item.attachments.length > 0)) return;
+        if (typeof mobileComposerActions?.setDraft !== 'function') return;
+        button.disabled = false;
+        button.removeAttribute('title');
+        button.setAttribute('data-dsh-tweaks-pending-edit', '');
+        if (enabled.has(button)) return;
+        enabled.add(button);
+        button.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          try {
+            mobileComposerActions.setDraft(item.text);
+            session.retireFailedSubmission(item.requestId);
+            const editor = doc.querySelector('[data-composer-input]');
+            editor?.focus?.({ preventScroll: false });
+          } catch (_error) {
+            button.disabled = true;
+          }
+        }, true);
+      };
+
+      const sweep = () => {
+        if (disposed) return;
+        const now = Date.now();
+        for (const row of doc.querySelectorAll('[data-submission-echo]')) {
+          if (!seen.has(row)) {
+            seen.set(row, now);
+            continue;
+          }
+          if (now - seen.get(row) < 2500) continue;
+          enableRow(row);
+        }
+      };
+
+      const schedule = () => {
+        if (disposed || scheduled) return;
+        scheduled = true;
+        const run = () => { scheduled = false; sweep(); };
+        if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(run);
+        else window.setTimeout(run, 50);
+      };
+
+      const observer = typeof MutationObserver === 'function' ? new MutationObserver(schedule) : null;
+      observer?.observe(doc.body ?? doc.documentElement, { childList: true, subtree: true });
+      timer = window.setInterval(sweep, 1500);
+      schedule();
+      own(() => {
+        disposed = true;
+        observer?.disconnect();
+        if (timer !== null) window.clearInterval(timer);
+        for (const button of enabled) {
+          button.removeAttribute('data-dsh-tweaks-pending-edit');
+          button.disabled = true;
+        }
+      });
+    }
+
     function setupMobileComposer(ctx, api) {
       // Редактор очереди живёт вне карточки композера: своя подписка на документ
       // работает и без слота, поэтому ставим её до проверки службы слотов.
       api?.own?.(bindQueueEditorEnter(document, window));
       api?.own?.(installSmallMenuSearchHider(window));
+      installStuckQueueRecovery(ctx, api);
       const slots = typeof ctx?.get === 'function' ? ctx.get('slots') : undefined;
       if (typeof slots?.inject !== 'function' || typeof slots?.register !== 'function') return;
       const style = document.createElement('style');

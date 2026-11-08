@@ -89,6 +89,14 @@ test('composer wiring keeps the new mobile behaviors', () => {
   assert.ok(source.includes("'session.copyId'"), 'пункт копирования id объявлен');
 });
 
+test('stuck pending queue echo can be returned to the editor', () => {
+  assert.match(source, /function installStuckQueueRecovery\(/);
+  assert.match(source, /installStuckQueueRecovery\(ctx, api\)/);
+  assert.match(source, /data-submission-echo/);
+  assert.match(source, /retireFailedSubmission/);
+  assert.match(source, /mobileComposerActions\.setDraft\(item\.text\)/);
+});
+
 test('plus and @ do not blur the editor: keyboard stays in place', () => {
   assert.doesNotMatch(source, /scheduleAtBlur/);
   assert.doesNotMatch(source, /openReferenceMenu/);
