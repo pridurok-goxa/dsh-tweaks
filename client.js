@@ -4411,6 +4411,13 @@ window.__ModuleLoader__.load({
         `${root} [data-side="sidebar"]{display:none!important}`,
         `${root} [class*="_sessionRow"] [class*="_rowActions"],${root} [class*="_searchResultRow"] [class*="_rowActions"]{display:inline-flex!important}`,
         `${root} [class*="_sessionRow"] [class*="_time"],${root} [class*="_sessionRow"] [class*="_pinIndicator"]{display:none!important}`,
+        // В строке чата оставляем только «три точки» и прижимаем их к правому
+        // краю: вложенная кнопка (корзина/архив) уже есть в меню.
+        `${root} [class*="_sessionRow"] [class*="_rowActions"]{gap:0!important;margin-left:auto!important;padding-left:2px;padding-right:0}`,
+        `${root} [class*="_sessionRow"] [class*="_rowActions"] > *:not(:first-child){display:none!important}`,
+        // Вложенные чаты чуть левее: глубина остаётся, но общий сдвиг меньше на 4px.
+        `${root} [class*="_sessionRow"]{padding-inline-start:calc(8px + var(--dsh-workspace-indent,0px) - 4px)!important;padding-inline-end:4px!important}`,
+
         // Шапка: крошки приложения скрыты, название рисует наша часть слота.
         `${root} [class*="_titleCluster"] [class*="_crumbs"]{display:none!important}`,
         `${root} .dsh-tweaks-header-title{max-width:42vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;` +

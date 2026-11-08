@@ -181,6 +181,9 @@ test('CSS режима: атрибут, нулевой трек, fixed-ящик 
   assert.ok(css.includes('[data-question-key] > section{width:100%!important'), 'карточка вопроса растянута');
   assert.ok(css.includes('[data-question-scroll]{overflow:visible!important'), 'вопрос и варианты в одном скролле');
   assert.ok(css.includes('[data-question-key] > section > footer{position:sticky!important'), 'футер вопроса закреплён');
+  assert.ok(css.includes('[class*="_sessionRow"] [class*="_rowActions"] > *:not(:first-child){display:none!important}'), 'в строке чата только три точки');
+  assert.ok(css.includes('padding-inline-start:calc(8px + var(--dsh-workspace-indent,0px) - 4px)!important'), 'вложенные чаты левее');
+  assert.ok(css.includes('[class*="_sessionRow"] [class*="_rowActions"]{gap:0!important'), 'точки прижаты к краю');
 });
 
 test('регистрация и очистка твика на месте', () => {
