@@ -177,6 +177,10 @@ test('CSS режима: атрибут, нулевой трек, fixed-ящик 
   assert.ok(css.includes('data-dsh-tweaks-panel-menu'), 'есть поповер глобальных панелей');
   assert.ok(css.includes('data-dsh-tweaks-panel-toggle'), 'есть нижняя кнопка панелей');
   assert.ok(css.includes('dsh-tweaks-header-title'), 'есть название чата в шапке');
+  assert.ok(css.includes('[data-question-key]{padding:6px 0 10px!important'), 'вопросник на всю ширину');
+  assert.ok(css.includes('[data-question-key] > section{width:100%!important'), 'карточка вопроса растянута');
+  assert.ok(css.includes('[data-question-scroll]{overflow:visible!important'), 'вопрос и варианты в одном скролле');
+  assert.ok(css.includes('[data-question-key] > section > footer{position:sticky!important'), 'футер вопроса закреплён');
 });
 
 test('регистрация и очистка твика на месте', () => {

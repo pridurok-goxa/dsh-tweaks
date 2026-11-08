@@ -4401,6 +4401,13 @@ window.__ModuleLoader__.load({
         // Вкладки правой панели: выбор не должен плавно прокручивать полосу
         // (выглядело как анимация «не в ту сторону»).
         `${root} [data-dockkit-strip-tabs]{scroll-behavior:auto!important}`,
+        // Вопросник (ask_user_question): на всю ширину и одним скроллом.
+        // Заголовок-вопрос больше не отнимает экран отдельно от вариантов:
+        // скроллится вся карточка, футер с Skip/Next закреплён снизу.
+        `${root} [data-question-key]{padding:6px 0 10px!important;justify-content:stretch!important}`,
+        `${root} [data-question-key] > section{width:100%!important;max-width:100%!important;border-radius:0!important;max-height:min(72vh,600px)!important;overflow-y:auto!important;overscroll-behavior:contain}`,
+        `${root} [data-question-key] > section > [data-question-scroll]{overflow:visible!important;flex:0 0 auto!important;min-height:0}`,
+        `${root} [data-question-key] > section > footer{position:sticky!important;bottom:0!important;z-index:2;background:var(--dsw-specific-input-major);box-shadow:0 -1px 0 var(--dsw-alias-border-l2)}`,
         `${root} [data-dockkit-split-button],${root} [data-sidebar-right-mode]{display:none!important}`,
         `${root} [data-dsh-tweaks-tab-hold]{opacity:.72;transform:scale(.97);transition:transform 120ms ease-out,opacity 120ms ease-out}`,
         `${root} [class*="_panelList"]{display:none!important}`,
