@@ -5846,7 +5846,15 @@ window.__ModuleLoader__.load({
     function setupTabActions() {
       const style = document.createElement('style');
       style.dataset.dshTabsActions = '';
-      style.textContent = '.dsh-tweaks-tabs-actions{display:inline-flex;align-items:center;gap:6px;margin-left:8px;min-width:0;flex:none;position:relative;top:-6px}';
+      style.textContent = [
+        '.dsh-tweaks-tabs-actions{display:inline-flex;align-items:center;gap:2px;margin-left:0;min-width:0;flex:none;position:relative;top:-6px}',
+        '@media (max-width:720px){',
+        'div:has(> [data-conversation-tabs]){gap:4px!important}',
+        '[data-conversation-tabs]{gap:8px!important}',
+        '.dsh-tweaks-tabs-actions > * > button{padding-top:2px!important;padding-bottom:2px!important}',
+        '.dsh-tweaks-tabs-actions [data-team-action] button{padding-left:3px!important;padding-right:3px!important;gap:4px!important}',
+        '}',
+      ].join('\n');
       document.head?.appendChild(style);
       const moved = new Map();
       let scheduled = false;
@@ -5894,11 +5902,29 @@ window.__ModuleLoader__.load({
           const label = `${button.getAttribute?.('aria-label') ?? ''} ${button.textContent ?? ''}`;
           return /subagents?|субагент/i.test(label);
         })) ?? null;
+        const utilities = document.querySelector('[data-slot="conversation.session.header.utilities"]');
+        const job = utilities === null ? null : [...utilities.children].find((node) => [...node.querySelectorAll?.('button') ?? []].some((button) => {
+          const label = `${button.getAttribute?.('aria-label') ?? ''} ${button.textContent ?? ''}`;
+          return /background jobs?|background job running|фонов\w* задач/i.test(label);
+        })) ?? null;
+        const teamButton = team?.querySelector?.('button');
+        if (teamButton !== null && teamButton !== undefined) {
+          if (teamButton.getAttribute('aria-label') !== 'Team') teamButton.setAttribute('aria-label', 'Team');
+          const label = teamButton.querySelector('[class*="_triggerLabel"]');
+          if (label !== null && label.textContent !== 'Team') label.textContent = 'Team';
+        }
+        const jobButton = job?.querySelector?.('button');
+        if (jobButton !== null && jobButton !== undefined) {
+          if (jobButton.getAttribute('aria-label') !== 'Job') jobButton.setAttribute('aria-label', 'Job');
+          const count = jobButton.querySelector('[class*="_count"]');
+          if (count !== null && count.textContent !== 'Job') count.textContent = 'Job';
+        }
         if (team !== null) move(team, host);
         if (subagents !== null) move(subagents, host);
-        // Порядок: Agent Team, затем Subagents. Переставляем только если он
-        // реально нарушен, иначе MutationObserver зациклится на своих же вставках.
-        const desired = [team, subagents].filter((node) => node !== null && node.parentElement === host);
+        if (job !== null) move(job, host);
+        // Порядок: Team, Subagents, Job. Переставляем только если он реально
+        // нарушен, иначе MutationObserver зациклится на своих же вставках.
+        const desired = [team, subagents, job].filter((node) => node !== null && node.parentElement === host);
         const current = [...host.children].filter((node) => desired.includes(node));
         if (desired.some((node, index) => current[index] !== node)) host.append(...desired);
       };
@@ -5911,7 +5937,7 @@ window.__ModuleLoader__.load({
       };
 
       const observer = typeof MutationObserver === 'function' ? new MutationObserver(schedule) : null;
-      observer?.observe(document.body ?? document.documentElement, { childList: true, subtree: true });
+      observer?.observe(document.body ?? document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['aria-label'] });
       schedule();
       return () => {
         disposed = true;

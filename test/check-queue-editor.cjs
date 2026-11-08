@@ -97,6 +97,10 @@ test('вкладки: Agent Team и Subagents переносятся реаль�
   assert.match(source, /subagents\?\|субагент/);
   assert.match(source, /own\(setupTabActions\(\)\)/);
   assert.match(source, /top:-6px/, 'кнопки подняты на уровень подписей вкладок');
+  assert.match(source, /aria-label'\) !== 'Team'/, 'Agent Team переименован в Team');
+  assert.match(source, /getAttribute\('aria-label'\) !== 'Job'/, 'background jobs переименован в Job');
+  assert.match(source, /background jobs\?/, 'триггер фоновых задач ищется и переносится');
+  assert.match(source, /gap:2px;margin-left:0/, 'компактные отступы панели');
 });
 
 console.log(`PASS ${passed} queue-editor client contract tests`);

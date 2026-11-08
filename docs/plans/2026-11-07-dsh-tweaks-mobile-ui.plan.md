@@ -163,3 +163,10 @@
 - Agent Team/Subagents в строке Chat/Trajectory подняты на 6px: их подписи
   совпадают по центру с подписями вкладок (chat label center 58, team text 58).
   Версия 2.4.1.
+
+## Дополнение 2026-11-08 14:20 MSK
+
+- Background jobs перенесён в строку вкладок как «Job» (штатный узел, StateDot
+  сохранён); Agent Team переименован в «Team». Порядок Team → Subagents → Job.
+- На мобильном компактнее: gap вкладок 32→8, отступ/зазор панели, паддинги
+  Team; Chat/Trajectory/Team/Job умещаются. Версия 2.4.2.
