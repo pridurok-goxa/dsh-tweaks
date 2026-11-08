@@ -17,6 +17,14 @@ window.__ModuleLoader__.load({
     const React = require('react');
     // Примитивы — базовый модуль страницы (platform seed): объявлять их отдельно не нужно.
     const primitives = require('@deepseek-ai/dsh-client-ui-primitives');
+    /** Портал панели светофора в body: вне зум-контекста #root. */
+    const ReactDOM = (() => {
+      try {
+        return require('react-dom');
+      } catch (_error) {
+        return null;
+      }
+    })();
 
     /** Пространство имён словаря; оно же стоит на регистрации формы. */
     const NS = 'dsh-tweaks';
@@ -674,6 +682,12 @@ window.__ModuleLoader__.load({
             stage = 'popups';
             pinHandles();
             stage = 'handles';
+            // Панель светофора живёт вне #root и пересчитывает себя сама.
+            try {
+              window.dispatchEvent?.(new Event('dsh-ui-zoom-change'));
+            } catch (_error) {
+              /* событие необязательно */
+            }
           } catch (error) {
             markReady(`paint-failed: ${stage}: ${error?.message ?? error}`);
           }
@@ -741,6 +755,9 @@ window.__ModuleLoader__.load({
          */
         function isPopup(node) {
           if (!node || node.nodeType !== 1) return false;
+          // Панель светофора сама ставит transform и считает вьюпортные размеры;
+          // общий popup-zoom её не трогает, иначе масштаб применится дважды.
+          if (node.hasAttribute?.('data-dsh-light-panel')) return false;
           if (node.id === 'root') return false;
           const root = document.getElementById('root');
           if (root?.contains(node)) return false;
@@ -2749,31 +2766,78 @@ window.__ModuleLoader__.load({
     const LIGHT_PANEL_WIDTH = 364;
     /** Минимальная высота панели-тултипа: меньше не сжимаем — включаем прокрутку. */
     const LIGHT_PANEL_MIN_HEIGHT = 200;
+    /** Отступ панели от краёв окна и от лампы. */
+    const LIGHT_PANEL_MARGIN = 8;
+
+    /**
+     * Видимая область окна. В обычном браузере это layout viewport; в
+     * мобильном с клавиатурой/pinch — visualViewport, чтобы панель не уезжала
+     * под клавиатуру и не вылезала за видимую часть.
+     * @returns {{left: number, top: number, width: number, height: number}} границы.
+     */
+    function lightViewport() {
+      if (typeof window === 'undefined') return { left: 0, top: 0, width: 1024, height: 768 };
+      const view = window.visualViewport;
+      const fallbackWidth = Number.isFinite(window.innerWidth) ? window.innerWidth : 1024;
+      const fallbackHeight = Number.isFinite(window.innerHeight) ? window.innerHeight : 768;
+      const left = Number.isFinite(view?.offsetLeft) ? Math.round(view.offsetLeft) : 0;
+      const top = Number.isFinite(view?.offsetTop) ? Math.round(view.offsetTop) : 0;
+      const width = Number.isFinite(view?.width) ? Math.round(view.width) : fallbackWidth;
+      const height = Number.isFinite(view?.height) ? Math.round(view.height) : fallbackHeight;
+      return { left, top, width: Math.max(1, width), height: Math.max(1, height) };
+    }
+
+    /**
+     * Чистая геометрия панели во вьюпортных (визуальных) пикселях.
+     *
+     * Панель всегда садится низом над якорем. Если содержимое длиннее
+     * свободного места, высота ограничивается — внутри включается прокрутка.
+     * Ширина прижимается к окну и центрируется по лампе в допустимых границах.
+     * @param {object} input - anchorRect, viewport, scale, contentHeight.
+     * @returns {object} left/top/width/maxHeight и scale для локальных стилей.
+     */
+    function computeLightPanelGeometry({ anchorRect, viewport, scale, contentHeight }) {
+      const margin = LIGHT_PANEL_MARGIN;
+      const safeScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+      const width = Math.max(1, Math.min(LIGHT_PANEL_WIDTH, viewport.width - 2 * margin));
+      const room = Math.max(0, anchorRect.top - viewport.top - 2 * margin);
+      const height = Math.max(1, Math.min(Math.max(1, contentHeight), Math.max(1, room)));
+      const top = Math.max(viewport.top + margin, anchorRect.top - margin - height);
+      const viewportRight = viewport.left + viewport.width;
+      const center = anchorRect.left + anchorRect.width / 2;
+      const left = Math.max(
+        viewport.left + margin,
+        Math.min(center - width / 2, viewportRight - width - margin),
+      );
+      return { left, top, width, maxHeight: height, scale: safeScale };
+    }
 
     /**
      * Позиция панели-тултипа у якоря.
      *
-     * Панель раскрывается только вверх: якорь — нижний индикатор под полем ввода,
-     * снизу места нет (край панели уходил за окно). Если места над якорем мало,
-     * панель ограничивается по высоте и прокручивается внутри.
+     * Панель живёт в `body` через портал и масштабируется собственным
+     * `transform: scale()`, поэтому возвращаемые left/top — уже вьюпортные
+     * пиксели. Локальные width/maxHeight считаются от них делением на scale
+     * в рендере.
      * @param {object} anchorRef - ref кнопки.
      * @param {object} panelRef - ref панели.
-     * @returns {object} left/top и допустимая высота во вьюпортных пикселях.
+     * @returns {object | null} геометрия или null, пока нет якоря.
      */
     function panelPosition(anchorRef, panelRef) {
       const rect = anchorRef?.current?.getBoundingClientRect?.();
-      const margin = 8;
-      if (rect === undefined) return { left: margin, top: margin, maxHeight: LIGHT_PANEL_MIN_HEIGHT };
-      const width = panelRef?.current?.offsetWidth ?? LIGHT_PANEL_WIDTH;
-      // Высота содержимого, а не отрисованная: panel уже ограничен maxHeight,
-      // иначе позиция считалась бы по обрезанной высоте и панель залезала на док.
-      const height = panelRef?.current?.scrollHeight ?? 260;
-      const viewportWidth =
-        typeof window === 'undefined' || !Number.isFinite(window.innerWidth) ? 1024 : window.innerWidth;
-      const left = Math.max(margin, Math.min(rect.left + rect.width / 2 - width / 2, viewportWidth - width - margin));
-      const room = Math.max(LIGHT_PANEL_MIN_HEIGHT, Math.round(rect.top - 2 * margin));
-      const top = Math.max(margin, rect.top - Math.min(height, room) - margin);
-      return { left, top, maxHeight: room };
+      if (rect === undefined || rect === null) return null;
+      const scale = readScale();
+      const viewport = lightViewport();
+      const width = Math.max(1, Math.min(LIGHT_PANEL_WIDTH, viewport.width - 2 * LIGHT_PANEL_MARGIN));
+      const panel = panelRef?.current ?? null;
+      if (panel !== null) {
+        // Ширина и transform нужны до чтения scrollHeight: от них зависит перенос строк.
+        panel.style.transformOrigin = '0 0';
+        panel.style.transform = scale === 1 ? '' : `scale(${scale})`;
+        panel.style.width = `${width / scale}px`;
+      }
+      const contentHeight = Math.max(1, (panel?.scrollHeight ?? LIGHT_PANEL_MIN_HEIGHT) * scale);
+      return computeLightPanelGeometry({ anchorRect: rect, viewport, scale, contentHeight });
     }
 
     /** Геометрия горизонтальной шкалы часов: 24 кружочка от 0 до 24. */
@@ -2894,11 +2958,14 @@ window.__ModuleLoader__.load({
        */
       const measure = () => {
         const next = panelPosition(anchorRef, panelRef);
+        if (next === null) return;
         setPosition((current) =>
           current !== null &&
           current.left === next.left &&
           current.top === next.top &&
-          current.maxHeight === next.maxHeight
+          current.width === next.width &&
+          current.maxHeight === next.maxHeight &&
+          current.scale === next.scale
             ? current
             : next,
         );
@@ -2910,18 +2977,53 @@ window.__ModuleLoader__.load({
         measure();
       }, []);
       React.useEffect(() => {
-        measure();
-      }, [now]);
-      React.useEffect(() => {
-        const onResize = () => measure();
+        let frame = null;
+        let settleTimer = null;
+        const schedule = () => {
+          if (frame !== null) return;
+          const run = () => {
+            frame = null;
+            measure();
+          };
+          if (typeof window.requestAnimationFrame === 'function') frame = window.requestAnimationFrame(run);
+          else frame = window.setTimeout(run, 0);
+          // После смены масштаба #root перестраивает сетку не в том же кадре:
+          // добиваем замер, когда якорь уже доехал до нового места.
+          if (settleTimer !== null) window.clearTimeout(settleTimer);
+          settleTimer = window.setTimeout(run, 140);
+        };
+        const onResize = () => schedule();
         window.addEventListener('resize', onResize);
+        // Смена масштаба твика: #root перестраивается, панель должна догнать.
+        window.addEventListener('dsh-ui-zoom-change', onResize);
         // Прокрутка чата сдвигает якорь нижнего индикатора: панель едет следом.
         document.addEventListener('scroll', onResize, true);
+        const visual = window.visualViewport;
+        visual?.addEventListener?.('resize', onResize);
+        visual?.addEventListener?.('scroll', onResize);
+        let observer = null;
+        if (typeof ResizeObserver === 'function') {
+          observer = new ResizeObserver(schedule);
+          if (panelRef.current !== null) observer.observe(panelRef.current);
+          if (anchorRef.current !== null) observer.observe(anchorRef.current);
+        }
         return () => {
           window.removeEventListener('resize', onResize);
+          window.removeEventListener('dsh-ui-zoom-change', onResize);
           document.removeEventListener('scroll', onResize, true);
+          visual?.removeEventListener?.('resize', onResize);
+          visual?.removeEventListener?.('scroll', onResize);
+          observer?.disconnect();
+          if (frame !== null) {
+            if (typeof window.cancelAnimationFrame === 'function') window.cancelAnimationFrame(frame);
+            else window.clearTimeout(frame);
+          }
+          if (settleTimer !== null) window.clearTimeout(settleTimer);
         };
       }, []);
+      React.useEffect(() => {
+        measure();
+      }, [now]);
       React.useEffect(() => {
         const onPointer = (event) => {
           const panel = panelRef.current;
@@ -2961,10 +3063,14 @@ window.__ModuleLoader__.load({
       return React.createElement('div', {
         ref: panelRef,
         className: `${LIGHT_CLASS}-panel`,
+        'data-dsh-light-panel': '',
         style: {
           left: `${position === null ? 0 : position.left}px`,
           top: `${position === null ? 0 : position.top}px`,
-          maxHeight: `${position === null ? LIGHT_PANEL_MIN_HEIGHT : position.maxHeight}px`,
+          width: position === null ? undefined : `${position.width / position.scale}px`,
+          maxHeight: `${position === null ? LIGHT_PANEL_MIN_HEIGHT : position.maxHeight / position.scale}px`,
+          transform: position === null || position.scale === 1 ? 'none' : `scale(${position.scale})`,
+          transformOrigin: '0 0',
           overflowY: 'auto',
           visibility: position === null ? 'hidden' : 'visible',
         },
@@ -2993,6 +3099,20 @@ window.__ModuleLoader__.load({
           ? React.createElement('div', { className: `${LIGHT_CLASS}-paused` }, t('light.pausedHint'))
           : null,
       );
+    }
+
+    /**
+     * Вынести панель в body. Портал убирает её из зум-контекста `#root`, из-за
+     * которого `position: fixed` считался от масштабированного предка.
+     * @param {object | null} panel - панель или null.
+     * @returns {object | null} портал либо исходный элемент в тестовой среде.
+     */
+    function renderLightPortal(panel) {
+      if (panel === null) return null;
+      if (ReactDOM?.createPortal !== undefined && typeof document !== 'undefined' && document.body !== null) {
+        return ReactDOM.createPortal(panel, document.body);
+      }
+      return panel;
     }
 
     /**
@@ -3058,7 +3178,7 @@ window.__ModuleLoader__.load({
           onClick: () => setOpen((value) => !value),
         }, content),
         open
-          ? React.createElement(TrafficClockPanel, { anchorRef, variant, onClose: () => setOpen(false) })
+          ? renderLightPortal(React.createElement(TrafficClockPanel, { anchorRef, variant, onClose: () => setOpen(false) }))
           : null,
       );
     }
@@ -6011,12 +6131,20 @@ window.__ModuleLoader__.load({
           host.appendChild(node);
           return node;
         })();
-        if (moreButton !== null && moreButton !== undefined) {
+        if (moreButton !== null && moreButton !== undefined && !moreSlot.contains(moreButton)) {
           // Переносим весь компонент Menu вместе с якорем: если вырвать только
           // кнопку, React при открытии меню теряет родителя и клик не срабатывает.
           let moreRoot = moreButton;
-          while (moreRoot.parentElement !== null && !moreRoot.parentElement.hasAttribute?.('data-slot')) moreRoot = moreRoot.parentElement;
-          move(moreRoot.parentElement?.hasAttribute?.('data-slot') ? moreRoot : moreButton, moreSlot);
+          while (
+            moreRoot.parentElement !== null
+            && !moreRoot.parentElement.hasAttribute?.('data-slot')
+            && moreRoot.parentElement !== host
+            && !moreRoot.parentElement.contains(host)
+          ) {
+            moreRoot = moreRoot.parentElement;
+          }
+          const root = moreRoot.parentElement?.hasAttribute?.('data-slot') ? moreRoot : moreButton;
+          if (!root.contains(host)) move(root, moreSlot);
         }
         const teamButton = team?.querySelector?.('button');
         if (teamButton !== null && teamButton !== undefined) {

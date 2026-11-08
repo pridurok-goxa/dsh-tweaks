@@ -2203,11 +2203,17 @@ check('панель светофора открывается только по 
   assert.equal(tree.children[1], null, 'до нажатия панель закрыта');
 });
 
-check('панель раскрывается вверх и остаётся в окне', () => {
+check('панель раскрывается вверх, ограничена окном и вынесена в портал', () => {
   const source = fs.readFileSync(CLIENT, 'utf8');
-  assert.ok(source.includes('function panelPosition(anchorRef, panelRef)'), 'позиция считается без направления «вниз»');
-  assert.ok(source.includes('rect.top - Math.min(height, room) - margin'), 'панель встаёт над якорем');
-  assert.ok(source.includes('maxHeight: `${position === null ? LIGHT_PANEL_MIN_HEIGHT : position.maxHeight}px`'), 'высота ограничена местом над якорем');
+  assert.ok(source.includes('function computeLightPanelGeometry'), 'есть чистая функция геометрии');
+  assert.ok(source.includes('anchorRect.top - margin - height'), 'панель встаёт над якорем');
+  assert.ok(source.includes('function renderLightPortal'), 'панель уходит в body через портал');
+  assert.ok(source.includes('ReactDOM.createPortal'), 'используется createPortal');
+  assert.ok(source.includes("'data-dsh-light-panel': ''"), 'панель помечена для исключения из общего popup-zoom');
+  assert.ok(source.includes("window.addEventListener('dsh-ui-zoom-change'"), 'смена масштаба пересчитывает панель');
+  assert.ok(source.includes('settleTimer = window.setTimeout(run, 140)'), 'после смены масштаба есть добор замера');
+  assert.ok(source.includes("transform: position === null || position.scale === 1 ? 'none' : `scale(${position.scale})`"), 'масштаб применяется к панели');
+  assert.ok(source.includes("maxHeight: `${position === null ? LIGHT_PANEL_MIN_HEIGHT : position.maxHeight / position.scale}px`"), 'высота ограничена местом над якорем');
   assert.ok(source.includes("overflowY: 'auto'"), 'длинная панель прокручивается');
   assert.equal(source.includes('rect.bottom + margin'), false, 'нисходящего положения больше нет');
   assert.equal(source.includes("variant === 'header'"), false, 'индикатор в шапку не регистрируется');
