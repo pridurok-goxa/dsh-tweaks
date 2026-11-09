@@ -268,3 +268,13 @@
   `dsh-tweaks-menu-drop 130ms cubic-bezier(.2,.8,.2,1)` (opacity + translateY
   −6px→0). После показа состав не меняется, при закрытии состояние сбрасывается.
   Версия 2.8.5.
+
+## Дополнение 2026-11-09 05:55 MSK
+
+- Совместимость со старым ядром 0.2.2-rc.1 (нативный drawer):
+  `nativeSidebarDrawer()` по `data-sidebar-drawer`/`drawerMask`;
+  `freePanels` на native drawer пишет `0px minmax(0,1fr) ...` и не считает
+  offsetWidth сайдбара открытой панелью; `zoom.patchFrameMetrics` не поднимает
+  узкую рамку до 1024; `setupMobileSidebar` уступает drawer ядру.
+  Headless старый core 412: grid 0/412, центр во всю ширину, mask 0, backdrop
+  нет; при 80% то же. Новый core не затронут. Версия 2.9.0.

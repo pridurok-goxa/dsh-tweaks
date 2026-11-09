@@ -2222,6 +2222,17 @@ check('панель раскрывается вверх, ограничена о
   assert.ok(source.includes('LIGHT_PANEL_MIN_HEIGHT = 200'), 'минимальная высота панели задана');
 });
 
+check('совместимость: нативный drawer старого ядра не ломает сетку', () => {
+  const source = fs.readFileSync(CLIENT, 'utf8');
+  assert.ok(source.includes('function nativeSidebarDrawer()'), 'есть детект нативного drawer');
+  assert.ok(source.includes("data-sidebar-drawer"), 'проверяется attr ядра');
+  assert.ok(source.includes('drawerMask'), 'проверяется маска drawer');
+  assert.ok(source.includes('if (nativeDrawer) {'), 'freePanels знает нативный режим');
+  assert.ok(source.includes('const grid = `0px minmax(0px, 1fr) ${rightbar}px`'), 'первая колонка нативного drawer нулевая');
+  assert.ok(source.includes('nativeSidebarDrawer() || logicalWidth < SIDEBAR_MIN_WIDTH'), 'zoom не раздувает узкую рамку до 1024');
+  assert.ok(source.includes('if (nativeSidebarDrawer()) {'), 'mobileSidebar уступает нативному drawer');
+});
+
 check('меню «…» показывается один раз с быстрой анимацией сверху вниз', () => {
   const source = fs.readFileSync(CLIENT, 'utf8');
   assert.ok(source.includes('dsh-tweaks-menu-drop'), 'ключевые кадры анимации');

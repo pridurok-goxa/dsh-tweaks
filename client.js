@@ -962,7 +962,12 @@ window.__ModuleLoader__.load({
             const rect = original();
             const zoom = readScale();
             if (zoom === 1) return rect;
-            const width = Math.max(rect.width / zoom, SIDEBAR_MIN_WIDTH);
+            const logicalWidth = rect.width / zoom;
+            // Нативный drawer/узкий экран: не раздуваем рамку до 1024, иначе
+            // старое ядро выбирает десктопную сетку и центр становится узким.
+            const width = nativeSidebarDrawer() || logicalWidth < SIDEBAR_MIN_WIDTH
+              ? logicalWidth
+              : Math.max(logicalWidth, SIDEBAR_MIN_WIDTH);
             return {
               x: rect.x / zoom,
               y: rect.y / zoom,
@@ -1564,6 +1569,29 @@ window.__ModuleLoader__.load({
      * @param {object} api - отметка этапа и регистратор очисток твика.
      * @returns {void}
      */
+    /* #region layout-capabilities */
+
+    /** Рамка приложения. */
+    function layoutFrame() {
+      return document.querySelector('[class*="_frame"]');
+    }
+
+    /**
+     * Умеет ли ядро нативный drawer левой панели.
+     *
+     * В 0.2.2 появились `data-sidebar-drawer` и `drawerMask`; в 0.2.1 их нет,
+     * и мобильную панель рисует наш слой. Проверяем возможности DOM, а не
+     * номер версии: маска есть только в drawer-режиме, attr — на рамке.
+     * @returns {boolean} да, если drawer ведёт ядро.
+     */
+    function nativeSidebarDrawer() {
+      const frame = layoutFrame();
+      if (frame?.hasAttribute?.('data-sidebar-drawer')) return true;
+      return document.querySelector('[class*="_drawerMask"]') !== null;
+    }
+
+    /* #endregion layout-capabilities */
+
     /* #region free-panels */
     /** Ключ хранения ширины панелей: у каждого устройства свои значения. */
     const PANELS_KEY = 'dsh.ui-panels.v1';
@@ -1679,7 +1707,7 @@ window.__ModuleLoader__.load({
         const rightbarCol = rightbarOf();
         const sidebarHandle = document.querySelector('[data-side="sidebar"]');
         const rightbarHandle = document.querySelector('[data-side="rightbar"]');
-        if (sidebarCol !== null && sidebarHandle !== null) {
+        if (!nativeSidebarDrawer() && sidebarCol !== null && sidebarHandle !== null) {
           const left = `${sidebarCol.offsetLeft + sidebarCol.offsetWidth}px`;
           if (sidebarHandle.style.left !== left) sidebarHandle.style.left = left;
         }
@@ -1699,6 +1727,23 @@ window.__ModuleLoader__.load({
         if (frame === null) return;
         const frameWidth = Math.max(0, Math.round(frame.offsetWidth));
         if (frameWidth === 0) return;
+        const nativeDrawer = nativeSidebarDrawer();
+        if (nativeDrawer) {
+          // В нативном drawer сайдбар абсолютный, его ширина не колонка сетки.
+          // Первый трек всегда 0, иначе центр сжимается до остатка окна.
+          const panelOpen = panelOpenOf() !== null;
+          const fullscreen = document.querySelector('[data-rightbar-fullscreen]') !== null;
+          const appRightbar = Math.round(rightbarOf()?.offsetWidth ?? 0);
+          const rightbar = panelOpen && !fullscreen ? appRightbar : 0;
+          const grid = `0px minmax(0px, 1fr) ${rightbar}px`;
+          lastApplied = grid;
+          if (frame.style.gridTemplateColumns !== grid) frame.style.gridTemplateColumns = grid;
+          if (frame.style.getPropertyValue('--dsh-windows-sidebar-width') !== '') {
+            frame.style.setProperty('--dsh-windows-sidebar-width', '0px');
+          }
+          pinHandles();
+          return;
+        }
         const sidebarCol = sidebarOf();
         const appSidebar = sidebarCol === null ? 0 : Math.round(sidebarCol.offsetWidth);
         const collapsed = appSidebar === 0 || appSidebar <= 64;
@@ -1759,6 +1804,7 @@ window.__ModuleLoader__.load({
         if (handle === null || handle === undefined) return;
         if (handle.closest('[data-width-handle]') !== null) return;
         const side = handle.dataset.side;
+        if (side === 'sidebar' && nativeSidebarDrawer()) return;
         const frame = frameOf();
         const column = side === 'sidebar' ? sidebarOf() : rightbarOf();
         if (frame === null || column === null) return;
@@ -5073,6 +5119,16 @@ window.__ModuleLoader__.load({
      */
     function setupMobileSidebar(ctx, api) {
       const own = typeof api?.own === 'function' ? api.own : () => {};
+      // Старое ядро (0.2.2) умеет нативный drawer. Не накладываем на него
+      // собственные fixed-правила и анимацию: это ломало сетку и оставляло
+      // подложку. Независимые части (вкладки, overlay-рамка, шапка-меню)
+      // продолжают работать.
+      if (nativeSidebarDrawer()) {
+        own(setupMobileRightTabs(ctx, api));
+        own(setupTabActions());
+        own(setupMobileOverlays());
+        return;
+      }
       let locale = undefined;
       try {
         locale = typeof ctx?.get === 'function' ? ctx.get('locale') : undefined;
