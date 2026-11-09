@@ -3221,8 +3221,10 @@ window.__ModuleLoader__.load({
     const LIGHT_PANEL_WIDTH = 364;
     /** Минимальная высота панели-тултипа: меньше не сжимаем — включаем прокрутку. */
     const LIGHT_PANEL_MIN_HEIGHT = 200;
-    /** Отступ панели от краёв окна и от лампы. */
+    /** Отступ панели от краёв окна. */
     const LIGHT_PANEL_MARGIN = 8;
+    /** Зазор между лампой и панелью/стрелкой. */
+    const LIGHT_PANEL_GAP = 8;
 
     /**
      * Видимая область окна. В обычном браузере это layout viewport; в
@@ -3253,18 +3255,36 @@ window.__ModuleLoader__.load({
      */
     function computeLightPanelGeometry({ anchorRect, viewport, scale, contentHeight }) {
       const margin = LIGHT_PANEL_MARGIN;
+      const gap = LIGHT_PANEL_GAP;
       const safeScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
       const width = Math.max(1, Math.min(LIGHT_PANEL_WIDTH, viewport.width - 2 * margin));
-      const room = Math.max(0, anchorRect.top - viewport.top - 2 * margin);
-      const height = Math.max(1, Math.min(Math.max(1, contentHeight), Math.max(1, room)));
-      const top = Math.max(viewport.top + margin, anchorRect.top - margin - height);
       const viewportRight = viewport.left + viewport.width;
+      const viewportBottom = viewport.top + viewport.height;
+      const availableAbove = Math.max(0, anchorRect.top - viewport.top - gap - margin);
+      const availableBelow = Math.max(0, viewportBottom - anchorRect.bottom - gap - margin);
+      const placement = availableAbove < LIGHT_PANEL_MIN_HEIGHT && availableBelow > availableAbove
+        ? 'below'
+        : 'above';
+      const available = placement === 'below' ? availableBelow : availableAbove;
+      const height = Math.max(1, Math.min(Math.max(1, contentHeight), Math.max(1, available)));
+      const top = placement === 'below'
+        ? anchorRect.bottom + gap
+        : anchorRect.top - gap - height;
       const center = anchorRect.left + anchorRect.width / 2;
+      const rightAligned = anchorRect.left + anchorRect.width - width;
       const left = Math.max(
         viewport.left + margin,
-        Math.min(center - width / 2, viewportRight - width - margin),
+        Math.min(
+          anchorRect.left + width <= viewportRight - margin
+            ? anchorRect.left
+            : rightAligned >= viewport.left + margin
+              ? rightAligned
+              : center - width / 2,
+          viewportRight - width - margin,
+        ),
       );
-      return { left, top, width, maxHeight: height, scale: safeScale };
+      const arrowLeft = Math.max(12, Math.min(width - 12, center - left));
+      return { left, top, width, maxHeight: height, scale: safeScale, placement, arrowLeft };
     }
 
     /**
@@ -3394,15 +3414,16 @@ window.__ModuleLoader__.load({
 
     /**
      * Панель-тултип: статус, отсчёт, циферблат и правило тарифов.
-     * @param {object} props - anchorRef, variant, onClose.
+     * @param {object} props - anchorRef (лампа), buttonRef, variant, onClose.
      * @returns {object} панель.
      */
-    function TrafficClockPanel({ anchorRef, variant, onClose }) {
+    function TrafficClockPanel({ anchorRef, buttonRef, variant, onClose }) {
       const { now, running } = useLightTick();
       const status = lightStatus(now);
       const [hover, setHover] = React.useState(null);
       const [position, setPosition] = React.useState(null);
       const panelRef = React.useRef(null);
+      const bodyRef = React.useRef(null);
       /**
        * Пересчитать позицию панели по её настоящим размерам.
        *
@@ -3412,7 +3433,15 @@ window.__ModuleLoader__.load({
        * @returns {void}
        */
       const measure = () => {
+        // Перед замером снимаем ограничение прокрутки: panel.scrollHeight
+        // должен видеть весь контент, а не только текущий maxHeight.
+        const body = bodyRef.current;
+        const previousMaxHeight = body?.style?.maxHeight;
+        if (body !== null && body !== undefined) body.style.maxHeight = 'none';
         const next = panelPosition(anchorRef, panelRef);
+        if (body !== null && body !== undefined && previousMaxHeight !== undefined) {
+          body.style.maxHeight = previousMaxHeight;
+        }
         if (next === null) return;
         setPosition((current) =>
           current !== null &&
@@ -3420,7 +3449,9 @@ window.__ModuleLoader__.load({
           current.top === next.top &&
           current.width === next.width &&
           current.maxHeight === next.maxHeight &&
-          current.scale === next.scale
+          current.scale === next.scale &&
+          current.placement === next.placement &&
+          current.arrowLeft === next.arrowLeft
             ? current
             : next,
         );
@@ -3461,6 +3492,7 @@ window.__ModuleLoader__.load({
           observer = new ResizeObserver(schedule);
           if (panelRef.current !== null) observer.observe(panelRef.current);
           if (anchorRef.current !== null) observer.observe(anchorRef.current);
+          if (buttonRef?.current !== null && buttonRef?.current !== undefined) observer.observe(buttonRef.current);
         }
         return () => {
           window.removeEventListener('resize', onResize);
@@ -3483,8 +3515,10 @@ window.__ModuleLoader__.load({
         const onPointer = (event) => {
           const panel = panelRef.current;
           const anchor = anchorRef.current;
+          const button = buttonRef?.current;
           if (panel !== null && panel.contains(event.target)) return;
           if (anchor !== null && anchor.contains(event.target)) return;
+          if (button !== null && button !== undefined && button.contains(event.target)) return;
           onClose();
         };
         const onKey = (event) => {
@@ -3496,7 +3530,7 @@ window.__ModuleLoader__.load({
           document.removeEventListener('pointerdown', onPointer, true);
           document.removeEventListener('keydown', onKey, true);
         };
-      }, [anchorRef, onClose]);
+      }, [anchorRef, buttonRef, onClose]);
       const t = lightTranslator;
       const target = lightCountdownTarget(status);
       const policy = effectivePolicy();
@@ -3519,20 +3553,26 @@ window.__ModuleLoader__.load({
         ref: panelRef,
         className: `${LIGHT_CLASS}-panel`,
         'data-dsh-light-panel': '',
+        'data-placement': position === null ? 'above' : position.placement,
         style: {
           left: `${position === null ? 0 : position.left}px`,
           top: `${position === null ? 0 : position.top}px`,
           width: position === null ? undefined : `${position.width / position.scale}px`,
-          maxHeight: `${position === null ? LIGHT_PANEL_MIN_HEIGHT : position.maxHeight / position.scale}px`,
+          '--dsh-light-arrow-left': `${position === null ? 24 : position.arrowLeft}px`,
           transform: position === null || position.scale === 1 ? 'none' : `scale(${position.scale})`,
           transformOrigin: '0 0',
-          overflowY: 'auto',
+          overflow: 'visible',
           visibility: position === null ? 'hidden' : 'visible',
         },
         role: 'dialog',
         'aria-label': t('light.clockTitle'),
         onMouseLeave: () => setHover(null),
       },
+        React.createElement('div', {
+          ref: bodyRef,
+          className: `${LIGHT_CLASS}-panelBody`,
+          style: { maxHeight: position === null ? 'none' : `${position.maxHeight / position.scale}px` },
+        },
         React.createElement('div', { className: `${LIGHT_CLASS}-head` },
           React.createElement('span', { className: `${LIGHT_CLASS}-lamp`, style: { background: LIGHT_COLORS[status.light] } }),
           React.createElement('span', { className: `${LIGHT_CLASS}-title` }, t(lightLabelKey(status.light))),
@@ -3553,6 +3593,7 @@ window.__ModuleLoader__.load({
         status.light === 'red' && running
           ? React.createElement('div', { className: `${LIGHT_CLASS}-paused` }, t('light.pausedHint'))
           : null,
+        ),
       );
     }
 
@@ -3581,7 +3622,8 @@ window.__ModuleLoader__.load({
       const prefs = useLightPrefs();
       const status = lightStatus(now);
       const [open, setOpen] = React.useState(false);
-      const anchorRef = React.useRef(null);
+      const buttonRef = React.useRef(null);
+      const lampRef = React.useRef(null);
       const t = lightTranslator;
       const color = LIGHT_COLORS[status.light];
       // Индикаторы работы сессий в сайдбаре краснеют вместе с лампой.
@@ -3612,6 +3654,7 @@ window.__ModuleLoader__.load({
       });
       const lampNode = React.createElement('span', {
         key: 'lamp-wrap',
+        ref: lampRef,
         className: `${LIGHT_CLASS}-lamp-wrap`,
       }, dot);
       const content = [lampNode];
@@ -3626,14 +3669,19 @@ window.__ModuleLoader__.load({
       return React.createElement(React.Fragment, null,
         React.createElement('button', {
           type: 'button',
-          ref: anchorRef,
+          ref: buttonRef,
           className: `${LIGHT_CLASS}-button`,
           'aria-label': label,
           'data-light': status.light,
           onClick: () => setOpen((value) => !value),
         }, content),
         open
-          ? renderLightPortal(React.createElement(TrafficClockPanel, { anchorRef, variant, onClose: () => setOpen(false) }))
+          ? renderLightPortal(React.createElement(TrafficClockPanel, {
+              anchorRef: lampRef,
+              buttonRef,
+              variant,
+              onClose: () => setOpen(false),
+            }))
           : null,
       );
     }
@@ -3737,11 +3785,19 @@ window.__ModuleLoader__.load({
       `pointer-events:none;opacity:0;animation:${LIGHT_CLASS}-wave 2s ease-out infinite}`,
       `.${LIGHT_CLASS}-label{white-space:nowrap}`,
       `.${LIGHT_CLASS}-count{color:var(--dsw-alias-label-tertiary)}`,
-      `.${LIGHT_CLASS}-panel{box-sizing:border-box;position:fixed;z-index:2147483000;width:364px;padding:12px;`,
+      `.${LIGHT_CLASS}-panel{box-sizing:border-box;position:fixed;z-index:2147483000;width:364px;`,
       'border:0;border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-menu);',
       'backdrop-filter:var(--dsw-menu-backdrop-filter);-webkit-backdrop-filter:var(--dsw-menu-backdrop-filter);',
       '--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent);',
-      'color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;white-space:normal;overflow-wrap:anywhere}',
+      'color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;white-space:normal;overflow-wrap:anywhere;',
+      'overflow:visible}',
+      `.${LIGHT_CLASS}-panelBody{box-sizing:border-box;padding:12px;overflow-y:auto;overscroll-behavior:contain}`,
+      `.${LIGHT_CLASS}-panel::before{content:"";position:absolute;left:var(--dsh-light-arrow-left,24px);width:0;height:0;margin-left:-7px;border:7px solid transparent;z-index:1;pointer-events:none}`,
+      `.${LIGHT_CLASS}-panel[data-placement="above"]::before{top:100%;border-top-color:var(--dsw-specific-menu);border-bottom:0}`,
+      `.${LIGHT_CLASS}-panel[data-placement="below"]::before{bottom:100%;border-bottom-color:var(--dsw-specific-menu);border-top:0}`,
+      `@keyframes ${LIGHT_CLASS}-panel-in{from{opacity:0;translate:0 4px}to{opacity:1;translate:0 0}}`,
+      `.${LIGHT_CLASS}-panel{animation:${LIGHT_CLASS}-panel-in 120ms ease-out}`,
+      `@media (prefers-reduced-motion:reduce){.${LIGHT_CLASS}-panel{animation:none}}`,
       `.${LIGHT_CLASS}-head{display:flex;align-items:center;gap:6px;margin-bottom:10px;font-weight:500}`,
       `.${LIGHT_CLASS}-title{color:var(--dsw-alias-label-primary)}`,
       `.${LIGHT_CLASS}-head .${LIGHT_CLASS}-lamp{width:10px;height:10px}`,

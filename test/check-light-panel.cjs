@@ -27,7 +27,7 @@ function test(name, fn) { fn(); passed += 1; console.log('ok', name); }
 const anchor = (left, top, width = 32) => ({ left, top, width, height: 20, right: left + width, bottom: top + 20 });
 const viewport = (width, height) => ({ left: 0, top: 0, width, height });
 
-test('панель стоит над якорем и центрируется', () => {
+test('панель стоит над лампой', () => {
   const g = context.compute({ anchorRect: anchor(190, 860), viewport: viewport(412, 915), scale: 1, contentHeight: 300 });
   assert.equal(g.width, 364);
   assert.equal(g.left, 24);
@@ -55,11 +55,24 @@ test('якорь у правого края: панель прижимается
   assert.equal(g.left, 412 - 364 - 8);
 });
 
-test('якорь близко к верху: высота урезается, низ остаётся выше якоря', () => {
+test('якорь близко к верху: панель раскрывается вниз', () => {
   const g = context.compute({ anchorRect: anchor(190, 100), viewport: viewport(412, 915), scale: 1, contentHeight: 300 });
-  assert.equal(g.maxHeight, 84);
-  assert.equal(g.top, 8);
-  assert.ok(g.top + g.maxHeight <= 100 - 8);
+  assert.equal(g.placement, 'below');
+  assert.equal(g.maxHeight, 300);
+  assert.equal(g.top, 128);
+  assert.ok(g.top >= 100 + 20 + 8, 'панель ниже лампы');
+});
+
+test('широкая кнопка не важна: панель выравнивается по лампе, а не по центру', () => {
+  const g = context.compute({ anchorRect: anchor(499, 456, 16), viewport: viewport(1694, 958), scale: 1, contentHeight: 229 });
+  assert.equal(g.left, 499, 'левый край панели у лампы');
+  assert.equal(g.arrowLeft, 12, 'стрелка прижата к лампе');
+  assert.equal(g.placement, 'above');
+});
+
+test('якорь у правого края: стрелка остаётся внутри панели', () => {
+  const g = context.compute({ anchorRect: anchor(400, 600, 12), viewport: viewport(412, 700), scale: 1, contentHeight: 200 });
+  assert.ok(g.arrowLeft >= 12 && g.arrowLeft <= g.width - 12);
 });
 
 test('масштаб 1.25 сохраняет визуальные размеры после деления в рендере', () => {

@@ -2252,21 +2252,25 @@ check('панель светофора открывается только по 
   assert.equal(tree.children[1], null, 'до нажатия панель закрыта');
 });
 
-check('панель раскрывается вверх, ограничена окном и вынесена в портал', () => {
+check('панель привязана к лампе, ограничена окном и вынесена в портал', () => {
   const source = fs.readFileSync(CLIENT, 'utf8');
   assert.ok(source.includes('function computeLightPanelGeometry'), 'есть чистая функция геометрии');
-  assert.ok(source.includes('anchorRect.top - margin - height'), 'панель встаёт над якорем');
+  assert.ok(source.includes('const gap = LIGHT_PANEL_GAP'), 'есть зазор до лампы');
+  assert.ok(source.includes('anchorRect.top - gap - height'), 'панель встаёт над лампой');
+  assert.ok(source.includes('anchorRect.bottom + gap'), 'при нехватке места панель раскрывается вниз');
+  assert.ok(source.includes('arrowLeft'), 'геометрия считает стрелку');
+  assert.ok(source.includes("--dsh-light-arrow-left"), 'стрелка привязана к лампе');
+  assert.ok(source.includes('panelBody'), 'контент прокручивается отдельно от стрелки');
+  assert.ok(source.includes('data-placement'), 'направление панели помечено');
+  assert.ok(source.includes('anchorRef: lampRef'), 'якорь — сама лампа, а не вся кнопка');
   assert.ok(source.includes('function renderLightPortal'), 'панель уходит в body через портал');
   assert.ok(source.includes('ReactDOM.createPortal'), 'используется createPortal');
   assert.ok(source.includes("'data-dsh-light-panel': ''"), 'панель помечена для исключения из общего popup-zoom');
   assert.ok(source.includes("window.addEventListener('dsh-ui-zoom-change'"), 'смена масштаба пересчитывает панель');
   assert.ok(source.includes('settleTimer = window.setTimeout(run, 140)'), 'после смены масштаба есть добор замера');
   assert.ok(source.includes("transform: position === null || position.scale === 1 ? 'none' : `scale(${position.scale})`"), 'масштаб применяется к панели');
-  assert.ok(source.includes("maxHeight: `${position === null ? LIGHT_PANEL_MIN_HEIGHT : position.maxHeight / position.scale}px`"), 'высота ограничена местом над якорем');
-  assert.ok(source.includes("overflowY: 'auto'"), 'длинная панель прокручивается');
-  assert.equal(source.includes('rect.bottom + margin'), false, 'нисходящего положения больше нет');
-  assert.equal(source.includes("variant === 'header'"), false, 'индикатор в шапку не регистрируется');
   assert.ok(source.includes('LIGHT_PANEL_MIN_HEIGHT = 200'), 'минимальная высота панели задана');
+  assert.equal(source.includes("variant === 'header'"), false, 'индикатор в шапку не регистрируется');
 });
 
 check('совместимость: нативный drawer старого ядра не ломает сетку', () => {
