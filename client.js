@@ -5521,6 +5521,74 @@ window.__ModuleLoader__.load({
         ?? document.querySelector('[data-dsh-tweaks-more-slot] [class*="_moreButton"]');
       let scheduled = false;
       let probeViews = 0;
+      let revealTimer = 0;
+
+      // Короткая мягкая анимация появления. Меню показывается один раз, уже
+      // собранным: раньше пункты досыпались в открытое меню и оно дёргалось.
+      const style = document.createElement('style');
+      style.dataset.dshHeaderMenuMotion = '';
+      style.textContent = [
+        '@keyframes dsh-tweaks-menu-drop{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}',
+        '[data-dsh-tweaks-header-menu][data-dsh-tweaks-menu-ready]{animation:dsh-tweaks-menu-drop 130ms cubic-bezier(.2,.8,.2,1);transform-origin:top center;will-change:transform,opacity}',
+        '@media (prefers-reduced-motion:reduce){[data-dsh-tweaks-header-menu][data-dsh-tweaks-menu-ready]{animation:none}}',
+      ].join('');
+      document.head?.appendChild(style);
+
+      /** Снять таймер аварийного показа. */
+      function clearRevealTimer() {
+        if (revealTimer !== 0) {
+          window.clearTimeout(revealTimer);
+          revealTimer = 0;
+        }
+      }
+
+      /** Спрятать меню до окончания сборки пунктов. */
+      function beginBuild(menu) {
+        if (menu === null) return;
+        if (menu.dataset.dshTweaksMenuReady === '1' || menu.dataset.dshTweaksMenuBuilding === '1') return;
+        menu.dataset.dshTweaksMenuBuilding = '1';
+        menu.style.visibility = 'hidden';
+        menu.style.opacity = '0';
+        menu.style.pointerEvents = 'none';
+      }
+
+      /** Показать собранное меню с одной короткой анимацией сверху вниз. */
+      function finishBuild(menu, trigger) {
+        if (menu === null || menu.dataset.dshTweaksMenuReady === '1') return;
+        clearRevealTimer();
+        clampHeaderMenu(menu, trigger);
+        delete menu.dataset.dshTweaksMenuBuilding;
+        menu.style.visibility = '';
+        menu.style.opacity = '';
+        menu.style.pointerEvents = '';
+        menu.setAttribute('data-dsh-tweaks-header-menu', '');
+        // Перезапуск анимации на повторном открытии: узел мог быть тем же.
+        menu.removeAttribute('data-dsh-tweaks-menu-ready');
+        void menu.offsetWidth;
+        menu.setAttribute('data-dsh-tweaks-menu-ready', '');
+        menu.dataset.dshTweaksMenuReady = '1';
+        const done = () => menu.removeAttribute('data-dsh-tweaks-menu-ready');
+        menu.addEventListener?.('animationend', done, { once: true });
+        window.setTimeout(done, 220);
+      }
+
+      /**
+       * Сбросить состояние открытия при закрытии меню, чтобы следующее
+       * открытие снова пришло с анимацией и не осталось скрытым.
+       * @returns {void}
+       */
+      function resetMenus() {
+        clearRevealTimer();
+        probeViews = 0;
+        for (const menu of document.querySelectorAll('[data-dsh-tweaks-header-menu], [data-dsh-tweaks-menu-building]')) {
+          delete menu.dataset.dshTweaksMenuReady;
+          delete menu.dataset.dshTweaksMenuBuilding;
+          menu.removeAttribute('data-dsh-tweaks-menu-ready');
+          menu.style.visibility = '';
+          menu.style.opacity = '';
+          menu.style.pointerEvents = '';
+        }
+      }
 
       /** Скопировать id текущей сессии. */
       function copySessionId() {
@@ -5593,15 +5661,19 @@ window.__ModuleLoader__.load({
         if (document.documentElement?.getAttribute?.(MOBILE_DRAWER_ATTR) !== 'on') return;
         const trigger = moreOf();
         if (trigger === null) return;
-        if (trigger.getAttribute('aria-expanded') !== 'true') { probeViews = 0; return; }
+        if (trigger.getAttribute('aria-expanded') !== 'true') { resetMenus(); return; }
         const menu = [...document.querySelectorAll('[role="menu"]')].find((node) => {
           if (node.querySelector('[class*="viewsMoreMenu"]') !== null) return false;
           return node.querySelector('button[role="menuitem"]') !== null;
         });
         if (menu === undefined) return;
+        // Меню уже показано: после появления больше не меняем его состав.
+        if (menu.dataset.dshTweaksMenuReady === '1') return;
+        beginBuild(menu);
         const template = menu.querySelector('button[role="menuitem"]');
         if (template === null) return;
         const host = menu.querySelector('[role="presentation"]') ?? menu;
+        let complete = true;
         const seen = new Set(['More actions', translate('session.copyId')]);
         for (const node of menu.querySelectorAll('[data-dsh-tweaks-overflow-item]')) seen.add(node.textContent.trim());
         if (menu.getAttribute('data-dsh-tweaks-overflow-base') === null) {
@@ -5635,10 +5707,15 @@ window.__ModuleLoader__.load({
               }));
             }
             viewsTrigger.click();
-          } else if (probeViews < 3) {
+          } else if (probeViews < 2) {
             probeViews += 1;
+            complete = false;
             viewsTrigger.click();
             window.setTimeout(inject, 30);
+          } else {
+            // Виды не появились за два коротких прохода: показываем без них,
+            // чтобы не держать меню скрытым дольше ~100 мс.
+            menu.setAttribute('data-dsh-tweaks-views-done', '');
           }
         }
         const originals = [
@@ -5652,7 +5729,20 @@ window.__ModuleLoader__.load({
           seen.add(label);
           host.appendChild(makeItem(template, label, () => original.click()));
         }
+        if (complete) {
+          finishBuild(menu, trigger);
+          return;
+        }
+        // Страховка: даже если пункты видов не пришли, показываем меню быстро,
+        // уже в финальной позиции, без последующего роста высоты.
         clampHeaderMenu(menu, trigger);
+        clearRevealTimer();
+        revealTimer = window.setTimeout(() => {
+          revealTimer = 0;
+          if (menu.dataset.dshTweaksMenuReady === '1') return;
+          menu.setAttribute('data-dsh-tweaks-views-done', '');
+          finishBuild(menu, trigger);
+        }, 100);
       }
 
       /** Запланировать инъекцию после перерисовки меню. */
@@ -5707,9 +5797,11 @@ window.__ModuleLoader__.load({
       document.addEventListener('click', onClick, true);
       connectObserver();
       return () => {
+        clearRevealTimer();
         disconnectObserver();
         stopWatchingVisibility();
         document.removeEventListener('click', onClick, true);
+        style.remove();
       };
     }
 
@@ -6707,24 +6799,111 @@ window.__ModuleLoader__.load({
       let scheduled = false;
       let disposed = false;
       const marked = new Set();
+      /** Тип оверлея, подтверждённый двумя проходами подряд. */
+      let confirmedKind = null;
+      /** Тип оверлея на прошлом проходе и сколько проходов он держится. */
+      let lastKind = null;
+      let kindStreak = 0;
+      /** Страховочный таймер: пока затемнение висит, оверлей перепроверяется. */
+      let safetyTimer = 0;
 
       /** Сейчас телефонный (узкий) режим? */
       const isPhone = () => (Number(window.innerWidth) || 0) <= 720;
 
-      /** Панель Agent Team. */
-      const teamPanel = () => doc.querySelector('[data-team-panel]');
+      /** Стиль узла; в заглушках без getComputedStyle берём inline-стиль. */
+      const styleOf = (node) => {
+        try {
+          return typeof getComputedStyle === 'function' ? getComputedStyle(node) : node?.style ?? {};
+        } catch (_error) {
+          return node?.style ?? {};
+        }
+      };
 
       /**
-       * Меню субагентов: рисуется в body как fixed-предок `[role="tree"]`.
+       * Узел действительно виден в вьюпорте.
+       *
+       * Проверка строгая: скрытые узлы (`display:none`, `visibility:hidden`,
+       * `opacity:0`) и узлы за границами окна оверлеями не считаются. Без неё
+       * на телефоне за оверлей принималось вынесенное или скрытое меню —
+       * прозрачное затемнение ложилось поверх экрана и съедало все тапы, то
+       * есть интерфейс выглядел полностью зависшим.
+       * @param {Element} node - проверяемый узел.
+       * @returns {boolean} виден ли он в окне.
+       */
+      const visibleInViewport = (node) => {
+        if (node === null || node === undefined || typeof node.getBoundingClientRect !== 'function') return false;
+        const style = styleOf(node);
+        const display = String(style.display ?? '');
+        const visibility = String(style.visibility ?? '');
+        if (display === 'none' || visibility === 'hidden' || visibility === 'collapse') return false;
+        const opacity = Number.parseFloat(style.opacity ?? '1');
+        if (Number.isFinite(opacity) && opacity === 0) return false;
+        const rect = node.getBoundingClientRect();
+        if (!(rect.width > 1 && rect.height > 1)) return false;
+        const width = Number(window.innerWidth) || 0;
+        const height = Number(window.innerHeight) || 0;
+        if (width <= 0 || height <= 0) return false;
+        return rect.left < width && rect.right > 0 && rect.top < height && rect.bottom > 0;
+      };
+
+      /**
+       * Узел принадлежит панелям приложения, а не слою поверх экрана.
+       * @param {Element} node - проверяемый узел.
+       * @returns {boolean} да или нет.
+       */
+      const insideChrome = (node) => {
+        if (node === null || node === undefined || typeof node.closest !== 'function') return false;
+        return node.closest('[data-side], [data-dockkit-pane], [class*="_sidebarCol"], nav, aside') !== null;
+      };
+
+      /**
+       * Кнопка, раскрывающая меню субагентов.
+       * @returns {Element | null} открытый триггер либо null.
+       */
+      const subagentTrigger = () => doc.querySelector('button[aria-haspopup="tree"][aria-expanded="true"]');
+
+      /**
+       * Панель Agent Team: только открытая, видимая и поверх экрана.
+       *
+       * Пока панель открывают, приложение успевает отрисовать её скрытой
+       * (`visibility:hidden`, 0,0): размер у неё уже есть, поэтому по rect её
+       * нельзя считать показанной.
+       * @returns {Element | null} панель либо null.
+       */
+      const teamPanel = () => {
+        const panel = doc.querySelector('[data-team-panel]');
+        if (panel === null || panel === undefined) return null;
+        const role = typeof panel.getAttribute === 'function' ? panel.getAttribute('role') : null;
+        if (role !== null && role !== undefined && role !== 'dialog') return null;
+        if (insideChrome(panel)) return null;
+        return visibleInViewport(panel) ? panel : null;
+      };
+
+      /**
+       * Меню субагентов: открыто по триггеру и лежит fixed-слоем в body.
+       *
+       * Без открытого триггера меню не ищем вовсе: закрытое или чужое дерево
+       * (например, дерево сессий в выдвижной панели) тоже бывает
+       * `[role="tree"]` с fixed-предком, и раньше оно включало затемнение.
        * @returns {object | null} корень меню либо null.
        */
       const subagentMenu = () => {
+        const trigger = subagentTrigger();
+        if (trigger === null || !visibleInViewport(trigger)) return null;
+        const triggerRect = trigger.getBoundingClientRect();
         for (const tree of doc.querySelectorAll('[role="tree"]')) {
+          if (insideChrome(tree)) continue;
           let node = tree;
-          while (node !== null && node !== doc.body && getComputedStyle(node).position !== 'fixed') {
+          while (node !== null && node !== doc.body && styleOf(node).position !== 'fixed') {
             node = node.parentElement;
           }
-          if (node !== null && node !== doc.body) return node;
+          if (node === null || node === doc.body) continue;
+          if (!visibleInViewport(node)) continue;
+          // Меню выпадает от своего триггера, а не приходит из другого угла экрана.
+          const rect = node.getBoundingClientRect();
+          const nearTrigger = rect.top >= triggerRect.top - 40 && rect.top <= triggerRect.bottom + 200;
+          if (!nearTrigger) continue;
+          return node;
         }
         return null;
       };
@@ -6740,13 +6919,38 @@ window.__ModuleLoader__.load({
         return kind;
       };
 
-      /** Убрать затемнение и крестик. */
+      /** Снять страховочный таймер перепроверки. */
+      function stopSafety() {
+        if (safetyTimer !== 0) {
+          window.clearTimeout(safetyTimer);
+          safetyTimer = 0;
+        }
+      }
+
+      /** Убрать затемнение и крестик, снять подтверждение оверлея. */
       const clearChrome = () => {
+        stopSafety();
         if (backdrop !== null) backdrop.remove();
         if (closeButton !== null) closeButton.remove();
         backdrop = null;
         closeButton = null;
         activeKind = null;
+        confirmedKind = null;
+        lastKind = null;
+        kindStreak = 0;
+      };
+
+      /**
+       * Перепроверить оверлей через 2 с, даже если приложение не прислало
+       * ни одной записи: закрытие может пройти без мутаций DOM.
+       * @returns {void}
+       */
+      const armSafety = () => {
+        if (safetyTimer !== 0) return;
+        safetyTimer = window.setTimeout(() => {
+          safetyTimer = 0;
+          schedule();
+        }, 2000);
       };
 
       /**
@@ -6774,6 +6978,9 @@ window.__ModuleLoader__.load({
         if (backdrop === null) {
           backdrop = doc.createElement('div');
           backdrop.setAttribute('data-dsh-tweaks-overlay-backdrop', '');
+          // Пока оверлей не подтверждён вторым проходом, затемнение не ест тапы:
+          // ошибка детектора иначе запирает весь интерфейс на телефоне.
+          backdrop.style.pointerEvents = 'none';
           backdrop.addEventListener('click', (event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -6819,15 +7026,12 @@ window.__ModuleLoader__.load({
           if (rect !== undefined && rect.width > 0 && rect.bottom > headerBottom) headerBottom = rect.bottom;
         }
         const top = Math.max(8, Math.round(headerBottom > 0 ? headerBottom + 4 : 8));
+        // Оба детектора возвращают только положительно видимый оверлей:
+        // при сомнении затемнение не ставим вовсе.
         const team = teamPanel();
         const subagents = subagentMenu();
-        const visible = (node) => {
-          if (node === null || node === undefined) return false;
-          const rect = node.getBoundingClientRect?.();
-          return rect !== undefined && rect.width > 1 && rect.height > 1;
-        };
-        const teamKind = visible(team) ? mark(team, 'team') : null;
-        const subagentKind = visible(subagents) ? mark(subagents, 'subagents') : null;
+        const teamKind = team === null ? null : mark(team, 'team');
+        const subagentKind = subagents === null ? null : mark(subagents, 'subagents');
         const kind = subagentKind ?? teamKind;
         if (kind === null) {
           clearChrome();
@@ -6835,7 +7039,23 @@ window.__ModuleLoader__.load({
         }
         doc.documentElement?.style?.setProperty('--dsh-tweaks-mobile-overlay-top', `${top}px`);
         activeKind = kind;
+        if (kind === lastKind) kindStreak += 1;
+        else {
+          lastKind = kind;
+          kindStreak = 1;
+        }
         ensureChrome();
+        // Тапы перехватывает только оверлей, подтверждённый вторым проходом
+        // подряд: первый проход рисует неинтерактивное затемнение и просит
+        // перепроверку в следующем кадре.
+        const interactive = kindStreak >= 2;
+        if (backdrop !== null) {
+          const next = interactive ? 'auto' : 'none';
+          if (backdrop.style.pointerEvents !== next) backdrop.style.pointerEvents = next;
+        }
+        confirmedKind = interactive ? kind : null;
+        if (!interactive) schedule();
+        armSafety();
       };
 
       const schedule = () => {
@@ -6887,11 +7107,16 @@ window.__ModuleLoader__.load({
         observer?.observe(doc.body ?? doc.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'aria-expanded'] });
         schedule();
       };
-      /** Выключить наблюдение, пока вкладка скрыта. */
+      /**
+       * Выключить наблюдение, пока вкладка скрыта, и снять затемнение:
+       * скрытая вкладка не должна оставлять поверх себя перехват тапов.
+       * @returns {void}
+       */
       const disconnectObserver = () => {
         if (!observing) return;
         observing = false;
         observer?.disconnect();
+        clearChrome();
       };
       const stopWatchingVisibility = pauseWhenHidden(doc, connectObserver, disconnectObserver);
       window.addEventListener('resize', schedule);

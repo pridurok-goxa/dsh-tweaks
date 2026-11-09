@@ -2222,6 +2222,18 @@ check('панель раскрывается вверх, ограничена о
   assert.ok(source.includes('LIGHT_PANEL_MIN_HEIGHT = 200'), 'минимальная высота панели задана');
 });
 
+check('меню «…» показывается один раз с быстрой анимацией сверху вниз', () => {
+  const source = fs.readFileSync(CLIENT, 'utf8');
+  assert.ok(source.includes('dsh-tweaks-menu-drop'), 'ключевые кадры анимации');
+  assert.ok(source.includes('animation:dsh-tweaks-menu-drop 130ms cubic-bezier'), '130 мс ease-out');
+  assert.ok(source.includes('data-dsh-tweaks-menu-ready'), 'маркер запуска анимации');
+  assert.ok(source.includes('dshTweaksMenuBuilding'), 'пока идёт сборка, меню скрыто');
+  assert.ok(source.includes('dshTweaksMenuReady'), 'после показа состав не меняется');
+  assert.ok(source.includes("window.setTimeout(() =>") && source.includes('finishBuild(menu, trigger)'), 'есть страховочный показ');
+  assert.ok(source.includes('prefers-reduced-motion:reduce'), 'анимация уважает reduced motion');
+  assert.ok(source.includes(`menu.dataset.dshTweaksMenuReady === '1') return;`), 'после показа inject не добавляет пункты');
+});
+
 check('план-режим: только системный чип, вход из плюс-меню', () => {
   const source = fs.readFileSync(CLIENT, 'utf8');
   assert.equal(source.includes('ComposerModeChip'), false, 'кастомный чип удалён');
