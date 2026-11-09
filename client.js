@@ -392,6 +392,20 @@ window.__ModuleLoader__.load({
         'tweak.trafficLight': 'Peak-hours traffic light',
         'tweak.imageModelFallback': 'Send images with a vision model',
         'tweak.freePanels': 'Free panel resize',
+        'version.mobileComposer': 'For 0.2.1-rc.5 and 0.2.2-rc.1.',
+        'version.queueEditor': 'For 0.2.1-rc.5 and 0.2.2-rc.1.',
+        'version.fileDownload': 'For 0.2.1-rc.5 and 0.2.2-rc.1.',
+        'version.mobileSidebar': 'For 0.2.1-rc.5; 0.2.2-rc.1 has the mobile shell built in.',
+        'version.zoom': 'For 0.2.1-rc.5 and 0.2.2-rc.1.',
+        'version.contextMenu': 'For 0.2.1-rc.5 and 0.2.2-rc.1.',
+        'version.whisper': 'For 0.2.1-rc.5 and 0.2.2-rc.1.',
+        'version.trafficLight': 'For 0.2.1-rc.5 and 0.2.2-rc.1.',
+        'version.freePanels': 'Panel resize: 0.2.1-rc.5 and 0.2.2-rc.1. Center expansion: only 0.2.1-rc.5.',
+        'version.imageModelFallback': 'For 0.2.1-rc.5 and 0.2.2-rc.1.',
+        'form.core': 'Core: {{version}}',
+        'settings.open': 'Tweaks',
+        'settings.title': 'Volna tweaks',
+        'settings.close': 'Close tweaks',
         'imageFallback.text': 'This model does not support images. Send this message with a model that does.',
         'imageFallback.actionPrefix': 'Send with',
         'imageFallback.busy': 'Switching model…',
@@ -455,6 +469,20 @@ window.__ModuleLoader__.load({
         'tweak.trafficLight': 'Светофор дорогих часов',
         'tweak.imageModelFallback': 'Отправка картинок через модель со зрением',
         'tweak.freePanels': 'Свободный размер панелей',
+        'version.mobileComposer': 'Для 0.2.1-rc.5 и 0.2.2-rc.1.',
+        'version.queueEditor': 'Для 0.2.1-rc.5 и 0.2.2-rc.1.',
+        'version.fileDownload': 'Для 0.2.1-rc.5 и 0.2.2-rc.1.',
+        'version.mobileSidebar': 'Для 0.2.1-rc.5; в 0.2.2-rc.1 мобильный shell уже в ядре.',
+        'version.zoom': 'Для 0.2.1-rc.5 и 0.2.2-rc.1.',
+        'version.contextMenu': 'Для 0.2.1-rc.5 и 0.2.2-rc.1.',
+        'version.whisper': 'Для 0.2.1-rc.5 и 0.2.2-rc.1.',
+        'version.trafficLight': 'Для 0.2.1-rc.5 и 0.2.2-rc.1.',
+        'version.freePanels': 'Размер панелей — 0.2.1-rc.5 и 0.2.2-rc.1; расширение центра — только 0.2.1-rc.5.',
+        'version.imageModelFallback': 'Для 0.2.1-rc.5 и 0.2.2-rc.1.',
+        'form.core': 'Ядро: {{version}}',
+        'settings.open': 'Твики',
+        'settings.title': 'Волна твик',
+        'settings.close': 'Закрыть твики',
         'imageFallback.text': 'Эта модель не видит изображения. Отправить сообщение моделью, которая их видит?',
         'imageFallback.actionPrefix': 'Отправить с',
         'imageFallback.busy': 'Меняю модель…',
@@ -1571,9 +1599,85 @@ window.__ModuleLoader__.load({
      */
     /* #region layout-capabilities */
 
+    /** Полные версии ядра, на которые рассчитаны твики. */
+    const CORE_LEGACY = '0.2.1-rc.5';
+    const CORE_MODERN = '0.2.2-rc.1';
+
     /** Рамка приложения. */
     function layoutFrame() {
       return document.querySelector('[class*="_frame"]');
+    }
+
+    /**
+     * Версия ядра из boot-данных страницы.
+     * @returns {string} версия или `unknown`.
+     */
+    function coreVersion() {
+      const release = typeof window === 'object' && window !== null ? window.__DSH_BOOT__?.release : undefined;
+      const version = typeof release?.version === 'string' ? release.version.trim() : '';
+      return version === '' ? 'unknown' : version;
+    }
+
+    /**
+     * Разобрать версию с prerelease-хвостом (`0.2.1-rc.5`).
+     * @param {string} value - версия.
+     * @returns {{major:number,minor:number,patch:number,pre:string}|null} части.
+     */
+    function parseCoreVersion(value) {
+      const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(String(value ?? ''));
+      if (match === null) return null;
+      return { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]), pre: match[4] ?? '' };
+    }
+
+    /**
+     * Сравнить версии как semver, включая prerelease.
+     * @param {string} left - левая версия.
+     * @param {string} right - правая версия.
+     * @returns {number} -1, 0 или 1.
+     */
+    function compareCoreVersion(left, right) {
+      const a = parseCoreVersion(left);
+      const b = parseCoreVersion(right);
+      if (a === null || b === null) return 0;
+      for (const key of ['major', 'minor', 'patch']) {
+        if (a[key] !== b[key]) return a[key] < b[key] ? -1 : 1;
+      }
+      if (a.pre === b.pre) return 0;
+      if (a.pre === '') return 1;
+      if (b.pre === '') return -1;
+      const pa = a.pre.split('.');
+      const pb = b.pre.split('.');
+      for (let index = 0; index < Math.max(pa.length, pb.length); index += 1) {
+        if (pa[index] === undefined) return -1;
+        if (pb[index] === undefined) return 1;
+        if (pa[index] === pb[index]) continue;
+        const na = /^\d+$/.test(pa[index]);
+        const nb = /^\d+$/.test(pb[index]);
+        if (na && nb) return Number(pa[index]) < Number(pb[index]) ? -1 : 1;
+        return pa[index] < pb[index] ? -1 : 1;
+      }
+      return 0;
+    }
+
+    /**
+     * Возможности текущего ядра, влияющие на твики.
+     * @returns {{version:string,modern:boolean,modernShell:boolean,nativeComposerDock:boolean,legacyComposerDock:boolean}} флаги.
+     */
+    function coreFeatures() {
+      const version = coreVersion();
+      const parsed = parseCoreVersion(version);
+      const modern = parsed !== null && compareCoreVersion(version, CORE_MODERN) >= 0;
+      // Слот conversation.input.dock появился уже в 0.2.1-rc.5: старый
+      // conversation.composer.dock есть только у более ранних сборок.
+      const inputDock = parsed !== null && compareCoreVersion(version, CORE_LEGACY) >= 0;
+      const modernShell = modern || nativeSidebarDrawer();
+      return {
+        version,
+        modern,
+        modernShell,
+        nativeComposerDock: inputDock || document.querySelector('[data-slot="conversation.input.dock"]') !== null,
+        legacyComposerDock: document.querySelector('[data-slot="conversation.composer.dock"]') !== null,
+      };
     }
 
     /**
@@ -1645,12 +1749,17 @@ window.__ModuleLoader__.load({
       // центральной колонки сохраняет нижнюю границу DSH (680 px), из-за которой
       // при сужении центра чат уезжал за колонку и «скрывался». Ослабляем её,
       // личную ширину чата (если её выставили ручкой) не трогаем.
+      // На 0.2.2 центральную колонку расширяет само ядро: наш CSS там дублирует
+      // его и на мобиле может сузить ленту.
+      const modernCenter = coreFeatures().modernShell;
       style.textContent = [
         '[data-sidebar-right-panel]:not([data-sidebar-right-panel="fullscreen"]){width:100%!important}',
         // Колонка сайдбара тянется, а его содержимое приложение держит в 280 px
         // инлайновой шириной: без компенсации панель выглядела «не растягивается».
         '[class*="_sidebarCol"] [data-slot] > *{width:100%!important}',
-        '[class*="_body"]{--dsh-chat-content-width:var(--dsh-chat-user-width,clamp(240px,calc(var(--dsh-conversation-column-width, 0px) * .64),920px))!important}',
+        modernCenter
+          ? ''
+          : '[class*="_body"]{--dsh-chat-content-width:var(--dsh-chat-user-width,clamp(240px,calc(var(--dsh-conversation-column-width, 0px) * .64),920px))!important}',
       ].join('\n');
       document.head?.appendChild(style);
 
@@ -3693,10 +3802,16 @@ window.__ModuleLoader__.load({
       }
       if (typeof slots?.inject === 'function' && typeof slots?.register === 'function') {
         try {
+          // Начиная с 0.2.1-rc.5 dock-слот называется conversation.input.dock;
+          // старый conversation.composer.dock у более ранних сборок, поэтому
+          // светофор раньше не появлялся на обоих актуальных ядрах.
+          const dockSlot = coreFeatures().nativeComposerDock
+            ? 'conversation.input.dock'
+            : 'conversation.composer.dock';
           // Отрицательный order ставит светофор первым в строке дока: у системных
           // записей порядок 0, а сортировка идёт по возрастанию.
-          own(slots.inject('conversation.composer.dock', () => slots.register(
-            { name: 'conversation.composer.dock', id: 'traffic-light', order: -1000 },
+          own(slots.inject(dockSlot, () => slots.register(
+            { name: dockSlot, id: 'traffic-light', order: -1000 },
             (props) => React.createElement(TrafficLightIndicator, { ...props, variant: 'dock' }),
           )));
         } catch (error) {
@@ -7518,6 +7633,7 @@ window.__ModuleLoader__.load({
       mobileComposer: {
         title: 'Мобильный ввод: Enter переносит строку',
         titleKey: 'tweak.mobileComposer',
+        support: 'all',
         defaultOn: true,
         activate(ctx, api) {
           setupMobileComposer(ctx, api);
@@ -7527,6 +7643,7 @@ window.__ModuleLoader__.load({
       queueEditor: {
         title: 'Очередь: редактирование с вложениями',
         titleKey: 'tweak.queueEditor',
+        support: 'all',
         // Единая форма с сохранением позиции; host-роут в tweaks/queue-edit-host.js.
         defaultOn: true,
         activate(ctx, api) {
@@ -7536,6 +7653,7 @@ window.__ModuleLoader__.load({
       fileDownload: {
         title: 'Скачивание файлов из чата и вкладок',
         titleKey: 'tweak.fileDownload',
+        support: 'all',
         defaultOn: true,
         activate(ctx, api) {
           setupFileDownload(ctx, api);
@@ -7544,6 +7662,7 @@ window.__ModuleLoader__.load({
       mobileSidebar: {
         title: 'Мобильное меню: выдвижная панель',
         titleKey: 'tweak.mobileSidebar',
+        support: 'legacy',
         // Лёгкий твик: CSS, кнопка в шапке и подавление фокуса; хост-части нет.
         defaultOn: true,
         activate(ctx, api) {
@@ -7553,6 +7672,7 @@ window.__ModuleLoader__.load({
       zoom: {
         title: 'Масштаб интерфейса',
         titleKey: 'tweak.zoom',
+        support: 'all',
         defaultOn: true,
         activate(ctx, api) {
           setup(ctx, api.markReady, api.own);
@@ -7564,6 +7684,7 @@ window.__ModuleLoader__.load({
       contextMenu: {
         title: 'Своё меню по правой кнопке',
         titleKey: 'tweak.contextMenu',
+        support: 'all',
         defaultOn: true,
         activate(ctx, api) {
           attachContextMenu(ctx, api);
@@ -7572,6 +7693,7 @@ window.__ModuleLoader__.load({
       whisper: {
         title: 'Распознавание русской речи',
         titleKey: 'tweak.whisper',
+        support: 'all',
         // Тяжёлый твик: поднимает Python-воркер и качает модель весов,
         // поэтому сам не включается — только галочкой.
         defaultOn: false,
@@ -7591,6 +7713,7 @@ window.__ModuleLoader__.load({
       trafficLight: {
         title: 'Светофор дорогих часов',
         titleKey: 'tweak.trafficLight',
+        support: 'all',
         // Лёгкий твик: индикатор в интерфейсе и пауза автоматической работы
         // в хост-половине (`tweaks/traffic-light-host.js`).
         defaultOn: true,
@@ -7612,6 +7735,7 @@ window.__ModuleLoader__.load({
       freePanels: {
         title: 'Свободный размер панелей',
         titleKey: 'tweak.freePanels',
+        support: 'mixed',
         // Штатный драг панелей клампит ширины (сайдбар 264–420, панель 300–70%
         // окна, центр не уже 400) — твик снимает эти лимиты.
         defaultOn: true,
@@ -7625,6 +7749,7 @@ window.__ModuleLoader__.load({
       imageModelFallback: {
         title: 'Кнопка «отправить с Flash» для картинок',
         titleKey: 'tweak.imageModelFallback',
+        support: 'all',
         // Лёгкий твик: плашка в доке над полем ввода, когда выбранная модель
         // не видит изображения. Модель-замена настраивается полями Config.
         defaultOn: true,
@@ -7666,6 +7791,13 @@ window.__ModuleLoader__.load({
      */
     function enableTweak(ctx, id, markReady) {
       if (activeTweaks.has(id)) return;
+      // Legacy-shell твики не включаем на новом ядре: там drawer, автоскрытие,
+      // клавиатура, центр и меню «…» уже нативные. Флаг остаётся в форме для
+      // установки на старую версию.
+      if (TWEAKS[id].support === 'legacy' && coreFeatures().modernShell) {
+        markReady(`skipped: ${id} (${coreVersion()} native)`);
+        return;
+      }
       const scope = createScope();
       activeTweaks.set(id, scope);
       try {
@@ -7755,6 +7887,18 @@ window.__ModuleLoader__.load({
       justifyContent: 'space-between',
       gap: '12px',
     };
+    const FORM_LABEL_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '2px',
+      minWidth: '0',
+      flex: '1 1 auto',
+    };
+    const FORM_VERSION_STYLE = {
+      display: 'block',
+      color: 'var(--dsw-alias-label-tertiary)',
+      font: '400 12px/16px system-ui, sans-serif',
+    };
     const FORM_NOTICE_STYLE = { margin: '0', color: 'var(--dsw-alias-label-secondary)' };
 
     /**
@@ -7817,7 +7961,16 @@ window.__ModuleLoader__.load({
           React.createElement(
             'div',
             { key: id, 'data-tweak': id, style: FORM_ROW_STYLE },
-            React.createElement('span', null, label),
+            React.createElement(
+              'span',
+              { style: FORM_LABEL_STYLE },
+              React.createElement('span', null, label),
+              React.createElement(
+                'span',
+                { style: FORM_VERSION_STYLE, 'data-version-note': id },
+                copy(`version.${id}`),
+              ),
+            ),
             React.createElement(Switch, {
               checked,
               label,
@@ -7845,7 +7998,11 @@ window.__ModuleLoader__.load({
           rows.push(React.createElement('div', { key: `${id}-detail` }, tweak.renderDetail({ controller, t, translate })));
         }
       }
-      const notices = [React.createElement('p', { key: 'hint', style: FORM_NOTICE_STYLE }, copy('form.hint'))];
+      const coreLabel = copy('form.core').replace('{{version}}', coreVersion());
+      const notices = [
+        React.createElement('p', { key: 'core', style: FORM_NOTICE_STYLE, 'data-core-version': coreVersion() }, coreLabel),
+        React.createElement('p', { key: 'hint', style: FORM_NOTICE_STYLE }, copy('form.hint')),
+      ];
       if (tweaksSwitchOff) {
         notices.push(
           React.createElement('p', { key: 'switch-off', style: FORM_NOTICE_STYLE }, copy('form.switchOff')),
@@ -7866,6 +8023,123 @@ window.__ModuleLoader__.load({
         );
       }
       return React.createElement('div', { style: FORM_STYLE }, ...rows, ...notices);
+    }
+
+    /** Кнопка «Твики» в подвале мобильной панели. */
+    const SETTINGS_BUTTON_STYLE = {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: '6px',
+      minWidth: '0',
+      height: '32px',
+      padding: '0 10px',
+      border: '0.5px solid var(--dsw-alias-border-l2)',
+      borderRadius: '10px',
+      background: 'var(--dsw-alias-bg-layer-1)',
+      color: 'var(--dsw-alias-label-primary)',
+      font: '500 13px/18px system-ui, sans-serif',
+      cursor: 'pointer',
+    };
+    const SETTINGS_BACKDROP_STYLE = {
+      position: 'fixed',
+      inset: '0',
+      zIndex: '2147483000',
+      display: 'flex',
+      alignItems: 'flex-end',
+      justifyContent: 'center',
+      padding: '12px',
+      boxSizing: 'border-box',
+      background: 'var(--dsw-alias-bg-mask-1)',
+    };
+    const SETTINGS_SHEET_STYLE = {
+      boxSizing: 'border-box',
+      width: 'min(520px, 100%)',
+      maxHeight: '86vh',
+      overflowY: 'auto',
+      padding: '14px 16px calc(16px + env(safe-area-inset-bottom, 0px))',
+      border: '0.5px solid var(--dsw-alias-border-l2)',
+      borderRadius: '16px',
+      background: 'var(--dsw-alias-bg-overlay)',
+      color: 'var(--dsw-alias-label-primary)',
+      boxShadow: 'var(--dsw-elevation-prominent)',
+    };
+
+    /**
+     * Мобильная шторка с теми же флагами, что и страница пакета.
+     * @param {object} props - controller и переводчик.
+     * @returns {object | null} кнопка и шторка.
+     */
+    function TweaksSettingsButton(props) {
+      const { controller, translate } = props;
+      const [open, setOpen] = React.useState(false);
+      React.useEffect(() => {
+        if (!open) return undefined;
+        const onKey = (event) => {
+          if (event.key === 'Escape') setOpen(false);
+        };
+        document.addEventListener('keydown', onKey, true);
+        return () => document.removeEventListener('keydown', onKey, true);
+      }, [open]);
+      if (!mobileComposerDevice(window)) return null;
+      const copy = (key) => (typeof translate === 'function' ? translate(key) : key);
+      return React.createElement(
+        React.Fragment,
+        null,
+        React.createElement(
+          'button',
+          {
+            type: 'button',
+            'data-dsh-tweaks-settings': '',
+            'aria-label': copy('settings.open'),
+            style: SETTINGS_BUTTON_STYLE,
+            onClick: (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              setOpen(true);
+            },
+          },
+          copy('settings.open'),
+        ),
+        open
+          ? React.createElement(
+              'div',
+              {
+                style: SETTINGS_BACKDROP_STYLE,
+                'data-dsh-tweaks-settings-sheet': '',
+                role: 'presentation',
+                onMouseDown: (event) => {
+                  if (event.target === event.currentTarget) setOpen(false);
+                },
+              },
+              React.createElement(
+                'section',
+                {
+                  role: 'dialog',
+                  'aria-modal': 'true',
+                  'aria-label': copy('settings.title'),
+                  style: SETTINGS_SHEET_STYLE,
+                },
+                React.createElement(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '12px' } },
+                  React.createElement('strong', { style: { font: '600 16px/22px system-ui, sans-serif' } }, copy('settings.title')),
+                  React.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      'aria-label': copy('settings.close'),
+                      style: { border: '0', background: 'transparent', color: 'inherit', font: '400 22px/1 system-ui, sans-serif', cursor: 'pointer', padding: '2px 6px' },
+                      onClick: () => setOpen(false),
+                    },
+                    '×',
+                  ),
+                ),
+                React.createElement(TweaksForm, { controller, t: copy, translate }),
+              ),
+            )
+          : null,
+      );
     }
 
     return {
@@ -7949,6 +8223,26 @@ window.__ModuleLoader__.load({
             );
           } catch (error) {
             console.error('dsh-tweaks: форма флагов не подключена', error);
+          }
+          // Быстрый мобильный вход: та же форма, что на странице пакета, но
+          // в собственной шторке — до неё не надо искать Plugins → Volna tweak.
+          try {
+            const translate = createTranslator(locale);
+            scope.own(
+              slots.inject('sidebar.footer.action', () =>
+                slots.register(
+                  {
+                    name: 'sidebar.footer.action',
+                    id: 'dsh-tweaks-settings',
+                    order: -20,
+                    inject: () => ({ controller, translate }),
+                  },
+                  TweaksSettingsButton,
+                ),
+              ),
+            );
+          } catch (error) {
+            console.error('dsh-tweaks: мобильная кнопка твиков не подключена', error);
           }
         }
 

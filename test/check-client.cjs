@@ -250,7 +250,7 @@ function createConfigForms({ flags, status, writable }) {
 }
 
 /** Собрать песочницу с плагином и вернуть наблюдаемые объекты. */
-function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, frame = null, seat = null, rejectCode = null, flags = { zoom: true, contextMenu: true }, configFormsAvailable = true, configStatus = 'ready', writable = true, speech = null, legacySpeech = null, lightPrefs = null, fixedNow = null } = {}) {
+function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, frame = null, seat = null, rejectCode = null, flags = { zoom: true, contextMenu: true }, configFormsAvailable = true, configStatus = 'ready', writable = true, speech = null, legacySpeech = null, lightPrefs = null, fixedNow = null, boot = null } = {}) {
   const storage = createStorage();
   if (stored !== null) storage.setItem('dsh.ui-zoom.v1', stored);
   // Настройки светофора живут в браузере: тест задаёт их так же, как пользователь.
@@ -384,6 +384,7 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
   });
   const windowObject = {
     localStorage: storage,
+    __DSH_BOOT__: boot,
     MouseEvent: FakeMouseEvent,
     PointerEvent: FakePointerEvent,
     getSelection: () => selectionText,
@@ -1016,6 +1017,45 @@ check('форма рисует десять галочек', () => {
     assert.equal(typeof row.children[1].type, 'function', `строка ${id}: переключатель, а не текст`);
     assert.equal(row.children[1].props.checked, true, `строка ${id}: галочка стоит по флагу`);
   }
+});
+
+check('0.2.2-rc.1: shell-твики не дублируют ядро и виден новый dock светофора', () => {
+  const env = loadPlugin({ boot: { release: { version: '0.2.2-rc.1' } } });
+  const active = readyTweaks(env);
+  assert.equal(active.includes('mobileSidebar'), false, 'mobileSidebar уступает нативному shell');
+  assert.ok(active.includes('mobileComposer'), 'композерный твик остаётся');
+  const light = env.slotEntries.find((row) => row.name === 'conversation.input.dock'
+    && row.entry.options.id === 'traffic-light');
+  assert.ok(light, 'светофор зарегистрирован в conversation.input.dock');
+  const rows = formRows(env);
+  const ru = env.dictionaries.find((item) => item.locale === 'ru')?.dict ?? {};
+  for (const row of rows) {
+    const id = row.props['data-tweak'];
+    const note = row.children[0].children[1];
+    assert.equal(note.props['data-version-note'], id, `версия подписана у ${id}`);
+    assert.ok(note.children.some((text) => text === `version.${id}`), `у ${id} есть строка версии`);
+    assert.ok(String(ru[`version.${id}`]).includes('0.2.1-rc.5'), `у ${id} в словаре есть 0.2.1-rc.5`);
+    assert.ok(String(ru[`version.${id}`]).includes('0.2.2-rc.1'), `у ${id} в словаре есть 0.2.2-rc.1`);
+  }
+});
+
+check('0.2.1-rc.5: старый shell и dock светофора остаются', () => {
+  const env = loadPlugin({ boot: { release: { version: '0.2.1-rc.5' } }, flags: { mobileSidebar: true, trafficLight: true } });
+  assert.ok(readyTweaks(env).includes('mobileSidebar'), 'mobileSidebar активен на старом ядре');
+  const light = env.slotEntries.find((row) => row.name === 'conversation.input.dock'
+    && row.entry.options.id === 'traffic-light');
+  assert.ok(light, 'светофор зарегистрирован в conversation.input.dock на 0.2.1-rc.5');
+  assert.equal(env.slotEntries.some((row) => row.name === 'conversation.composer.dock'
+    && row.entry.options.id === 'traffic-light'), false, 'светофор не дублируется в старом dock');
+});
+
+check('мобильная кнопка «Твики» зарегистрирована отдельно от plugin-manager', () => {
+  const source = fs.readFileSync(CLIENT, 'utf8');
+  assert.ok(source.includes("sidebar.footer.action"), 'кнопка в подвале мобильной панели');
+  assert.ok(source.includes("'dsh-tweaks-settings'"), 'у кнопки свой id');
+  assert.ok(source.includes("'data-dsh-tweaks-settings-sheet'"), 'шторка имеет маркер');
+  assert.ok(source.includes("'data-version-note'"), 'у тоглов есть строка версии');
+  assert.ok(source.includes("'form.core'"), 'в форме видна фактическая версия ядра');
 });
 
 check('whisper по умолчанию выключен', () => {

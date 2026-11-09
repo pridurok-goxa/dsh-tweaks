@@ -278,3 +278,11 @@
   узкую рамку до 1024; `setupMobileSidebar` уступает drawer ядру.
   Headless старый core 412: grid 0/412, центр во всю ширину, mask 0, backdrop
   нет; при 80% то же. Новый core не затронут. Версия 2.9.0.
+
+## Дополнение 2026-11-09 16:10 MSK
+
+- Определение версии по `__DSH_BOOT__.release.version`, гейтинг legacy-shell на
+  0.2.2-rc.1, мобильная кнопка/шторка «Твики» в `sidebar.footer.action`,
+  светофор в `conversation.input.dock` (он есть уже в 0.2.1-rc.5; старый
+  `conversation.composer.dock` — fallback для более ранних), версии под каждым
+  тоглом. Версия 3.0.0.
