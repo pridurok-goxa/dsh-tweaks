@@ -406,6 +406,8 @@ window.__ModuleLoader__.load({
         'settings.open': 'Tweaks',
         'settings.title': 'Volna tweaks',
         'settings.close': 'Close tweaks',
+        'settings.switchOff': 'All tweaks are off: this browser was opened with ?tweaks=off.',
+        'settings.enableAll': 'Turn all tweaks on',
         'imageFallback.text': 'This model does not support images. Send this message with a model that does.',
         'imageFallback.actionPrefix': 'Send with',
         'imageFallback.busy': 'Switching model…',
@@ -483,6 +485,8 @@ window.__ModuleLoader__.load({
         'settings.open': 'Твики',
         'settings.title': 'Волна твик',
         'settings.close': 'Закрыть твики',
+        'settings.switchOff': 'Все твики выключены: браузер открывали с ?tweaks=off.',
+        'settings.enableAll': 'Включить все твики',
         'imageFallback.text': 'Эта модель не видит изображения. Отправить сообщение моделью, которая их видит?',
         'imageFallback.actionPrefix': 'Отправить с',
         'imageFallback.busy': 'Меняю модель…',
@@ -3816,6 +3820,80 @@ window.__ModuleLoader__.load({
           )));
         } catch (error) {
           console.error('dsh-tweaks: индикатор светофора под полем ввода не подключён', error);
+        }
+      }
+
+      // Страховка для мобильного: если dock-слот не отрисовался/уехал за
+      // пределы visualViewport (старый кэш, нестандартная шапка), показываем
+      // ту же лампу отдельным fixed-слоем над композером.
+      let fallbackHost = null;
+      let fallbackRoot = null;
+      let fallbackFrame = 0;
+      const syncFallback = () => {
+        fallbackFrame = 0;
+        if (fallbackHost === null) return;
+        const width = Number(window.innerWidth) || 0;
+        const height = Number(window.visualViewport?.height ?? window.innerHeight) || 0;
+        const dockLight = [...document.querySelectorAll('.dsh-ui-light-button')].find((button) => {
+          if (fallbackHost.contains(button)) return false;
+          const style = getComputedStyle(button);
+          if (style.display === 'none' || style.visibility === 'hidden' || Number.parseFloat(style.opacity ?? '1') === 0) return false;
+          const rect = button.getBoundingClientRect();
+          return rect.width > 1 && rect.height > 1 && rect.top < height && rect.bottom > 0 && rect.left < width && rect.right > 0;
+        });
+        fallbackHost.style.display = dockLight === undefined ? 'block' : 'none';
+        if (dockLight !== undefined) return;
+        const stack = document.querySelector('[class*="composerStack"]');
+        const rect = stack?.getBoundingClientRect?.();
+        const top = rect !== undefined && rect !== null && rect.height > 1 ? rect.top - 28 : height - 104;
+        fallbackHost.style.top = `${Math.max(8, Math.round(top))}px`;
+      };
+      const scheduleFallback = () => {
+        if (fallbackHost === null || fallbackFrame !== 0) return;
+        fallbackFrame = window.requestAnimationFrame?.(syncFallback) ?? 0;
+        if (fallbackFrame === 0) syncFallback();
+      };
+      if (mobileComposerDevice(window) && typeof ReactDOM?.createRoot === 'function') {
+        fallbackHost = document.createElement('div');
+        fallbackHost.setAttribute('data-dsh-tweaks-light-fallback', '');
+        fallbackHost.style.cssText = [
+          'position:fixed',
+          'left:12px',
+          'z-index:2147482000',
+          'padding:2px 10px 2px 6px',
+          'border-radius:999px',
+          'background:var(--dsw-alias-bg-overlay)',
+          'border:0.5px solid var(--dsw-alias-border-l2)',
+          'box-shadow:var(--dsw-elevation-prominent)',
+          'display:none',
+        ].join(';');
+        document.body?.appendChild(fallbackHost);
+        try {
+          fallbackRoot = ReactDOM.createRoot(fallbackHost);
+          fallbackRoot.render(React.createElement(TrafficLightIndicator, { variant: 'dock' }));
+        } catch (error) {
+          fallbackHost.remove();
+          fallbackHost = null;
+          fallbackRoot = null;
+        }
+        if (fallbackHost !== null) {
+          scheduleFallback();
+          window.setTimeout(scheduleFallback, 1200);
+          window.addEventListener?.('resize', scheduleFallback);
+          window.visualViewport?.addEventListener?.('resize', scheduleFallback);
+          own(() => {
+            window.removeEventListener?.('resize', scheduleFallback);
+            window.visualViewport?.removeEventListener?.('resize', scheduleFallback);
+            if (fallbackFrame !== 0) window.cancelAnimationFrame?.(fallbackFrame);
+            try {
+              fallbackRoot?.unmount?.();
+            } catch (_error) {
+              /* узел уже удалён */
+            }
+            fallbackHost?.remove();
+            fallbackHost = null;
+            fallbackRoot = null;
+          });
         }
       }
     }
@@ -8004,8 +8082,8 @@ window.__ModuleLoader__.load({
         React.createElement('p', { key: 'hint', style: FORM_NOTICE_STYLE }, copy('form.hint')),
       ];
       if (tweaksSwitchOff) {
-        notices.push(
-          React.createElement('p', { key: 'switch-off', style: FORM_NOTICE_STYLE }, copy('form.switchOff')),
+        notices.unshift(
+          React.createElement('p', { key: 'switch-off-top', style: { ...FORM_NOTICE_STYLE, color: 'var(--dsw-alias-state-warning-primary, var(--dsw-alias-label-primary))' } }, copy('settings.switchOff')),
         );
       }
       if (!ready) {
@@ -8052,6 +8130,18 @@ window.__ModuleLoader__.load({
       boxSizing: 'border-box',
       background: 'var(--dsw-alias-bg-mask-1)',
     };
+    const SETTINGS_WARNING_STYLE = {
+      margin: '0 0 12px',
+      padding: '10px 12px',
+      border: '0.5px solid var(--dsw-alias-state-warning-primary, var(--dsw-alias-border-l2))',
+      borderRadius: '10px',
+      background: 'var(--dsw-alias-bg-layer-1)',
+      color: 'var(--dsw-alias-label-primary)',
+      font: '400 13px/18px system-ui, sans-serif',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '8px',
+    };
     const SETTINGS_SHEET_STYLE = {
       boxSizing: 'border-box',
       width: 'min(520px, 100%)',
@@ -8064,6 +8154,21 @@ window.__ModuleLoader__.load({
       color: 'var(--dsw-alias-label-primary)',
       boxShadow: 'var(--dsw-elevation-prominent)',
     };
+
+    /**
+     * Снять диагностический выключатель `?tweaks=off` и перезагрузить страницу.
+     * @returns {void}
+     */
+    function enableAllTweaks() {
+      try {
+        window.localStorage?.removeItem(SWITCH_KEY);
+      } catch (_error) {
+        /* приватный режим: перезагрузка всё равно попробует */
+      }
+      const url = new URL(window.location.href);
+      url.searchParams.delete('tweaks');
+      window.location.replace(url.toString());
+    }
 
     /**
      * Мобильная шторка с теми же флагами, что и страница пакета.
@@ -8135,6 +8240,22 @@ window.__ModuleLoader__.load({
                     '×',
                   ),
                 ),
+                tweaksSwitchOff
+                  ? React.createElement(
+                      'div',
+                      { style: SETTINGS_WARNING_STYLE, 'data-dsh-tweaks-switch-off': '' },
+                      React.createElement('span', null, copy('settings.switchOff')),
+                      React.createElement(
+                        'button',
+                        {
+                          type: 'button',
+                          style: SETTINGS_BUTTON_STYLE,
+                          onClick: enableAllTweaks,
+                        },
+                        copy('settings.enableAll'),
+                      ),
+                    )
+                  : null,
                 React.createElement(TweaksForm, { controller, t: copy, translate }),
               ),
             )
