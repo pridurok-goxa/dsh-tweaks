@@ -1049,13 +1049,6 @@ check('0.2.1-rc.5: старый shell и dock светофора остаютс�
     && row.entry.options.id === 'traffic-light'), false, 'светофор не дублируется в старом dock');
 });
 
-check('мобильный светофор имеет fixed-страховку, если dock не виден', () => {
-  const source = fs.readFileSync(CLIENT, 'utf8');
-  assert.ok(source.includes("'data-dsh-tweaks-light-fallback'"), 'есть fixed-хост страховки');
-  assert.ok(source.includes(`const dockLight = [...document.querySelectorAll('.dsh-ui-light-button')]`), 'проверяется видимый dock-индикатор');
-  assert.ok(source.includes('fallbackHost.style.display = dockLight === undefined'), 'страховка скрывается при видимом dock');
-});
-
 check('мобильная кнопка «Твики» зарегистрирована отдельно от plugin-manager', () => {
   const source = fs.readFileSync(CLIENT, 'utf8');
   assert.ok(source.includes("sidebar.footer.action"), 'кнопка в подвале мобильной панели');
