@@ -422,6 +422,9 @@ window.__ModuleLoader__.load({
         'light.countdownH': '{{hours}} h {{minutes}} min',
         'light.countdownM': '{{minutes}} min',
         'light.countdownS': '< 1 min',
+        'light.dockCountdownH': '{{hours}}h {{minutes}}m',
+        'light.dockCountdownM': '{{minutes}}m',
+        'light.dockCountdownS': '<1m',
         'light.clockTitle': '24-hour price clock',
         'light.weekdays': 'Mon–Fri',
         'light.holidaysNote': 'Except Chinese public holidays',
@@ -501,6 +504,9 @@ window.__ModuleLoader__.load({
         'light.countdownH': '{{hours}} ч {{minutes}} мин',
         'light.countdownM': '{{minutes}} мин',
         'light.countdownS': 'меньше минуты',
+        'light.dockCountdownH': '{{hours}}ч {{minutes}}м',
+        'light.dockCountdownM': '{{minutes}}м',
+        'light.dockCountdownS': '<1м',
         'light.clockTitle': 'Часы тарифа на сутки',
         'light.weekdays': 'Пн–Пт',
         'light.holidaysNote': 'Кроме праздников КНР',
@@ -1680,6 +1686,7 @@ window.__ModuleLoader__.load({
         modern,
         modernShell,
         nativeComposerDock: inputDock || document.querySelector('[data-slot="conversation.input.dock"]') !== null,
+        statsComposerDock: modern || document.querySelector('[data-slot="conversation.composer.dock"]') !== null,
         legacyComposerDock: document.querySelector('[data-slot="conversation.composer.dock"]') !== null,
       };
     }
@@ -3164,6 +3171,21 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Короткий отсчёт для строки статистики под полем ввода.
+     * @param {number} ms - оставшееся время.
+     * @param {Function} t - переводчик.
+     * @returns {string} «2ч 15м» / «17м».
+     */
+    function formatDockCountdown(ms, t) {
+      const total = Math.max(0, Math.ceil(ms / 60000));
+      const hours = Math.floor(total / 60);
+      const minutes = total % 60;
+      if (hours > 0) return fillText(t('light.dockCountdownH'), { hours, minutes: twoDigits(minutes) });
+      if (minutes > 0) return fillText(t('light.dockCountdownM'), { minutes });
+      return t('light.dockCountdownS');
+    }
+
+    /**
      * Хук состояния индикатора: тик раз в секунду, подписка на политику
      * и признак «кто-то работает» из списка сессий.
      * @returns {object} now — текущее время, running — есть ли работа.
@@ -3645,6 +3667,7 @@ window.__ModuleLoader__.load({
         : fillText(t(lightCountdownKey(status)), { time: formatTarget(target, now, t) });
       // В шапке индикатор всегда без текста; у нижнего режим выбирает разработчик.
       const dockMode = variant === 'dock' ? prefs.dockMode ?? 'time' : 'lamp';
+      const remaining = target === null ? '' : formatDockCountdown(target - now, t);
       const dot = React.createElement('span', {
         key: 'lamp',
         className: `${LIGHT_CLASS}-lamp`,
@@ -3661,9 +3684,12 @@ window.__ModuleLoader__.load({
       if (dockMode === 'lamp-time-label') {
         content.push(React.createElement('span', { key: 'label', className: `${LIGHT_CLASS}-label` }, t(lightLabelKey(status.light))));
       }
-      if (dockMode !== 'lamp') {
-        // Вместо секундного отсчёта — текущее системное время в часовом поясе
-        // пользователя (браузера); обновляется раз в минуту вместе с лампой.
+      if (dockMode === 'time') {
+        // Основной режим — не часы, а оставшееся время до смены тарифа:
+        // на зелёном/жёлтом до красного, на красном до зелёного.
+        if (remaining !== '') content.push(React.createElement('span', { key: 'remaining', className: `${LIGHT_CLASS}-count` }, remaining));
+      } else if (dockMode !== 'lamp') {
+        // Явно выбранный «текущее время»: часы браузера, обновляются раз в минуту.
         content.push(React.createElement('span', { key: 'time', className: `${LIGHT_CLASS}-count` }, formatClock(now)));
       }
       return React.createElement(React.Fragment, null,
@@ -3784,7 +3810,7 @@ window.__ModuleLoader__.load({
       `.${LIGHT_CLASS}-wave{box-sizing:border-box;position:absolute;inset:0;border-radius:999px;border:1.5px solid;`,
       `pointer-events:none;opacity:0;animation:${LIGHT_CLASS}-wave 2s ease-out infinite}`,
       `.${LIGHT_CLASS}-label{white-space:nowrap}`,
-      `.${LIGHT_CLASS}-count{color:var(--dsw-alias-label-tertiary)}`,
+      `.${LIGHT_CLASS}-count{color:var(--dsw-alias-label-tertiary);white-space:nowrap}`,
       `.${LIGHT_CLASS}-panel{box-sizing:border-box;position:fixed;z-index:2147483000;width:364px;`,
       'border:0;border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-menu);',
       'backdrop-filter:var(--dsw-menu-backdrop-filter);-webkit-backdrop-filter:var(--dsw-menu-backdrop-filter);',
@@ -3862,12 +3888,15 @@ window.__ModuleLoader__.load({
       }
       if (typeof slots?.inject === 'function' && typeof slots?.register === 'function') {
         try {
-          // Начиная с 0.2.1-rc.5 dock-слот называется conversation.input.dock;
-          // старый conversation.composer.dock у более ранних сборок, поэтому
-          // светофор раньше не появлялся на обоих актуальных ядрах.
-          const dockSlot = coreFeatures().nativeComposerDock
-            ? 'conversation.input.dock'
-            : 'conversation.composer.dock';
+          // 0.2.2-rc.1 держит статистику под полем в conversation.composer.dock —
+          // там и место индикатору. На 0.2.1-rc.5 этого слота нет, остаётся
+          // верхний conversation.input.dock.
+          const features = coreFeatures();
+          const dockSlot = features.statsComposerDock
+            ? 'conversation.composer.dock'
+            : features.nativeComposerDock
+              ? 'conversation.input.dock'
+              : 'conversation.composer.dock';
           // Отрицательный order ставит светофор первым в строке дока: у системных
           // записей порядок 0, а сортировка идёт по возрастанию.
           own(slots.inject(dockSlot, () => slots.register(

@@ -1024,9 +1024,9 @@ check('0.2.2-rc.1: shell-твики не дублируют ядро и виде
   const active = readyTweaks(env);
   assert.equal(active.includes('mobileSidebar'), false, 'mobileSidebar уступает нативному shell');
   assert.ok(active.includes('mobileComposer'), 'композерный твик остаётся');
-  const light = env.slotEntries.find((row) => row.name === 'conversation.input.dock'
+  const light = env.slotEntries.find((row) => row.name === 'conversation.composer.dock'
     && row.entry.options.id === 'traffic-light');
-  assert.ok(light, 'светофор зарегистрирован в conversation.input.dock');
+  assert.ok(light, 'светофор зарегистрирован в conversation.composer.dock под полем');
   const rows = formRows(env);
   const ru = env.dictionaries.find((item) => item.locale === 'ru')?.dict ?? {};
   for (const row of rows) {
@@ -2182,14 +2182,14 @@ check('нижний индикатор: режим из настроек уст�
     assert.equal(lampText.length, 1, `режим ${dockMode}: лампа на месте`);
   }
 
-  // Настройка по умолчанию — «Индикатор и время»: лампа и текущее время браузера.
-  // Отсчёт до смены тарифа живёт в подсказке (aria-label) и в панели; в доке
-  // показывается время (c68a31e «время в доке»), а не «N ч MM мин».
+  // Настройка по умолчанию — «Индикатор и оставшееся время»: лампа и отсчёт
+  // до смены тарифа, а не текущие часы.
   const fresh = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
   const freshTree = renderSlot(dockRow(fresh));
   const freshTexts = indicatorTexts(freshTree);
-  assert.equal(freshTexts.length, 1, 'по умолчанию показывается только время: одно текстовое поле');
-  assert.match(freshTexts[0], /^\d{2}:\d{2}$/, 'по умолчанию — голое время без «ещё» и адреса');
+  assert.equal(freshTexts.length, 1, 'по умолчанию показывается один отсчёт');
+  assert.doesNotMatch(freshTexts[0], /^\d{2}:\d{2}$/, 'по умолчанию не текущие часы');
+  assert.match(freshTexts[0], /^\d+\s*[чm]/i, 'по умолчанию — короткое оставшееся время');
   assert.match(JSON.stringify(freshTree), /-lamp/, 'в варианте «индикатор и время» лампа тоже показывается');
 });
 
