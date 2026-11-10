@@ -33,15 +33,15 @@ window.__ModuleLoader__.load({
     /** Ключ отметки этапа инициализации в хранилище устройства. */
     const READY_KEY = 'dsh.ui-zoom.ready.v1';
     /**
-     * Ключ диагностического выключателя всех твиков в хранилище устройства.
+     * Ключ старого диагностического выключателя.
      *
-     * Выключатель нужен, чтобы на телефоне отличить зависание приложения от
-     * зависания, которое даёт наш слой: `?tweaks=off` гасит все твики разом,
-     * `?tweaks=on` возвращает их. Значение переживает перезагрузку страницы,
-     * рестарт профиля не нужен.
+     * Сейчас `?tweaks=off` действует только для текущей ссылки, а обычная
+     * ссылка без параметра всегда включает твики. Сохранённый ранее флаг
+     * очищается при обычном заходе, чтобы телефон не залипал в выключенном
+     * состоянии.
      */
     const SWITCH_KEY = 'dsh.tweaks.disabled.v1';
-    /** Значение выключателя в хранилище: твики выключены. */
+    /** Старое значение выключателя: остаётся только для очистки legacy-флага. */
     const SWITCH_OFF = '1';
     /**
      * Переменная с текущим масштабом: её читает `calc()` попапов.
@@ -2329,35 +2329,36 @@ window.__ModuleLoader__.load({
     /**
      * Прочитать диагностический выключатель твиков.
      *
-     * Порядок: сохранённое в устройстве значение, затем параметр адреса.
-     * `?tweaks=off` выключает все твики разом и запоминает это, `?tweaks=on`
-     * снимает отметку. Параметр действует сразу при загрузке страницы: рестарт
-     * профиля DSH для диагностики не нужен, живой прод не трогаем.
+     * `?tweaks=off` выключает твики только для этой ссылки, `?tweaks=on`
+     * возвращает их. Обычная ссылка без параметра всегда работает; старый
+     * сохранённый флаг очищается. Рестарт профиля DSH не нужен.
      * @param {object | null} storage - хранилище устройства.
      * @returns {boolean} выключены ли все твики.
      */
     function readTweaksSwitch(storage) {
-      let disabled = false;
-      try {
-        disabled = storage?.getItem?.(SWITCH_KEY) === SWITCH_OFF;
-      } catch (_error) {
-        disabled = false;
-      }
       const location = typeof window === 'undefined' ? undefined : window.location;
       const search = typeof location?.search === 'string' ? location.search : '';
       // Разбор без URLSearchParams: адресная строка бывает и в тестовой заглушке.
       const match = /[?&]tweaks=(off|on)(?:&|#|$)/i.exec(search);
       if (match !== null) {
         const off = match[1].toLowerCase() === 'off';
-        disabled = off;
-        try {
-          if (off) storage?.setItem?.(SWITCH_KEY, SWITCH_OFF);
-          else storage?.removeItem?.(SWITCH_KEY);
-        } catch (_error) {
-          /* хранилище недоступно: значение действует до перезагрузки */
+        if (!off) {
+          try {
+            storage?.removeItem?.(SWITCH_KEY);
+          } catch (_error) {
+            /* хранилище недоступно: явный on всё равно работает */
+          }
         }
+        return off;
       }
-      return disabled;
+      // Обычная ссылка всегда должна работать. Заодно снимаем старый
+      // сохранённый диагностический флаг: он больше не переживает переход.
+      try {
+        storage?.removeItem?.(SWITCH_KEY);
+      } catch (_error) {
+        /* хранилище недоступно: обычный URL всё равно работает */
+      }
+      return false;
     }
 
     /* #endregion tweak-watch-helpers */
