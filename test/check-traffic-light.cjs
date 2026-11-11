@@ -7,6 +7,9 @@
 //   3. хост-половина (tweaks/traffic-light-host.js) — контракт на моке
 //      контекста: удержание расписаний на красном, возврат на зелёном,
 //      пауза автоматических модельных вызовов, fail-open для ручных;
+//      родословная ручной работы: сообщение от субагента, порождённого
+//      ручным шагом, приходит как пользовательское и не ждёт зелёного
+//      (кейсы 3.8 (а)–(л)), а память о ребёнке переживает его выгрузку;
 //   4. схема Config в index.js объявляет поля твика, а список праздников
 //      совпадает с политикой.
 //
@@ -453,6 +456,244 @@ async function main() {
     await settle();
     assert.deepEqual(followedRestored, ['msg-restored'], 'памятка с диска доставлена на зелёном');
     assert.ok(!fs.existsSync(stateFile), 'памятка очищена после доставки');
+    await deactivate();
+
+    // 3.8) Родословная ручной работы: сообщение-итог субагента, порождённого
+    // ручным шагом, — пользовательское, поэтому родитель не встаёт в очередь
+    // до конца пика. Каждый кейс заводит своих агентов; ожидающие вызовы
+    // отпускаются зелёным до следующего кейса, иначе висящее обещание
+    // замаскирует проверку.
+    const lineage = createHostContext();
+    let lineageSeq = 0;
+    const oneChunk = [{ type: 'usage', usage: { inputTokens: 7, outputTokens: 7 } }];
+    const settledFrom = (id) => ({
+      id: `msg-lineage-${(lineageSeq += 1)}`,
+      source: { kind: 'subagent-settled', form: 'notice', summary: 'итог', ...(id ? { senderSessionId: id } : {}) },
+    });
+    const teamMessageFrom = (id) => ({
+      id: `msg-lineage-${(lineageSeq += 1)}`,
+      source: { kind: 'team-message', form: 'notice', summary: 'команда', ...(id ? { senderId: id } : {}) },
+    });
+    /**
+     * Запустить модельный вызов и узнать, пошёл ли он, не подвешивая прогон:
+     * кейс «не ждёт» обязан падать утверждением, а не зависать.
+     * @param {string} initiatorId - id сессии, чей вызов проверяем.
+     * @returns {{done: boolean, promise: Promise<Array<object>>}} флаг и обещание.
+     */
+    const startCall = (initiatorId) => {
+      lineage.setInitiator(initiatorId);
+      const promise = lineage.driveLlmStream({}, oneChunk);
+      const tracked = { done: false, promise };
+      promise.then(() => {
+        tracked.done = true;
+      });
+      return tracked;
+    };
+    activate(lineage, defaultConfig);
+    assert.ok(lineage.logs.some((line) => line.includes('green → red')), 'блок 3.8 начат на красном');
+
+    // (а) итог субагента, порождённого ручным шагом, не ждёт зелёного.
+    update(defaultConfig);
+    await settle();
+    const parentA = createAgent('session-a');
+    lineage.emit('agent/created', { agent: parentA.agent });
+    await parentA.preStep([{ id: 'm-a-user', source: { kind: 'user' } }]);
+    parentA.emit('subagent/start', { id: 'child-a' });
+    await parentA.preStep([settledFrom('child-a')]);
+    const callA = startCall('session-a');
+    await settle();
+    assert.equal(callA.done, true, '(а) итог субагента ручного шага не ждёт зелёного');
+    assert.equal((await callA.promise).length, 1, '(а) итог субагента ручного шага прошёл одним чанком');
+
+    // (б) итог субагента автошага по-прежнему ждёт зелёного.
+    update(defaultConfig);
+    await settle();
+    const parentB = createAgent('session-b');
+    lineage.emit('agent/created', { agent: parentB.agent });
+    await parentB.preStep([{ id: 'm-b-goal', source: { kind: 'goal' } }]);
+    parentB.emit('subagent/start', { id: 'child-b' });
+    await parentB.preStep([settledFrom('child-b')]);
+    const callB = startCall('session-b');
+    await settle();
+    assert.equal(callB.done, false, '(б) итог субагента автошага ждёт зелёного');
+    update(greenConfig);
+    await settle();
+    assert.equal(callB.done, true, '(б) на зелёном итог субагента автошага пошёл');
+    await callB.promise;
+
+    // (в) без id отправителя — прежнее поведение: ждёт зелёного.
+    update(defaultConfig);
+    await settle();
+    const parentV = createAgent('session-v');
+    lineage.emit('agent/created', { agent: parentV.agent });
+    await parentV.preStep([{ id: 'm-v-user', source: { kind: 'user' } }]);
+    parentV.emit('subagent/start', { id: 'child-v' });
+    await parentV.preStep([settledFrom('')]);
+    const callV = startCall('session-v');
+    await settle();
+    assert.equal(callV.done, false, '(в) итог без id отправителя ждёт зелёного');
+    update(greenConfig);
+    await settle();
+    assert.equal(callV.done, true, '(в) на зелёном итог без id отправителя пошёл');
+    await callV.promise;
+
+    // (г) цепочка вверх по уровням: итог B отпускает A, итог A — родителя.
+    update(defaultConfig);
+    await settle();
+    const parentG = createAgent('session-g');
+    lineage.emit('agent/created', { agent: parentG.agent });
+    await parentG.preStep([{ id: 'm-g-user', source: { kind: 'user' } }]);
+    parentG.emit('subagent/start', { id: 'session-g-a' });
+    const middleG = createAgent('session-g-a');
+    lineage.emit('agent/created', { agent: middleG.agent });
+    await middleG.preStep([{ id: 'm-g-subagent', source: { kind: 'subagent' } }]);
+    middleG.emit('subagent/start', { id: 'child-g' });
+    await middleG.preStep([settledFrom('child-g')]);
+    const callMiddle = startCall('session-g-a');
+    await settle();
+    assert.equal(callMiddle.done, true, '(г) итог своего ручного ребёнка не ждёт зелёного на нижнем уровне');
+    await callMiddle.promise;
+    await parentG.preStep([settledFrom('session-g-a')]);
+    const callTop = startCall('session-g');
+    await settle();
+    assert.equal(callTop.done, true, '(г) итог ручного субагента не ждёт зелёного на верхнем уровне');
+    await callTop.promise;
+
+    // (д) зелёный: поведение не изменилось — оба сообщения проходят сразу.
+    update(greenConfig);
+    await settle();
+    const parentD = createAgent('session-d');
+    lineage.emit('agent/created', { agent: parentD.agent });
+    await parentD.preStep([{ id: 'm-d-user', source: { kind: 'user' } }]);
+    parentD.emit('subagent/start', { id: 'child-d' });
+    await parentD.preStep([settledFrom('child-d')]);
+    const callManualGreen = startCall('session-d');
+    await settle();
+    assert.equal(callManualGreen.done, true, '(д) на зелёном итог ручного ребёнка проходит сразу');
+    await callManualGreen.promise;
+    await parentD.preStep([settledFrom('')]);
+    const callPlainGreen = startCall('session-d');
+    await settle();
+    assert.equal(callPlainGreen.done, true, '(д) на зелёном итог без id отправителя проходит сразу');
+    await callPlainGreen.promise;
+
+    // (е) отправитель вне родословной — ждёт зелёного.
+    update(defaultConfig);
+    await settle();
+    const parentE = createAgent('session-e');
+    lineage.emit('agent/created', { agent: parentE.agent });
+    await parentE.preStep([settledFrom('child-unknown')]);
+    const callE = startCall('session-e');
+    await settle();
+    assert.equal(callE.done, false, '(е) итог от отправителя вне родословной ждёт зелёного');
+    update(greenConfig);
+    await settle();
+    assert.equal(callE.done, true, '(е) на зелёном итог от отправителя вне родословной пошёл');
+    await callE.promise;
+
+    // (ж) team-message несёт senderId: свой ребёнок — пользовательское, чужой — авто.
+    update(defaultConfig);
+    await settle();
+    const parentZh = createAgent('session-zh');
+    lineage.emit('agent/created', { agent: parentZh.agent });
+    await parentZh.preStep([{ id: 'm-zh-user', source: { kind: 'user' } }]);
+    parentZh.emit('subagent/start', { id: 'child-zh' });
+    await parentZh.preStep([teamMessageFrom('child-zh')]);
+    const callZhOwn = startCall('session-zh');
+    await settle();
+    assert.equal(callZhOwn.done, true, '(ж) team-message от своего ручного ребёнка не ждёт зелёного');
+    await callZhOwn.promise;
+    await parentZh.preStep([teamMessageFrom('child-stranger-zh')]);
+    const callZhAlien = startCall('session-zh');
+    await settle();
+    assert.equal(callZhAlien.done, false, '(ж) team-message от чужого отправителя ждёт зелёного');
+    update(greenConfig);
+    await settle();
+    assert.equal(callZhAlien.done, true, '(ж) на зелёном team-message от чужого отправителя пошёл');
+    await callZhAlien.promise;
+
+    // (з) память о ребёнке переживает его собственную выгрузку: в ядре handle
+    // ребёнка выгружается до доставки итога, поэтому забываются только дети
+    // выгружаемого родителя.
+    update(defaultConfig);
+    await settle();
+    const parentZ = createAgent('session-z');
+    lineage.emit('agent/created', { agent: parentZ.agent });
+    await parentZ.preStep([{ id: 'm-z-user', source: { kind: 'user' } }]);
+    parentZ.emit('subagent/start', { id: 'child-z' });
+    lineage.emit('agent/disposed', { agent: { id: 'child-z' } });
+    await parentZ.preStep([settledFrom('child-z')]);
+    const callZ = startCall('session-z');
+    await settle();
+    assert.equal(callZ.done, true, '(з) итог выгруженного ребёнка ручного шага не ждёт зелёного');
+    await callZ.promise;
+
+    // (и) предел памятки 256: 257-й ручной старт вытесняет самый старший.
+    update(defaultConfig);
+    await settle();
+    const parentI = createAgent('session-i');
+    lineage.emit('agent/created', { agent: parentI.agent });
+    await parentI.preStep([{ id: 'm-i-user', source: { kind: 'user' } }]);
+    for (let index = 0; index < 257; index += 1) {
+      parentI.emit('subagent/start', { id: `child-${String(index).padStart(3, '0')}` });
+    }
+    await parentI.preStep([settledFrom('child-256')]);
+    const callFresh = startCall('session-i');
+    await settle();
+    assert.equal(callFresh.done, true, '(и) свежий ручной ребёнок не ждёт зелёного');
+    await callFresh.promise;
+    await parentI.preStep([settledFrom('child-000')]);
+    const callEvicted = startCall('session-i');
+    await settle();
+    assert.equal(callEvicted.done, false, '(и) вытесненный старший ребёнок снова ждёт зелёного');
+    update(greenConfig);
+    await settle();
+    assert.equal(callEvicted.done, true, '(и) на зелёном вытесненный ребёнок пошёл');
+    await callEvicted.promise;
+
+    // (к) повторный старт того же ребёнка из автошага снимает ручную метку.
+    update(defaultConfig);
+    await settle();
+    const parentK = createAgent('session-k');
+    lineage.emit('agent/created', { agent: parentK.agent });
+    await parentK.preStep([{ id: 'm-k-user', source: { kind: 'user' } }]);
+    parentK.emit('subagent/start', { id: 'child-k' });
+    await parentK.preStep([{ id: 'm-k-goal', source: { kind: 'goal' } }]);
+    parentK.emit('subagent/start', { id: 'child-k' });
+    await parentK.preStep([settledFrom('child-k')]);
+    const callK = startCall('session-k');
+    await settle();
+    assert.equal(callK.done, false, '(к) итог ребёнка, перезапущенного из автошага, ждёт зелёного');
+    update(greenConfig);
+    await settle();
+    assert.equal(callK.done, true, '(к) на зелёном итог перезапущенного ребёнка пошёл');
+    await callK.promise;
+
+    // (л) выгрузка родителя забывает его детей — кейс идёт последним: он
+    // выгружает живого родителя, поэтому остальные кейсы его не переиспользуют.
+    update(defaultConfig);
+    await settle();
+    const parentL = createAgent('session-l');
+    lineage.emit('agent/created', { agent: parentL.agent });
+    const observerL = createAgent('session-l-observer');
+    lineage.emit('agent/created', { agent: observerL.agent });
+    await parentL.preStep([{ id: 'm-l-user', source: { kind: 'user' } }]);
+    parentL.emit('subagent/start', { id: 'child-l' });
+    // Пока родитель жив, метка ребёнка действует — положительная ветка проверена.
+    await observerL.preStep([settledFrom('child-l')]);
+    const callBeforeDispose = startCall('session-l-observer');
+    await settle();
+    assert.equal(callBeforeDispose.done, true, '(л) при живом родителе итог его ребёнка не ждёт зелёного');
+    await callBeforeDispose.promise;
+    lineage.emit('agent/disposed', { agent: { id: 'session-l' } });
+    await observerL.preStep([settledFrom('child-l')]);
+    const callAfterDispose = startCall('session-l-observer');
+    await settle();
+    assert.equal(callAfterDispose.done, false, '(л) после выгрузки родителя итог его ребёнка ждёт зелёного');
+    update(greenConfig);
+    await settle();
+    assert.equal(callAfterDispose.done, true, '(л) на зелёном вызов наблюдателя пошёл');
+    await callAfterDispose.promise;
     await deactivate();
   } finally {
     Date.now = realNow;

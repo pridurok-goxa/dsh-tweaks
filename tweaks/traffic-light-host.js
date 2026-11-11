@@ -15,6 +15,10 @@ import { join } from 'node:path';
  *     Ручные сообщения разработчика не блокируются — на красном можно
  *     работать, дорогое время лишь не тратится фоном. Пустой ход после
  *     изъятого расписания отклоняется, чтобы не платить за него.
+ *     Работа, начатая человеком, доводится до конца: субагент, порождённый
+ *     из ручного шага, запоминается, и его итог (стиринг, сообщение команды)
+ *     возвращается родителю как пользовательское сообщение — родитель не
+ *     встаёт в очередь до конца пика (см. «Классификация шага»).
  *
  * Удержанное переживает перезапуск DSH: памятка в `$DSH_HOME/dsh-tweaks/held.json`
  * (доставка повторяется на зелёном, до 8 попыток), события пишутся в
@@ -23,10 +27,18 @@ import { join } from 'node:path';
  * Классификация шага: батч автоматический ⇔ все сообщения автоматические.
  *   - пользовательские источники: user, parent (стиринг родителя),
  *     user-approval, user-question-reply, plan-mode, ptc-mode, fallback;
- *   - автоматические: schedule, goal, subagent, child, subagent-settled,
- *     agent-message;
+ *   - автоматические: schedule, goal, tool-goal, child,
+ *     subagent-settled, agent-message, team-message;
  *   - parent/subagent у дочерних сессий разрешаются через autoMode:
  *     субагент, порождённый из ручного шага, работает и на красном;
+ *   - родословная ручной работы: субагент, порождённый из ручного шага,
+ *     запоминается (`manualChildren`, предел 256 записей, FIFO-вытеснение),
+ *     и сообщение с id отправителя из памятки — итог (`subagent-settled`),
+ *     стиринг (`agent-message`) или сообщение команды (`team-message`) —
+ *     считается пользовательским: родитель не встаёт в очередь до конца
+ *     пика. Цепочка работает вверх по уровням (итог ребёнка → родитель, на
+ *     любую глубину). Сообщение без id отправителя или от отправителя вне
+ *     памятки — автоматическое, как раньше;
  *   - неизвестные источники — как пользовательские (fail-open: никогда
  *     не блокируем то, чего не понимаем).
  *
@@ -78,6 +90,11 @@ const NEUTRAL_KINDS = new Set([
   'model-selection',
   'compact-checkpoint',
 ]);
+
+/** Виды сообщений, у которых в источнике есть id отправителя-сессии. */
+const MANUAL_LINEAGE_KINDS = new Set(['subagent-settled', 'child', 'agent-message', 'team-message']);
+/** Предел памятки ручных субагентов: переполнение только возвращает прежнее ожидание. */
+const MANUAL_CHILDREN_LIMIT = 256;
 
 /** Сколько раз пробуем вернуть удержанное напоминание, прежде чем признать потерю. */
 const HELD_ATTEMPTS = 8;
@@ -209,17 +226,39 @@ function saveHeldFile(held) {
 }
 
 /**
+ * Id сессии-отправителя из источника сообщения.
+ *
+ * `subagent-settled` и `agent-message` несут `senderSessionId`
+ * (`dsh-subagent/lib/types/continuation-messages.d.ts:17,33`), `team-message` —
+ * `senderId` (`dsh-goal/lib/typert.host.js:1259`), у `child` поля отправителя
+ * нет (это элемент `list_agents`, а не источник сообщения) — тогда пусто.
+ * @param {object} message - сообщение из входящих агента.
+ * @returns {string} id сессии-отправителя либо ''.
+ */
+function senderSessionIdOf(message) {
+  const source = message?.source;
+  const raw = source?.senderSessionId ?? source?.senderId;
+  return typeof raw === 'string' ? raw : '';
+}
+
+/**
  * Классификация одного сообщения по источнику.
  * @param {object} message - сообщение из входящих агента.
  * @param {boolean} autoMode - режим сессии (субагент ли это автоматического родителя).
+ * @param {Map<string, string>} [manualChildren] - памятка ручных субагентов
+ *   (`id сессии ребёнка → id сессии родителя`).
  * @returns {'auto' | 'user'} класс сообщения.
  */
-function classifyMessage(message, autoMode) {
+function classifyMessage(message, autoMode, manualChildren) {
   const kind = message?.source?.kind;
   if (typeof kind !== 'string' || kind === '') return 'user';
   if (NEUTRAL_KINDS.has(kind)) return 'neutral';
   if (USER_KINDS.has(kind)) return 'user';
-  if (AUTOMATIC_KINDS.has(kind)) return 'auto';
+  if (AUTOMATIC_KINDS.has(kind)) {
+    const senderId = senderSessionIdOf(message);
+    if (MANUAL_LINEAGE_KINDS.has(kind) && senderId !== '' && manualChildren?.has(senderId) === true) return 'user';
+    return 'auto';
+  }
   if (kind === 'parent' || kind === 'subagent') return autoMode ? 'auto' : 'user';
   return 'user';
 }
@@ -233,20 +272,62 @@ function classifyMessage(message, autoMode) {
  * вставки контекста приходят на каждом следующем шаге.
  * @param {Array<object>} messages - сообщения батча.
  * @param {boolean} autoMode - режим сессии.
+ * @param {Map<string, string>} [manualChildren] - памятка ручных субагентов.
  * @returns {'auto' | 'user' | null} класс батча либо null — наследовать режим хода.
  */
-function classifyBatch(messages, autoMode) {
+function classifyBatch(messages, autoMode, manualChildren) {
   if (!Array.isArray(messages) || messages.length === 0) return null;
   let triggers = 0;
   let automatic = 0;
   for (const message of messages) {
-    const kind = classifyMessage(message, autoMode);
+    const kind = classifyMessage(message, autoMode, manualChildren);
     if (kind === 'neutral') continue;
     triggers += 1;
     if (kind === 'auto') automatic += 1;
   }
   if (triggers === 0) return null;
   return automatic === triggers ? 'auto' : 'user';
+}
+
+/**
+ * Запомнить субагента, порождённого из ручного шага.
+ *
+ * Запись: `id сессии ребёнка → id сессии родителя`. Повторное рождение
+ * освежает порядок (delete + set), чтобы вытеснялся действительно старший.
+ * При переполнении забывается старшая запись: забытое сообщение снова
+ * считается автоматическим, то есть возвращается прежнее поведение.
+ * @param {string} childId - id сессии ребёнка.
+ * @param {string} parentId - id сессии родителя.
+ * @returns {void}
+ */
+function rememberManualChild(childId, parentId) {
+  if (runtime === null) return;
+  const manualChildren = runtime.manualChildren;
+  manualChildren.delete(childId);
+  manualChildren.set(childId, parentId);
+  while (manualChildren.size > MANUAL_CHILDREN_LIMIT) {
+    const oldest = manualChildren.keys().next();
+    if (oldest.done === true) break;
+    manualChildren.delete(oldest.value);
+    log(`trafficLight: памятка ручных субагентов переполнена, «${oldest.value}» забыт`);
+  }
+}
+
+/**
+ * Забыть всех детей выгружаемого агента.
+ *
+ * Записи самого выгруженного агента не удаляются: выгрузка handle ребёнка
+ * (`dsh-subagent/lib/index.js:2039`) идёт **до** доставки его итога (`:2053`),
+ * поэтому удалять метку по `childId` нельзя — родословная потеряется и баг
+ * вернётся. Забываются только записи, у которых родитель — выгружаемый агент.
+ * @param {string} parentId - id сессии выгружаемого агента.
+ * @returns {void}
+ */
+function forgetManualChildrenOf(parentId) {
+  if (runtime === null) return;
+  for (const [childId, ownerId] of [...runtime.manualChildren]) {
+    if (ownerId === parentId) runtime.manualChildren.delete(childId);
+  }
 }
 
 /**
@@ -386,6 +467,7 @@ export function activate(ctx, config) {
     heldAttempts: new Map(),
     stepAutomatic: new Map(),
     autoMode: new Map(),
+    manualChildren: new Map(),
     waiters: new Set(),
     agents: serviceOf(ctx, 'agents'),
     sessionController: serviceOf(ctx, 'sessionController'),
@@ -404,7 +486,11 @@ export function activate(ctx, config) {
         disposer = agent.ctx.effect(() => {
           const off = [];
           off.push(agent.ctx.on('agent/pre-step', (step, next) => {
-            const batch = classifyBatch(step?.messages, runtime.autoMode.get(agent.id) === true);
+            const batch = classifyBatch(
+              step?.messages,
+              runtime.autoMode.get(agent.id) === true,
+              runtime.manualChildren,
+            );
             if (
               batch === null &&
               step?.step === 1 &&
@@ -428,7 +514,12 @@ export function activate(ctx, config) {
           off.push(agent.ctx.on('subagent/start', (info) => {
             const childId = String(info?.id ?? '');
             if (childId === '') return;
-            runtime.autoMode.set(childId, runtime.stepAutomatic.get(agent.id) === true);
+            const automatic = runtime.stepAutomatic.get(agent.id) === true;
+            runtime.autoMode.set(childId, automatic);
+            // Новая активация из автошага снимает устаревшую ручную метку:
+            // иначе повторный старт continuable-ребёнка отпустил бы авто-работу.
+            if (automatic) runtime.manualChildren.delete(childId);
+            else rememberManualChild(childId, agent.id);
           }));
           return () => {
             for (const dispose of off) dispose();
@@ -459,6 +550,10 @@ export function activate(ctx, config) {
       }
       runtime.stepAutomatic.delete(id);
       runtime.autoMode.delete(id);
+      // Забываем только детей выгружаемого: его собственная запись обязана
+      // пережить выгрузку, потому что handle ребёнка выгружается до доставки
+      // итога (`dsh-subagent/lib/index.js:2039` и `:2053`).
+      forgetManualChildrenOf(id);
     }),
   );
 
@@ -534,6 +629,7 @@ export async function deactivate() {
   previous.agentDisposers.clear();
   previous.stepAutomatic.clear();
   previous.autoMode.clear();
+  previous.manualChildren.clear();
   for (const waiter of [...previous.waiters]) waiter.done();
   previous.waiters.clear();
   runtime = null;
