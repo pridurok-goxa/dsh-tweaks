@@ -47,6 +47,15 @@ const TRAFFIC_LIGHT_HOLIDAYS_2026 = [
 ];
 
 /**
+ * Сессии со спецсигналом по умолчанию — значение поля `trafficLightSpecial`.
+ * Включено по решению Игоря t1447u: этот чат работает на красном свете вместе
+ * со своим деревом субагентов. Леджер `$DSH_HOME/dsh-tweaks/special.json`
+ * (его пишет хост-часть) перекрывает это значение, поэтому выключение из
+ * интерфейса переживает рестарт DSH.
+ */
+const TRAFFIC_LIGHT_SPECIAL_SEED = ['session-e4698bf8-717f-4e1a-9390-a2b40c03d985'];
+
+/**
  * Флаги твиков: имя поля — id твика в реестре TWEAKS (client.js).
  * `default(true)` сохраняет поведение пакета до появления флагов.
  */
@@ -93,6 +102,11 @@ export const Config = Schema.object({
   trafficLightHolidays: Schema.array(Schema.string()).default(TRAFFIC_LIGHT_HOLIDAYS_2026).volatile(),
   trafficLightPauseSchedules: Schema.boolean().default(true).volatile(),
   trafficLightPauseAgents: Schema.boolean().default(true).volatile(),
+  // Спецсигнал: сессии, которым разрешена работа на красном вместе со всем их
+  // деревом субагентов. Список правит только человек (переключатель у лампы),
+  // хост-часть переносит его в леджер special.json. Seed — включено по решению
+  // Игоря t1447u.
+  trafficLightSpecial: Schema.array(Schema.string()).default(TRAFFIC_LIGHT_SPECIAL_SEED).volatile(),
   // Цель живёт: после рестарта/fork/resume активация цели (`armed`) снимается,
   // и без ручной кнопки «Resume goal» продолжение не возобновляется. Хост-часть
   // возвращает активацию сервисным `goals.resume` для целей `active+disarmed`;
@@ -433,8 +447,9 @@ function attachWhisper(ctx, config) {
  *
  * В отличие от «речи», перезапуск при смене значений не нужен: модуль твика
  * держит состояние и принимает новую конфигурацию через `update`, поэтому
- * удержанные на красном напоминания переживают правку политики. Модуль
- * загружается динамически и в try/catch — как хост-часть «речи».
+ * удержанные на красном напоминания и набор спецсигнала (`trafficLightSpecial`)
+ * переживают правку политики. Модуль загружается динамически и в try/catch —
+ * как хост-часть «речи».
  * @param {object} ctx - хост-контекст плагина.
  * @param {unknown} config - конфигурация записи (volatile-поля — ссылки).
  * @returns {void}

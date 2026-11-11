@@ -1,3 +1,7 @@
+// Локальная зона фиксируется до первого Date: подписи статуса («до HH:MM»)
+// считаются зоной машины, иначе ожидания зависели бы от хоста прогона (E3).
+process.env.TZ = 'Europe/Moscow';
+
 /**
  * Проверка плагина dsh-tweaks без браузера: реальный client.js исполняется в vm
  * с заглушками window/document/React/ctx/configForms, затем проверяются каркас
@@ -27,12 +31,26 @@ function createStorage() {
  * Мини-React: useState/useEffect/useRef/Fragment достаточно, чтобы индикатор
  * отработал. Эффекты выполняются сразу и возвращают очистку в общий список.
  */
-function createReact(cleanups) {
+function createReact(cleanups, hookState) {
+  /**
+   * Ячейка хука: внутри курсора — общая для рендеров, вне его — новая.
+   * @param {*} initial - стартовое значение.
+   * @returns {{value: *}} ячейка.
+   */
+  const cellFor = (initial) => {
+    const start = typeof initial === 'function' ? initial() : initial;
+    const active = hookState?.active ?? null;
+    if (active === null) return { value: start };
+    const index = active.index;
+    active.index += 1;
+    if (active.cells[index] === undefined) active.cells[index] = { value: start };
+    return active.cells[index];
+  };
   return {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     Fragment: 'fragment',
     useState(initial) {
-      const cell = { value: initial };
+      const cell = cellFor(initial);
       return [
         cell.value,
         (next) => {
@@ -42,10 +60,14 @@ function createReact(cleanups) {
     },
     useEffect(effect) {
       const cleanup = effect();
-      if (typeof cleanup === 'function') cleanups.push(cleanup);
+      if (typeof cleanup !== 'function') return;
+      const active = hookState?.active ?? null;
+      if (active === null) cleanups.push(cleanup);
+      else active.cleanups.push(cleanup);
     },
     useRef(initial) {
-      return { current: initial ?? null };
+      const cell = cellFor({ current: initial ?? null });
+      return cell.value;
     },
   };
 }
@@ -183,13 +205,15 @@ function createElement(id, classes = []) {
  * @param {object} options - стартовые флаги, состояние службы и режим записи.
  * @returns {object} сервис и наблюдаемые величины.
  */
-function createConfigForms({ flags, status, writable }) {
+function createConfigForms({ flags, status, writable, refuseFirstMutate = false, refuseAllMutate = false }) {
   const listeners = new Set();
   /** Вызовы записи: операции и revision, с которой их отправили. */
   const calls = [];
   /** Id, по которым каркас спрашивал форму. */
   const ids = [];
   let revision = 4;
+  let refuseFirst = refuseFirstMutate;
+  const refuseAll = refuseAllMutate;
   const snapshot = {
     status,
     value: status === 'ready' ? { ...flags } : undefined,
@@ -234,6 +258,15 @@ function createConfigForms({ flags, status, writable }) {
            */
           mutate(ops, expectedRevision) {
             calls.push({ ops, expectedRevision });
+            // Первый вызов можно отклонить: так служба отвечает на устаревшую
+            // ревизию — снимок уходит вперёд, клиент обязан перечесть и повторить.
+            if (refuseFirst === true || refuseAll === true) {
+              refuseFirst = false;
+              revision += 1;
+              snapshot.revision = revision;
+              notify();
+              return Promise.resolve(false);
+            }
             for (const op of ops) {
               if (op.op === 'set') snapshot.value[op.path[0]] = op.value;
             }
@@ -250,7 +283,7 @@ function createConfigForms({ flags, status, writable }) {
 }
 
 /** Собрать песочницу с плагином и вернуть наблюдаемые объекты. */
-function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, frame = null, seat = null, rejectCode = null, flags = { zoom: true, contextMenu: true }, configFormsAvailable = true, configStatus = 'ready', writable = true, speech = null, legacySpeech = null, lightPrefs = null, fixedNow = null, boot = null } = {}) {
+function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, frame = null, seat = null, rejectCode = null, flags = { zoom: true, contextMenu: true }, configFormsAvailable = true, configStatus = 'ready', writable = true, refuseFirstMutate = false, refuseAllMutate = false, sessionId = null, runningSessions = null, reducedMotion = false, locationSearch = '', speech = null, legacySpeech = null, lightPrefs = null, fixedNow = null, boot = null } = {}) {
   const storage = createStorage();
   if (stored !== null) storage.setItem('dsh.ui-zoom.v1', stored);
   // Настройки светофора живут в браузере: тест задаёт их так же, как пользователь.
@@ -266,8 +299,41 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
   const seatMock = seat ?? null;
   /** Текущее выделение: плагин показывает по нему копирование вне поля ввода. */
   let selectionText = '';
+  /**
+   * Курсор хуков: состояние компонента переживает повторный рендер, а эффекты
+   * прошлого рендера снимаются до нового — как в React. Без него повторный
+   * `dockLight` создавал бы новые ячейки `useState` и панель всегда была бы
+   * закрыта, а подписки/таймеры копились бы с каждым рендером.
+   */
+  const hookStores = new Map();
+  const hookState = { active: null };
+  /** Очистки эффектов прошлого рендера по ключу экземпляра. */
+  const hookCleanups = new Map();
+  /** Узел разметки с id открытого чата: его читает светофор (нет своего RPC). */
+  const sessionNode =
+    sessionId === null
+      ? null
+      : {
+          getAttribute: (name) => (name === 'data-conversation-session' ? sessionId : null),
+          dataset: { conversationSession: sessionId },
+        };
+  /**
+   * Заглушка службы сессий: светофор берёт из неё признак «кто-то работает» —
+   * без него подсказка простоя (`light.pausedHint`) не показывается по условию.
+   */
+  const sessionsFace =
+    runningSessions === null
+      ? undefined
+      : {
+          list: {
+            getSnapshot: () => ({
+              byId: Object.fromEntries(runningSessions.map((id) => [id, { running: true }])),
+            }),
+            subscribe: () => () => {},
+          },
+        };
   /** Служба конфигурации: снимок флагов твиков и очередь записей. */
-  const configForms = createConfigForms({ flags, status: configStatus, writable });
+  const configForms = createConfigForms({ flags, status: configStatus, writable, refuseFirstMutate, refuseAllMutate });
 
   /** Стиль элемента-носителя масштаба: и CSS-переменные, и обычные свойства. */
   const style = createStyle();
@@ -352,6 +418,7 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     // Полоски изменения ширины и колонки раскладки — по ним плагин выравнивает полоски.
     querySelector: (selector) => {
       const text = String(selector);
+      if (text.includes('data-conversation-session')) return sessionNode;
       if (text.includes('_frame')) return frameMock;
       if (text.includes('_sidebarCol')) return columnsMock.sidebar ?? null;
       if (text.includes('data-rightbar-col')) return columnsMock.rightbar ?? null;
@@ -384,6 +451,7 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
   });
   const windowObject = {
     localStorage: storage,
+    location: { search: locationSearch },
     __DSH_BOOT__: boot,
     MouseEvent: FakeMouseEvent,
     PointerEvent: FakePointerEvent,
@@ -422,6 +490,13 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
       timers.set(id, { fn, ms: 0 });
       return id;
     },
+    // Настройка системы: единственный источник reduced-motion для твика.
+    matchMedia: (query) => ({
+      media: String(query),
+      matches: reducedMotion === true && String(query).includes('prefers-reduced-motion'),
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }),
     getComputedStyle,
   };
   let loaded = null;
@@ -481,6 +556,7 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
       if (name === 'locale') return localeFace;
       if (name === 'slots') return slotsFace;
       if (name === 'shortcuts') return shortcutsAvailableNow ? shortcutsFace : undefined;
+      if (name === 'sessions') return sessionsFace;
       if (name === 'configForms') return configFormsAvailable ? configForms : undefined;
       // Шов распознавания — namespace-служба Remote-шины под ключом remote.speech.
       if (name === 'remote.speech') return speechNow;
@@ -536,7 +612,7 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     setTimeout: windowObject.setTimeout,
     clearTimeout: windowObject.clearTimeout,
     require: (name) => {
-      if (name === 'react') return createReact(reactCleanups);
+      if (name === 'react') return createReact(reactCleanups, hookState);
       if (name === '@deepseek-ai/dsh-client-ui-primitives') return { Switch: createSwitch() };
       throw new Error(`unexpected require: ${name}`);
     },
@@ -594,6 +670,32 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     formsIds: () => configForms.ids,
     /** Сколько подписок на снимок конфигурации держит каркас. */
     formsSubscribers: () => configForms.subscribers(),
+    /**
+     * Отрисовать компонент с курсором хуков: ячейки `useState` живут между
+     * вызовами под одним ключом, эффекты прошлого рендера снимаются заранее.
+     * @param {string} key - ключ экземпляра компонента.
+     * @param {Function} render - функция рендера.
+     * @returns {*} результат рендера.
+     */
+    hooks: (key, render) => {
+      const cells = hookStores.get(key) ?? [];
+      hookStores.set(key, cells);
+      for (const cleanup of hookCleanups.get(key) ?? []) {
+        try {
+          cleanup();
+        } catch (_error) {
+          /* очистка не должна ломать рендер */
+        }
+      }
+      hookCleanups.set(key, []);
+      const previous = hookState.active;
+      hookState.active = { cells, index: 0, cleanups: hookCleanups.get(key) };
+      try {
+        return render();
+      } finally {
+        hookState.active = previous;
+      }
+    },
     /** Запись слота по имени (и ключу, если он задан). */
     slotEntry: (name, key) =>
       slotEntries.find((row) => row.name === name && (key === undefined || row.entry.options.key === key)) ?? null,
@@ -2120,7 +2222,159 @@ function dockLight(env) {
       (entry) => entry.name === 'conversation.composer.dock' && entry.entry.options.id === 'traffic-light',
     ) ?? null;
   assert.ok(row, 'светофор зарегистрирован под полем ввода');
-  return renderSlot(row);
+  return env.hooks('dock', () => renderSlot(row));
+}
+
+/**
+ * Запись слота нижнего индикатора (или null, если твик выключен).
+ * @param {object} env - песочница плагина.
+ * @returns {object|null} запись слота.
+ */
+function dockRow(env) {
+  return (
+    env.slotEntries.find(
+      (entry) => entry.name === 'conversation.composer.dock' && entry.entry.options.id === 'traffic-light',
+    ) ?? null
+  );
+}
+
+/**
+ * Найти первый элемент дерева, подходящий под предикат props.
+ * @param {*} node - дерево элементов.
+ * @param {Function} predicate - проверка элемента.
+ * @returns {object|null} найденный элемент.
+ */
+function findElement(node, predicate) {
+  let found = null;
+  const walk = (current) => {
+    if (found !== null || current === null || current === undefined) return;
+    if (Array.isArray(current)) {
+      for (const item of current) walk(item);
+      return;
+    }
+    if (typeof current !== 'object') return;
+    if (predicate(current)) {
+      found = current;
+      return;
+    }
+    walk(current.children);
+  };
+  walk(node);
+  return found;
+}
+
+/**
+ * Собрать все элементы дерева, подходящие под предикат props.
+ * @param {*} node - дерево элементов.
+ * @param {Function} predicate - проверка элемента.
+ * @returns {object[]} найденные элементы.
+ */
+function findElements(node, predicate) {
+  const found = [];
+  const walk = (current) => {
+    if (current === null || current === undefined) return;
+    if (Array.isArray(current)) {
+      for (const item of current) walk(item);
+      return;
+    }
+    if (typeof current !== 'object') return;
+    if (predicate(current)) found.push(current);
+    walk(current.children);
+  };
+  walk(node);
+  return found;
+}
+
+/**
+ * Лампа док-строки: локатор по маркеру `data-light`, а не по позиции
+ * (qa-F1: переключатель спецсигнала встал вторым ребёнком).
+ * @param {*} tree - дерево док-строки.
+ * @returns {object|null} кнопка-лампа.
+ */
+function findLamp(tree) {
+  return findElement(tree, (node) => node.props?.['data-light'] !== undefined);
+}
+
+/**
+ * Элемент панели-тултипа: компонент `TrafficClockPanel`.
+ *
+ * Маркер `data-dsh-light-panel` ставит сама панель на свой корень, поэтому
+ * локатор ищет компонент, а маркер проверяется на отрисованном дереве.
+ * @param {*} tree - дерево док-строки.
+ * @returns {object|null} элемент панели.
+ */
+function findPanelElement(tree) {
+  return findElement(tree, (node) => typeof node.type === 'function' && node.type.name === 'TrafficClockPanel');
+}
+
+/**
+ * Отрисовать панель-тултип с курсором хуков.
+ * @param {object} env - песочница плагина.
+ * @param {*} tree - открытая док-строка.
+ * @returns {object} дерево панели (корень помечен `data-dsh-light-panel`).
+ */
+function renderPanel(env, tree) {
+  const panel = findPanelElement(tree);
+  assert.ok(panel, 'панель-тултип отрисована');
+  return env.hooks('panel', () => panel.type(panel.props));
+}
+
+/**
+ * Элемент переключателя спецсигнала: компонент `TrafficLightSignalSeat`.
+ * @param {*} tree - дерево (док-строка или панель).
+ * @param {string} variant - 'dock' | 'panel'.
+ * @returns {object|null} элемент компонента.
+ */
+function findSeat(tree, variant = 'dock') {
+  return findElement(
+    tree,
+    (node) =>
+      typeof node.type === 'function'
+      && node.type.name === 'TrafficLightSignalSeat'
+      && node.props?.variant === variant,
+  );
+}
+
+/**
+ * Отрисовать переключатель спецсигнала с курсором хуков (состояние переживает
+ * повторный рендер, эффекты прошлого снимаются).
+ * @param {object} env - песочница плагина.
+ * @param {*} tree - дерево, в котором ищется переключатель.
+ * @param {string} variant - 'dock' | 'panel'.
+ * @returns {object} отрисованная кнопка-переключатель.
+ */
+function renderSeatTree(env, tree, variant = 'dock') {
+  const seat = findSeat(tree, variant);
+  assert.ok(seat, `переключатель спецсигнала (${variant}) отрисован`);
+  return env.hooks(`seat-${variant}`, () => seat.type(seat.props));
+}
+
+/**
+ * Отрисовать кнопку-переключатель спецсигнала (без обёртки).
+ * @param {object} env - песочница плагина.
+ * @param {*} tree - дерево, в котором ищется переключатель.
+ * @param {string} variant - 'dock' | 'panel'.
+ * @returns {object} кнопка-переключатель.
+ */
+function renderSeat(env, tree, variant = 'dock') {
+  const rendered = renderSeatTree(env, tree, variant);
+  const marker = variant === 'panel' ? 'data-dsh-light-signal-in' : 'data-dsh-light-signal';
+  const button = findElement(rendered, (node) => node.props?.[marker] !== undefined);
+  assert.ok(button, `кнопка переключателя (${variant}) отрисована`);
+  return button;
+}
+
+/**
+ * Текст из русского словаря твика с подстановками шаблона.
+ * @param {object} env - песочница плагина.
+ * @param {string} key - ключ словаря.
+ * @param {object} [values] - подстановки `{{name}}`.
+ * @returns {string} текст подписи.
+ */
+function ruText(env, key, values = {}) {
+  const dict = env.dictionaries.find((row) => row.locale === 'ru')?.dict ?? {};
+  const template = String(dict[key] ?? key);
+  return template.replace(/\{\{(\w+)\}\}/g, (_match, name) => String(values[name] ?? ''));
 }
 
 /**
@@ -2235,14 +2489,18 @@ check('настройки твика предлагают режим индик�
 });
 
 check('панель светофора открывается только по нажатию', () => {
+  // Перевод локаторов (qa-F1, не ослабление): раньше проверялись позиции
+  // `children[0]`/`children[1]`, теперь — маркеры `data-light` и
+  // `data-dsh-light-panel`, потому что переключатель встал вторым ребёнком.
   const env = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
   const tree = dockLight(env);
-  const button = tree.children[0];
+  const button = findLamp(tree);
+  assert.ok(button, 'лампа помечена маркером data-light');
   assert.equal(button.type, 'button', 'индикатор — кнопка');
   assert.equal(typeof button.props.onClick, 'function', 'нажатие переключает панель');
   assert.equal(button.props.onMouseEnter, undefined, 'наведение панель не открывает');
   assert.equal(button.props.onFocus, undefined, 'фокус панель не открывает');
-  assert.equal(tree.children[1], null, 'до нажатия панель закрыта');
+  assert.equal(findPanelElement(tree), null, 'до нажатия панель закрыта');
 });
 
 check('панель привязана к лампе, ограничена окном и вынесена в портал', () => {
@@ -2396,6 +2654,293 @@ check('на красном свете индикатор работы сесси
   });
   dockLight(greenEnv);
   assert.equal(greenEnv.documentAttribute('data-dsh-light-red'), null, 'на зелёном признак отсутствует');
+});
+
+// ---- Спецсигнал (P3, кейсы (д) и (д2) плана) ------------------------------
+check('(д) док-строка: лампа и переключатель — маркеры различимы', () => {
+  const env = loadPlugin({
+    flags: { zoom: true, contextMenu: true, trafficLight: true, trafficLightSpecial: [] },
+    sessionId: 'session-abc',
+  });
+  const tree = dockLight(env);
+  const lamp = findLamp(tree);
+  assert.ok(lamp, '(д) лампа помечена data-light');
+  assert.equal(
+    findElements(tree, (node) => node.props?.['data-dsh-light-signal'] !== undefined).length,
+    0,
+    '(д) маркер держит сам переключатель, а не док-строка',
+  );
+  const seat = renderSeat(env, tree, 'dock');
+  assert.equal(seat.type, 'button', '(д) переключатель — кнопка');
+  assert.equal(seat.props['data-dsh-light-signal'], 'off', '(д) выключенное состояние помечено');
+  assert.equal(seat.props['aria-pressed'], 'false', '(д) aria-pressed выключен');
+  assert.ok(String(seat.props.className).includes('dsh-ui-light-signal--off'), '(д) класс выключенного состояния');
+  assert.equal(seat.props.title, ruText(env, 'light.signal.title'), '(д) title из локали');
+  assert.equal(seat.props['data-motion'], 'full', '(д) без настройки анимация полная');
+});
+
+checkAsync('(д) клик включает и выключает спецсигнал: ровно один mutate на клик', async () => {
+  const env = loadPlugin({
+    flags: { zoom: true, contextMenu: true, trafficLight: true, trafficLightSpecial: [] },
+    sessionId: 'session-abc',
+  });
+  const seat = renderSeat(env, dockLight(env), 'dock');
+  const storedBefore = env.storage.getItem('dsh.ui-light.settings.v1');
+  await seat.props.onClick();
+  assert.equal(env.formsCalls().length, 1, '(д) ровно один mutate на клик');
+  assert.deepEqual(
+    plain(env.formsCalls()[0].ops),
+    [{ op: 'set', path: ['trafficLightSpecial'], value: ['session-abc'] }],
+    '(д) пишется поле спецсигнала с сессией из DOM',
+  );
+  const afterOn = renderSeat(env, dockLight(env), 'dock');
+  assert.equal(afterOn.props['data-dsh-light-signal'], 'on', '(д) перерисовка по живому снимку: включено');
+  assert.equal(afterOn.props['aria-pressed'], 'true', '(д) aria-pressed включён');
+  await afterOn.props.onClick();
+  assert.equal(env.formsCalls().length, 2, '(д) повторный клик — второй mutate');
+  assert.deepEqual(plain(env.formsCalls()[1].ops[0].value), [], '(д) повторный клик убирает сессию');
+  const afterOff = renderSeat(env, dockLight(env), 'dock');
+  assert.equal(afterOff.props['data-dsh-light-signal'], 'off', '(д) после повторного клика снова выключено');
+  assert.equal(env.storage.getItem('dsh.ui-light.settings.v1'), storedBefore, '(д) localStorage не тронут (D15)');
+});
+
+check('(д) запись запрещена или сессия неизвестна — переключатель заблокирован', () => {
+  const readOnly = loadPlugin({
+    flags: { trafficLight: true, trafficLightSpecial: [] },
+    sessionId: 's1',
+    writable: false,
+  });
+  assert.equal(renderSeat(readOnly, dockLight(readOnly), 'dock').props.disabled, true, '(д) writable:false → disabled');
+  const notReady = loadPlugin({
+    flags: { trafficLight: true, trafficLightSpecial: [] },
+    sessionId: 's1',
+    configStatus: 'loading',
+  });
+  assert.equal(renderSeat(notReady, dockLight(notReady), 'dock').props.disabled, true, '(д) status!==ready → disabled');
+  const noSession = loadPlugin({ flags: { trafficLight: true, trafficLightSpecial: [] } });
+  assert.equal(renderSeat(noSession, dockLight(noSession), 'dock').props.disabled, true, '(д) без id из DOM → disabled');
+});
+
+checkAsync('(д) устаревшая ревизия: один повтор, дельта по свежему снимку', async () => {
+  const env = loadPlugin({
+    flags: { trafficLight: true, trafficLightSpecial: [] },
+    sessionId: 's1',
+    refuseFirstMutate: true,
+  });
+  const seat = renderSeat(env, dockLight(env), 'dock');
+  const accepted = await seat.props.onClick();
+  assert.equal(accepted, true, '(д) повтор принял запись');
+  assert.equal(env.formsCalls().length, 2, '(д) ровно один повтор');
+  assert.deepEqual(plain(env.formsCalls().map((call) => call.ops[0].value)), [['s1'], ['s1']], '(д) дельта применена к свежему снимку');
+});
+
+check('(д) reduced-motion: признак reduced и статика в тексте CSS', () => {
+  const reduced = loadPlugin({
+    flags: { trafficLight: true, trafficLightSpecial: [] },
+    sessionId: 's1',
+    reducedMotion: true,
+  });
+  const seat = renderSeat(reduced, dockLight(reduced), 'dock');
+  assert.equal(seat.props['data-motion'], 'reduced', '(д) reduced-motion помечен атрибутом');
+  assert.equal(seat.props.style, undefined, '(д) inline-анимации на переключателе нет');
+  const css = fs.readFileSync(CLIENT, 'utf8');
+  // В исходнике атрибут подставлен константой LIGHT_MOTION_ATTR, поэтому
+  // допускаем обе формы записи селектора.
+  const reducedRule = /\[(?:\$\{LIGHT_MOTION_ATTR\}|data-motion)="reduced"\][^`]*animation\s*:\s*none/.exec(css);
+  assert.ok(reducedRule, '(д) правило статики для reduced есть в CSS');
+  const full = loadPlugin({ flags: { trafficLight: true, trafficLightSpecial: [] }, sessionId: 's1' });
+  assert.equal(renderSeat(full, dockLight(full), 'dock').props['data-motion'], 'full', '(д) без настройки — полная анимация');
+});
+
+check('(д) статус paused|bypass|free в подписи лампы', () => {
+  const redNow = Date.UTC(2026, 9, 14, 2, 0); // 05:00 МСК — красный до 07:00
+  const pausedEnv = loadPlugin({
+    flags: { trafficLight: true, trafficLightSpecial: [] },
+    sessionId: 's1',
+    fixedNow: redNow,
+  });
+  const pausedLamp = findLamp(dockLight(pausedEnv));
+  assert.equal(
+    pausedLamp.props['aria-label'],
+    ruText(pausedEnv, 'light.status.paused', { time: '07:00' }),
+    '(д) paused: «ждёт зелёного до HH:MM»',
+  );
+  assert.equal(pausedLamp.props.title, pausedLamp.props['aria-label'], '(д) статус виден и в title лампы');
+
+  const bypassEnv = loadPlugin({
+    flags: { trafficLight: true, trafficLightSpecial: ['s1'] },
+    sessionId: 's1',
+    fixedNow: redNow,
+  });
+  assert.equal(
+    findLamp(dockLight(bypassEnv)).props['aria-label'],
+    ruText(bypassEnv, 'light.status.bypass', { time: '07:00' }),
+    '(д) bypass: «спецсигнал: работа на красном до HH:MM»',
+  );
+
+  const freeNow = Date.UTC(2026, 9, 14, 4, 30); // 07:30 МСК — зелёный до 09:00
+  const freeEnv = loadPlugin({
+    flags: { trafficLight: true, trafficLightSpecial: [] },
+    sessionId: 's1',
+    fixedNow: freeNow,
+  });
+  assert.equal(
+    findLamp(dockLight(freeEnv)).props['aria-label'],
+    ruText(freeEnv, 'light.status.free', { time: '09:00' }),
+    '(д) free: «вне пика — до HH:MM»',
+  );
+});
+
+check('(д2) дочерний чат: наследование не видно клиенту — базовый paused', () => {
+  const redNow = Date.UTC(2026, 9, 14, 2, 0);
+  const env = loadPlugin({
+    flags: { trafficLight: true, trafficLightSpecial: ['session-parent'] },
+    sessionId: 'session-child',
+    fixedNow: redNow,
+  });
+  const tree = dockLight(env);
+  assert.equal(
+    findLamp(tree).props['aria-label'],
+    ruText(env, 'light.status.paused', { time: '07:00' }),
+    '(д2) у дочернего чата базовый статус paused',
+  );
+  assert.equal(
+    renderSeat(env, tree, 'dock').props['data-dsh-light-signal'],
+    'off',
+    '(д2) спецсигнал родителя не отражается в дочернем чате',
+  );
+  assert.equal(
+    renderSeat(env, tree, 'dock').props['aria-pressed'],
+    'false',
+    '(д2) переключатель дочернего чата выключен',
+  );
+});
+
+checkAsync('(д) копия переключателя в панели не дублирует маркер', async () => {
+  const env = loadPlugin({
+    flags: { trafficLight: true, trafficLightSpecial: [] },
+    sessionId: 's1',
+    fixedNow: Date.UTC(2026, 9, 14, 2, 0),
+  });
+  const tree = dockLight(env);
+  await findLamp(tree).props.onClick();
+  const openTree = dockLight(env);
+  assert.ok(findPanelElement(openTree), '(д) панель открылась по нажатию лампы');
+  const panelTree = renderPanel(env, openTree);
+  assert.equal(panelTree.props['data-dsh-light-panel'], '', '(д) корень панели помечен data-dsh-light-panel');
+  const statusNode = findElement(panelTree, (node) => node.props?.['data-dsh-light-status'] !== undefined);
+  assert.ok(statusNode, '(д) в панели есть [data-dsh-light-status]');
+  assert.equal(statusNode.props['data-dsh-light-status'], 'paused', '(д) панель показывает тот же статус, что и лампа');
+  const panelSeat = renderSeat(env, { children: [panelTree] }, 'panel');
+  assert.equal(panelSeat.props['data-dsh-light-signal-in'], 'panel', '(д) копия помечена -in="panel"');
+  assert.equal(panelSeat.props['data-dsh-light-signal'], undefined, '(д) маркер в панели не дублируется');
+  assert.equal(
+    findElements(openTree, (node) => node.props?.['data-dsh-light-signal'] !== undefined).length,
+    0,
+    '(д) в разметке док-строки маркера нет — он на кнопке',
+  );
+});
+
+/**
+ * Открыть панель-тултип по нажатию лампы и отрисовать её.
+ * @param {object} env - песочница плагина.
+ * @returns {Promise<object>} дерево панели.
+ */
+async function openPanel(env) {
+  const tree = dockLight(env);
+  await findLamp(tree).props.onClick();
+  const openTree = dockLight(env);
+  assert.ok(findPanelElement(openTree), 'панель открылась по нажатию лампы');
+  // Первый рендер монтирует эффекты (признак «кто-то работает»), второй уже
+  // читает состояние из курсора хуков — как повторный рендер в React.
+  renderPanel(env, openTree);
+  return renderPanel(env, openTree);
+}
+
+checkAsync('(д) подсказка простоя light.pausedHint: на паузе есть, при спецсигнале нет', async () => {
+  const redNow = Date.UTC(2026, 9, 14, 2, 0); // 05:00 МСК — красный
+  const pausedEnv = loadPlugin({
+    flags: { trafficLight: true, trafficLightSpecial: [] },
+    sessionId: 's1',
+    runningSessions: ['s1'],
+    fixedNow: redNow,
+  });
+  const pausedPanel = await openPanel(pausedEnv);
+  const pausedTexts = indicatorTexts(pausedPanel).join(' ');
+  assert.ok(
+    pausedTexts.includes('Работа на паузе, пока горит красный'),
+    '(д) на паузе панель показывает light.pausedHint',
+  );
+  assert.equal(
+    pausedEnv.dictionaries.find((row) => row.locale === 'en')?.dict['light.pausedHint'],
+    'Work is paused while the light is red',
+    '(д) паритет: в en-словаре есть light.pausedHint',
+  );
+
+  const bypassEnv = loadPlugin({
+    flags: { trafficLight: true, trafficLightSpecial: ['s1'] },
+    sessionId: 's1',
+    runningSessions: ['s1'],
+    fixedNow: redNow,
+  });
+  const bypassPanel = await openPanel(bypassEnv);
+  const bypassTexts = indicatorTexts(bypassPanel).join(' ');
+  assert.equal(
+    bypassTexts.includes('Работа на паузе, пока горит красный'),
+    false,
+    '(д) при спецсигнале подсказки простоя нет',
+  );
+  const statusNode = findElement(bypassPanel, (node) => node.props?.['data-dsh-light-status'] !== undefined);
+  assert.ok(statusNode, '(д) в панели есть [data-dsh-light-status]');
+  assert.equal(statusNode.props['data-dsh-light-status'], 'bypass', '(д) вместо подсказки работает статус bypass');
+});
+
+checkAsync('(д) отказ записи: появляется [data-dsh-light-alert] с подсказкой', async () => {
+  const env = loadPlugin({
+    flags: { trafficLight: true, trafficLightSpecial: [] },
+    sessionId: 's1',
+    refuseAllMutate: true,
+  });
+  const seat = renderSeat(env, dockLight(env), 'dock');
+  const accepted = await seat.props.onClick();
+  assert.equal(accepted, false, '(д) запись отклонена службой');
+  assert.equal(env.formsCalls().length, 2, '(д) ровно один повтор после отказа');
+  const wrap = renderSeatTree(env, dockLight(env), 'dock');
+  const alert = findElement(wrap, (node) => node.props?.['data-dsh-light-alert'] !== undefined);
+  assert.ok(alert, '(д) оповещение об отказе помечено [data-dsh-light-alert]');
+  assert.ok(
+    indicatorTexts(alert).join(' ').includes(ruText(env, 'light.signal.blocked')),
+    '(д) оповещение содержит подсказку light.signal.blocked',
+  );
+});
+
+check('(д) без твика элементов нет: trafficLight:false и ?tweaks=off', () => {
+  const off = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: false }, sessionId: 's1' });
+  assert.equal(dockRow(off), null, '(д) trafficLight:false — светофора в доке нет');
+  const switched = loadPlugin({
+    flags: { zoom: true, contextMenu: true, trafficLight: true },
+    sessionId: 's1',
+    locationSearch: '?tweaks=off',
+  });
+  assert.equal(dockRow(switched), null, '(д) ?tweaks=off — светофора в доке нет');
+});
+
+check('(д) ключи спецсигнала есть в обоих словарях client.js', () => {
+  const env = loadPlugin();
+  for (const locale of ['en', 'ru']) {
+    const dict = env.dictionaries.find((row) => row.locale === locale)?.dict ?? {};
+    for (const key of [
+      'light.status.paused',
+      'light.status.bypass',
+      'light.status.free',
+      'light.signal.title',
+      'light.signal.on',
+      'light.signal.off',
+      'light.signal.blocked',
+    ]) {
+      assert.ok(String(dict[key] ?? '').length > 0, `${locale}: есть ключ ${key}`);
+    }
+  }
 });
 
 // Асинхронные проверки идут после обычных: их список собирается по ходу файла.

@@ -416,9 +416,6 @@ window.__ModuleLoader__.load({
         'light.offpeak': 'Cheap hours',
         'light.peak': 'Expensive hours',
         'light.warning': 'Expensive hours soon',
-        'light.untilGreen': 'Expensive hours until {{time}}',
-        'light.untilRed': 'Expensive hours start at {{time}}',
-        'light.untilPeak': 'Cheap hours until {{time}}',
         'light.countdownH': '{{hours}} h {{minutes}} min',
         'light.countdownM': '{{minutes}} min',
         'light.countdownS': '< 1 min',
@@ -431,7 +428,7 @@ window.__ModuleLoader__.load({
         'light.timeZone': 'Current time zone: {{zone}}',
         'light.localTimeNote': 'Times are shown in your time zone',
         'light.slotLabel': '{{time}} · {{label}}',
-        'light.pausedHint': 'Automatic work is paused while the light is red',
+        'light.pausedHint': 'Work is paused while the light is red',
         'light.setting.dock': 'Bottom indicator',
         'light.setting.dock.lamp': 'Indicator only',
         'light.setting.dock.time': 'Indicator and time left',
@@ -444,6 +441,13 @@ window.__ModuleLoader__.load({
         'light.left': '{{value}} left',
         'light.leftTo': '{{value}} left · until {{time}}',
         'light.switchLine': 'Tariff switch: {{time}} (in {{left}})',
+        'light.status.paused': 'waiting for green until {{time}}',
+        'light.status.bypass': 'special signal: running on red (twice the price) until {{time}}',
+        'light.status.free': 'off-peak — until {{time}}',
+        'light.signal.title': 'Special signal: this chat and its team work on red (twice the price)',
+        'light.signal.on': 'on',
+        'light.signal.off': 'off',
+        'light.signal.blocked': 'The special signal was not saved: the settings changed in another tab. Try again',
         'form.hint': 'A check box turns the tweak on at once, without a restart.',
         'form.unavailable': 'Settings are unavailable: this deployment has no configuration service.',
         'form.readOnly': 'This deployment stores settings read-only.',
@@ -498,9 +502,6 @@ window.__ModuleLoader__.load({
         'light.offpeak': 'Дешёвые часы',
         'light.peak': 'Дорогие часы',
         'light.warning': 'Скоро дорогие часы',
-        'light.untilGreen': 'Дорогие часы до {{time}}',
-        'light.untilRed': 'Дорогие часы начнутся в {{time}}',
-        'light.untilPeak': 'Дешёвые часы до {{time}}',
         'light.countdownH': '{{hours}} ч {{minutes}} мин',
         'light.countdownM': '{{minutes}} мин',
         'light.countdownS': 'меньше минуты',
@@ -513,7 +514,7 @@ window.__ModuleLoader__.load({
         'light.timeZone': 'Текущий часовой пояс: {{zone}}',
         'light.localTimeNote': 'Время — в вашем часовом поясе',
         'light.slotLabel': '{{time}} · {{label}}',
-        'light.pausedHint': 'Автоматическая работа на паузе, пока горит красный',
+        'light.pausedHint': 'Работа на паузе, пока горит красный',
         'light.setting.dock': 'Нижний индикатор',
         'light.setting.dock.lamp': 'Только индикатор',
         'light.setting.dock.time': 'Индикатор и оставшееся время',
@@ -526,6 +527,13 @@ window.__ModuleLoader__.load({
         'light.left': 'ещё {{value}}',
         'light.leftTo': 'ещё {{value}} · до {{time}}',
         'light.switchLine': 'Смена тарифа: {{time}} (через {{left}})',
+        'light.status.paused': 'ждёт зелёного до {{time}}',
+        'light.status.bypass': 'спецсигнал: работа на красном (вдвое дороже) до {{time}}',
+        'light.status.free': 'вне пика — до {{time}}',
+        'light.signal.title': 'Спецсигнал: чат и его команда работают на красном (дороже вдвое)',
+        'light.signal.on': 'вкл',
+        'light.signal.off': 'выкл',
+        'light.signal.blocked': 'Спецсигнал не сохранился: настройки изменились в другой вкладке. Попробуйте ещё раз',
         'form.hint': 'Галочка включает твик сразу, без перезапуска.',
         'form.unavailable': 'Настройки недоступны: в этой сборке нет службы конфигурации.',
         'form.readOnly': 'Эта сборка хранит настройки только для чтения.',
@@ -2923,6 +2931,27 @@ window.__ModuleLoader__.load({
     /** Ключ пер-устройственных настроек твика (как у масштаба: своё значение на браузер). */
     const LIGHT_PREFS_KEY = 'dsh.ui-light.settings.v1';
 
+    /** Volatile-поле конфига со списком сессий, которым разрешён красный свет. */
+    const LIGHT_SIGNAL_FIELD = 'trafficLightSpecial';
+
+    /** Маркер переключателя спецсигнала у лампы: `on|off`. */
+    const LIGHT_SIGNAL_ATTR = 'data-dsh-light-signal';
+
+    /** Маркер копии переключателя в панели: значение всегда `panel`. */
+    const LIGHT_SIGNAL_PANEL_ATTR = 'data-dsh-light-signal-in';
+
+    /** Маркер строки статуса в панели: `paused|bypass|free`. */
+    const LIGHT_STATUS_ATTR = 'data-dsh-light-status';
+
+    /** Маркер оповещения об отказе записи спецсигнала. */
+    const LIGHT_ALERT_ATTR = 'data-dsh-light-alert';
+
+    /** Признак анимации на переключателе: `full|reduced`. */
+    const LIGHT_MOTION_ATTR = 'data-motion';
+
+    /** Сколько миллисекунд висит подсказка об отказе записи. */
+    const LIGHT_SIGNAL_HINT_MS = 5000;
+
     /** Режимы нижнего индикатора, по возрастанию подробности. */
     const LIGHT_DOCK_MODES = ['lamp', 'time', 'lamp-time', 'lamp-time-label'];
 
@@ -3002,14 +3031,36 @@ window.__ModuleLoader__.load({
       return prefs;
     }
 
+    /**
+     * Нормализовать список сессий со спецсигналом из конфигурации.
+     *
+     * Поле `trafficLightSpecial` — единственный источник: пустые строки и
+     * повторы отбрасываются, чужие значения не ломают показ.
+     * @param {unknown} value - значение поля конфигурации.
+     * @returns {Set<string>} идентификаторы сессий со спецсигналом.
+     */
+    function normalizeSpecial(value) {
+      const sessions = new Set();
+      if (!Array.isArray(value)) return sessions;
+      for (const item of value) {
+        if (typeof item === 'string' && item !== '') sessions.add(item);
+      }
+      return sessions;
+    }
+
     /** Общее состояние светофора: политика тарифов и подписчики. */
     const lightHub = (() => {
       let policy = { ...DEFAULT_POLICY };
+      /** Сессии со спецсигналом: список приходит из конфигурации твика. */
+      let special = new Set();
       const listeners = new Set();
       return {
         getPolicy: () => policy,
+        /** Сессии, которым разрешён красный свет (переключатель у лампы). */
+        getSpecial: () => special,
         setConfig(value) {
           policy = normalizePolicy(value);
+          special = normalizeSpecial(value?.trafficLightSpecial);
           for (const listener of listeners) listener();
         },
         subscribe(listener) {
@@ -3050,6 +3101,43 @@ window.__ModuleLoader__.load({
         nextPeakStartAt: nextPeak,
         msUntilSwitch: nextSwitch === null ? null : Math.max(0, nextSwitch - instantMs),
       };
+    }
+
+    /**
+     * Статус спецсигнала для открытой сессии.
+     *
+     * Считается в браузере из политики и конфигурации: своего RPC у твика нет.
+     * На красном без спецсигнала ходы ждут зелёного, со спецсигналом работают
+     * (дороже вдвое); вне пика — свободно.
+     * @param {number} instantMs - миллисекунды эпохи.
+     * @param {string} sessionId - открытая сессия ('' — неизвестна).
+     * @returns {{status: 'paused' | 'bypass' | 'free', until: number | null}} статус и граница.
+     */
+    function lightSignalStatus(instantMs, sessionId) {
+      const status = lightStatus(instantMs);
+      if (status.light === 'red') {
+        const on = sessionId !== '' && lightHub.getSpecial().has(sessionId);
+        return { status: on ? 'bypass' : 'paused', until: status.nextSwitchAt };
+      }
+      return { status: 'free', until: status.nextPeakStartAt };
+    }
+
+    /**
+     * Подпись статуса спецсигнала: «ждёт зелёного до 13:00» и родственные.
+     *
+     * Шаблон уже содержит «до {{time}}», поэтому время подставляется внутрь него,
+     * а не дописывается снаружи.
+     * @param {object} signal - результат lightSignalStatus.
+     * @param {number} nowMs - текущий момент.
+     * @param {Function} t - переводчик словаря твика.
+     * @returns {string} подпись статуса.
+     */
+    function formatSignalStatus(signal, nowMs, t) {
+      const template = t(`light.status.${signal.status}`);
+      // Без границы (окон не осталось) шаблон с {{time}} не заполнить: тогда
+      // показывается голая подпись тарифа, а не сырая подстановка.
+      if (signal.until === null) return t(signal.status === 'free' ? 'light.offpeak' : 'light.peak');
+      return fillText(template, { time: formatTarget(signal.until, nowMs, t) });
     }
 
     /** Дополнить число нулём до двух знаков. */
@@ -3137,13 +3225,6 @@ window.__ModuleLoader__.load({
     /** Ключ подписи цвета в словаре. */
     function lightLabelKey(light) {
       return light === 'red' ? 'light.peak' : light === 'yellow' ? 'light.warning' : 'light.offpeak';
-    }
-
-    /** Ключ подписи отсчёта до перехода в словаре. */
-    function lightCountdownKey(status) {
-      if (status.light === 'red') return 'light.untilGreen';
-      if (status.light === 'yellow') return 'light.untilRed';
-      return 'light.untilPeak';
     }
 
     /** Мгновение, до которого идёт отсчёт. */
@@ -3238,6 +3319,128 @@ window.__ModuleLoader__.load({
         return list.subscribe(() => setRunning(read()));
       }, []);
       return { now, running, revision };
+    }
+
+    /**
+     * Идентификатор открытого чата.
+     *
+     * Приложение держит его на корне разговора; своего RPC у твика нет, поэтому
+     * сессия читается из разметки. Неизвестная сессия — пустая строка:
+     * переключатель тогда заблокирован, а не пишет «наугад».
+     * @returns {string} id сессии или ''.
+     */
+    function lightSessionId() {
+      try {
+        if (typeof document === 'undefined' || document === null) return '';
+        const node = document.querySelector('[data-conversation-session]');
+        const value =
+          node?.getAttribute?.('data-conversation-session') ?? node?.dataset?.conversationSession ?? '';
+        return typeof value === 'string' ? value : '';
+      } catch (_error) {
+        return '';
+      }
+    }
+
+    /**
+     * Форма записи службы конфигурации для твиков.
+     *
+     * Та же запись, по которой каркас читает флаги: строку пакета держит
+     * `cordis.patch.yml`, а `configForms` отдаёт её по id записи.
+     * @returns {object | undefined} форма записи или undefined без службы.
+     */
+    function lightFormsController() {
+      try {
+        const forms = typeof lightContext?.get === 'function' ? lightContext.get('configForms') : undefined;
+        return typeof forms?.get === 'function' ? forms.get(ROW_ID) : undefined;
+      } catch (_error) {
+        return undefined;
+      }
+    }
+
+    /**
+     * Снимок конфигурации с подпиской: спецсигнал меняется и из другой вкладки.
+     * @returns {object} controller и его снимок (status, value, revision, writable).
+     */
+    function useLightController() {
+      const controller = lightFormsController();
+      const read = () => controller?.getSnapshot?.() ?? null;
+      const [snapshot, setSnapshot] = React.useState(read());
+      React.useEffect(() => {
+        setSnapshot(controller?.getSnapshot?.() ?? null);
+        return typeof controller?.subscribe === 'function'
+          ? controller.subscribe(() => setSnapshot(controller?.getSnapshot?.() ?? null))
+          : undefined;
+      }, [controller]);
+      return { controller, snapshot };
+    }
+
+    /**
+     * Уменьшенная анимация по настройке системы.
+     *
+     * `matchMedia` есть не везде (софтверный рендер, старые оболочки), поэтому
+     * при его отсутствии возвращается `false`, а статику всё равно даёт CSS.
+     * @returns {boolean} просит ли система уменьшить анимацию.
+     */
+    function useReducedMotion() {
+      const read = () => {
+        try {
+          if (typeof window?.matchMedia !== 'function') return false;
+          return window.matchMedia('(prefers-reduced-motion: reduce)').matches === true;
+        } catch (_error) {
+          return false;
+        }
+      };
+      const [reduced, setReduced] = React.useState(read());
+      React.useEffect(() => {
+        if (typeof window?.matchMedia !== 'function') return undefined;
+        let query = null;
+        try {
+          query = window.matchMedia('(prefers-reduced-motion: reduce)');
+        } catch (_error) {
+          query = null;
+        }
+        if (query === null) return undefined;
+        const onChange = () => setReduced(read());
+        if (typeof query.addEventListener === 'function') {
+          query.addEventListener('change', onChange);
+          return () => query.removeEventListener?.('change', onChange);
+        }
+        if (typeof query.addListener === 'function') {
+          query.addListener(onChange);
+          return () => query.removeListener?.(onChange);
+        }
+        return undefined;
+      }, []);
+      return reduced;
+    }
+
+    /**
+     * Включить, выключить или переключить спецсигнал сессии.
+     *
+     * Пишет то же volatile-поле, что читает хост, штатной операцией `set`
+     * службы конфигурации: своего RPC у твика нет. Отказ по устаревшей ревизии
+     * обрабатывается один раз: снимок перечитывается, и дельта (добавить или
+     * убрать id) применяется к свежему списку, чтобы чужие правки не потерялись.
+     * @param {object} controller - форма записи службы конфигурации.
+     * @param {string} sessionId - сессия, для которой меняется спецсигнал.
+     * @param {boolean} on - включить (true) или выключить (false).
+     * @returns {Promise<boolean>} приняла ли запись служба конфигурации.
+     */
+    async function writeSignal(controller, sessionId, on) {
+      const attempt = async () => {
+        const snapshot = controller.getSnapshot?.() ?? {};
+        const next = normalizeSpecial(snapshot?.value?.[LIGHT_SIGNAL_FIELD]);
+        if (on) next.add(sessionId);
+        else next.delete(sessionId);
+        const accepted = await controller.mutate(
+          [{ op: 'set', path: [LIGHT_SIGNAL_FIELD], value: [...next] }],
+          snapshot.revision,
+        );
+        return accepted !== false;
+      };
+      if (await attempt()) return true;
+      // Ревизия устарела: снимок перечитан в attempt, повтор применяет ту же дельту.
+      return await attempt();
     }
 
     /** Ширина панели-тултипа в пикселях. */
@@ -3572,6 +3775,11 @@ window.__ModuleLoader__.load({
             time: `${twoDigits(shown.hour)}:00–${twoDigits((shown.hour + 1) % 24)}:00`,
             label: t(shown.peak ? 'light.peak' : 'light.offpeak'),
           });
+      // Статус и спецсигнал считаются по той же политике и тому же полю
+      // конфигурации, что и у лампы: панель не заводит второй источник истины.
+      const sessionId = lightSessionId();
+      const signal = lightSignalStatus(now, sessionId);
+      const signalOn = sessionId !== '' && lightHub.getSpecial().has(sessionId);
       return React.createElement('div', {
         ref: panelRef,
         className: `${LIGHT_CLASS}-panel`,
@@ -3603,6 +3811,17 @@ window.__ModuleLoader__.load({
         ),
         React.createElement(TrafficHourStrip, { now, hover, setHover }),
         React.createElement('div', { className: `${LIGHT_CLASS}-slot` }, slotLine),
+        // Статус отвечает на вопрос «чего ждём и до каких пор»: на красном без
+        // спецсигнала — зелёного, со спецсигналом — конца окна, вне пика — пика.
+        React.createElement('div', {
+          className: `${LIGHT_CLASS}-status`,
+          [LIGHT_STATUS_ATTR]: signal.status,
+        }, formatSignalStatus(signal, now, t)),
+        React.createElement('div', { className: `${LIGHT_CLASS}-signal-row` },
+          React.createElement('span', { className: `${LIGHT_CLASS}-signal-rowLabel` }, t('light.signal.title')),
+          React.createElement('span', { className: `${LIGHT_CLASS}-signal-state` }, t(signalOn ? 'light.signal.on' : 'light.signal.off')),
+          React.createElement(TrafficLightSignalSeat, { key: 'signal', variant: 'panel' }),
+        ),
         React.createElement('div', { className: `${LIGHT_CLASS}-rules` },
           target === null
             ? null
@@ -3613,7 +3832,10 @@ window.__ModuleLoader__.load({
           React.createElement('div', { key: 'zone' }, fillText(t('light.timeZone'), { zone: localTimeZone() })),
           React.createElement('div', { key: 'note', className: `${LIGHT_CLASS}-note` }, t('light.localTimeNote')),
         ),
-        status.light === 'red' && running
+        // Подсказка простаивающей работы: только на красном, пока у этой сессии
+        // нет спецсигнала. Со спецсигналом работу никто не ставил на паузу —
+        // там работает статус `bypass`, а не эта строка.
+        signal.status === 'paused' && running
           ? React.createElement('div', { className: `${LIGHT_CLASS}-paused` }, t('light.pausedHint'))
           : null,
         ),
@@ -3663,9 +3885,10 @@ window.__ModuleLoader__.load({
         };
       }, [status.light]);
       const target = lightCountdownTarget(status);
-      const label = target === null
-        ? t(lightLabelKey(status.light))
-        : fillText(t(lightCountdownKey(status)), { time: formatTarget(target, now, t) });
+      // Подпись кнопки-лампы — статус спецсигнала: «ждёт зелёного до 13:00» или
+      // «работа на красном до 13:00». Так требование «статус виден и без панели»
+      // выполняется без новых признаков в разметке лампы.
+      const lampLabel = formatSignalStatus(lightSignalStatus(now, lightSessionId()), now, t);
       // В шапке индикатор всегда без текста; у нижнего режим выбирает разработчик.
       const dockMode = variant === 'dock' ? prefs.dockMode ?? 'time' : 'lamp';
       const remaining = target === null ? '' : formatDockCountdown(target - now, t);
@@ -3698,10 +3921,15 @@ window.__ModuleLoader__.load({
           type: 'button',
           ref: buttonRef,
           className: `${LIGHT_CLASS}-button`,
-          'aria-label': label,
+          'aria-label': lampLabel,
+          title: lampLabel,
           'data-light': status.light,
           onClick: () => setOpen((value) => !value),
         }, content),
+        // Порядок детей док-строки фиксирован: лампа, переключатель спецсигнала,
+        // панель. Переключатель идёт вторым, чтобы его место не зависело от
+        // открытой панели.
+        React.createElement(TrafficLightSignalSeat, { key: 'signal', variant: 'dock' }),
         open
           ? renderLightPortal(React.createElement(TrafficClockPanel, {
               anchorRef: lampRef,
@@ -3799,6 +4027,118 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /**
+     * Место спецсигнала в строке дока и в панели.
+     *
+     * Состояние берётся из того же volatile-поля, что читает хост, и пишется
+     * штатной операцией службы конфигурации: своего RPC у твика нет. Пока
+     * конфигурация не готова или запись запрещена, переключатель заблокирован:
+     * «наугад» он не пишет.
+     * @param {object} props - variant: 'dock' | 'panel'.
+     * @returns {object} переключатель с подсказкой об отказе записи.
+     */
+    function TrafficLightSignalSeat({ variant }) {
+      const t = lightTranslator;
+      const sessionId = lightSessionId();
+      const { controller, snapshot } = useLightController();
+      const reduced = useReducedMotion();
+      const ready = snapshot?.status === 'ready';
+      const writable = ready && snapshot?.writable !== false;
+      const on = sessionId !== '' && normalizeSpecial(snapshot?.value?.[LIGHT_SIGNAL_FIELD]).has(sessionId);
+      const [busy, setBusy] = React.useState(false);
+      const [refused, setRefused] = React.useState(false);
+      const timer = React.useRef(null);
+      React.useEffect(() => () => {
+        if (timer.current !== null && typeof window?.clearTimeout === 'function') {
+          window.clearTimeout(timer.current);
+        }
+        timer.current = null;
+      }, []);
+      const title = t('light.signal.title');
+      const blocked = t('light.signal.blocked');
+
+      /**
+       * Показать подсказку об отказе записи и снять её через пять секунд.
+       * @returns {void}
+       */
+      const showRefused = () => {
+        setRefused(true);
+        if (timer.current !== null && typeof window?.clearTimeout === 'function') {
+          window.clearTimeout(timer.current);
+        }
+        if (typeof window?.setTimeout === 'function') {
+          timer.current = window.setTimeout(() => {
+            timer.current = null;
+            setRefused(false);
+          }, LIGHT_SIGNAL_HINT_MS);
+        }
+      };
+
+      /**
+       * Переключить спецсигнал открытой сессии.
+       * @returns {Promise<boolean>} приняла ли запись служба конфигурации.
+       */
+      const onToggle = () => {
+        if (controller === undefined || !writable || sessionId === '' || busy === true) {
+          return Promise.resolve(false);
+        }
+        setBusy(true);
+        return Promise.resolve(writeSignal(controller, sessionId, !on)).then(
+          (accepted) => {
+            setBusy(false);
+            if (!accepted) showRefused();
+            return accepted;
+          },
+          () => {
+            setBusy(false);
+            showRefused();
+            return false;
+          },
+        );
+      };
+
+      const hint = refused ? blocked : null;
+      const props = {
+        type: 'button',
+        className: `${LIGHT_CLASS}-signal ${LIGHT_CLASS}-signal--${on ? 'on' : 'off'}`,
+        'aria-pressed': on ? 'true' : 'false',
+        'aria-label': title,
+        title: hint === null ? title : hint,
+        disabled: !writable || sessionId === '' || busy === true,
+        // Анимация — только CSS: атрибут лишь сообщает, просит ли система статику.
+        [LIGHT_MOTION_ATTR]: reduced ? 'reduced' : 'full',
+        onClick: onToggle,
+      };
+      // Маркер `data-dsh-light-signal` — только у лампы в доке; копия в панели
+      // помечается своим признаком, чтобы локаторы не путались (§4.4 контракта).
+      if (variant === 'panel') props[LIGHT_SIGNAL_PANEL_ATTR] = 'panel';
+      else props[LIGHT_SIGNAL_ATTR] = on ? 'on' : 'off';
+      if (refused) props['aria-invalid'] = 'true';
+      const button = React.createElement(
+        'button',
+        props,
+        React.createElement('span', {
+          key: 'dot',
+          className: `${LIGHT_CLASS}-signal-dot`,
+          'aria-hidden': 'true',
+        }),
+      );
+      const wrap = [button];
+      if (hint !== null) {
+        // Оповещение стоит рядом с кнопкой, а не внутри неё: `role="alert"`
+        // читается скринридером, а `title` работает и при закрытой панели.
+        const alert = {
+          key: 'alert',
+          className: `${LIGHT_CLASS}-signal-alert`,
+          role: 'alert',
+          'aria-live': 'polite',
+        };
+        alert[LIGHT_ALERT_ATTR] = '';
+        wrap.push(React.createElement('span', alert, hint));
+      }
+      return React.createElement('span', { className: `${LIGHT_CLASS}-signal-wrap` }, ...wrap);
+    }
+
     /** Стили твика: токены темы и префиксные классы, как у меню. */
     const LIGHT_STYLE_TEXT = [
       `.${LIGHT_CLASS}-button{box-sizing:border-box;flex:none;display:inline-flex;align-items:center;gap:6px;`,
@@ -3833,6 +4173,37 @@ window.__ModuleLoader__.load({
       `.${LIGHT_CLASS}-rules{color:var(--dsw-alias-label-tertiary);margin-top:10px;text-align:center;line-height:17px;display:flex;flex-direction:column;gap:2px}`,
       `.${LIGHT_CLASS}-note{opacity:.8}`,
       `.${LIGHT_CLASS}-paused{color:var(--dsw-alias-state-business-warning,var(--dsw-alias-label-secondary));margin-top:8px;text-align:center}`,
+      // Спецсигнал: маленькая кнопка-точка рядом с лампой. В покое точка
+      // тускло-серая, включённая — синяя и мигает двойными вспышками, как
+      // проблесковый маячок. Анимация только CSS, состояние — только классы
+      // (у копии в панели своего маркера нет).
+      `.${LIGHT_CLASS}-signal-wrap{position:relative;display:inline-flex;flex:none;align-items:center}`,
+      `.${LIGHT_CLASS}-signal{box-sizing:border-box;flex:none;display:inline-flex;align-items:center;justify-content:center;`,
+      'width:18px;height:18px;padding:0;border:none;border-radius:999px;background:transparent;cursor:pointer}',
+      `.${LIGHT_CLASS}-signal:hover{background:var(--dsw-alias-interactive-bg-hover)}`,
+      `.${LIGHT_CLASS}-signal:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:0}`,
+      `.${LIGHT_CLASS}-signal:disabled{cursor:default;opacity:.45}`,
+      `.${LIGHT_CLASS}-signal:disabled:hover{background:transparent}`,
+      `.${LIGHT_CLASS}-signal-dot{box-sizing:border-box;display:block;width:12px;height:12px;border-radius:999px;`,
+      'border:1.5px solid var(--dsw-alias-border-l2);background:transparent}',
+      `@keyframes ${LIGHT_CLASS}-strobe{0%,10%{opacity:1}16%,26%{opacity:.25}32%,42%{opacity:1}48%,100%{opacity:.25}}`,
+      `.${LIGHT_CLASS}-signal--on .${LIGHT_CLASS}-signal-dot,`,
+      `.${LIGHT_CLASS}-signal[${LIGHT_SIGNAL_ATTR}="on"] .${LIGHT_CLASS}-signal-dot{`,
+      'border-color:transparent;background:var(--dsw-alias-state-business-primary);',
+      `animation:${LIGHT_CLASS}-strobe 1.6s steps(1,end) infinite}`,
+      `.${LIGHT_CLASS}-signal--off .${LIGHT_CLASS}-signal-dot{background:transparent}`,
+      `@media (prefers-reduced-motion:reduce){.${LIGHT_CLASS}-signal .${LIGHT_CLASS}-signal-dot{animation:none!important;opacity:1}}`,
+      `.${LIGHT_CLASS}-signal[${LIGHT_MOTION_ATTR}="reduced"] .${LIGHT_CLASS}-signal-dot{animation:none!important;opacity:1}`,
+      // Подсказка об отказе записи: всплывает над переключателем и не двигает строку.
+      `.${LIGHT_CLASS}-signal-alert{position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);`,
+      'white-space:nowrap;padding:4px 8px;border-radius:6px;border:0.5px solid var(--dsw-alias-border-l2);',
+      'background:var(--dsw-specific-menu);box-shadow:var(--dsw-elevation-prominent);',
+      'color:var(--dsw-alias-label-primary);z-index:2147483647}',
+      `.${LIGHT_CLASS}-status{margin-top:8px;text-align:center;color:var(--dsw-alias-label-primary)}`,
+      `.${LIGHT_CLASS}-signal-row{display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:10px;`,
+      'border-top:0.5px solid var(--dsw-alias-border-l1)}',
+      `.${LIGHT_CLASS}-signal-rowLabel{flex:1 1 auto;min-width:0;color:var(--dsw-alias-label-secondary)}`,
+      `.${LIGHT_CLASS}-signal-state{flex:none;color:var(--dsw-alias-label-tertiary)}`,
       `.${LIGHT_CLASS}-detail{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary);font:12px/18px system-ui,sans-serif}`,
       `.${LIGHT_CLASS}-detail .${LIGHT_CLASS}-lamp{width:10px;height:10px}`,
       `.${LIGHT_CLASS}-settings{display:flex;flex-direction:column;gap:8px;color:var(--dsw-alias-label-secondary);font:12px/18px system-ui,sans-serif}`,

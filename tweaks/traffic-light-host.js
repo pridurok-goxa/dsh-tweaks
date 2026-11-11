@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -10,37 +10,46 @@ import { join } from 'node:path';
  *  2. На красном удерживает доставку расписаний: сообщение с источником
  *     `schedule` снимается из входящих агента и возвращается в работу на
  *     зелёном через `sessionController.resolveAgent` + `agent.followup`.
- *  3. На красном приостанавливает автоматические шаги агентов и субагентов
- *     на ближайшем модельном вызове (`llm/stream`): вызов ждёт зелёного.
- *     Ручные сообщения разработчика не блокируются — на красном можно
- *     работать, дорогое время лишь не тратится фоном. Пустой ход после
- *     изъятого расписания отклоняется, чтобы не платить за него.
- *     Работа, начатая человеком, доводится до конца: субагент, порождённый
- *     из ручного шага, запоминается, и его итог (стиринг, сообщение команды)
- *     возвращается родителю как пользовательское сообщение — родитель не
- *     встаёт в очередь до конца пика (см. «Классификация шага»).
+ *  3. На красном останавливает модельный вызов (`llm/stream`) любой сессии,
+ *     у которой нет спецсигнала: вызов ждёт зелёного. Остальные сообщения из
+ *     входящих не изымаются — их ход просто ждёт, поэтому ничего не теряется.
+ *     Вызовы с `purpose` (заголовок чата, компакция) — сервисные, они проходят
+ *     сразу: иначе служебная работа хода встала бы вместе с ним.
+ *  4. Спецсигнал («работаю на красном, дороже вдвое») включает только человек.
+ *     Переключатель у лампы пишет список сессий в конфиг `trafficLightSpecial`,
+ *     хост переносит его в леджер `$DSH_HOME/dsh-tweaks/special.json`
+ *     (запись атомарная: tmp + rename; пустой список тоже пишется, иначе
+ *     выключение воскресло бы после рестарта). Источник набора при активации:
+ *     файл → значение конфига → seed (`SEED_SPECIAL` — включено по решению
+ *     Игоря t1447u). Сообщения пропуск не дают: человеческий промпт, промпт
+ *     continuable-субагента и стиринг неотличимы от сервисных отправок
+ *     harness-relay/deputy (те же `clientTimeZone`, owner-cookie и `source`
+ *     байт-в-байт), поэтому пропуск даёт только кнопка.
+ *  5. Спецсигнал наследуется деревом субагентов: `hasSignal(id)` поднимается по
+ *     `agent.session.header.parentSession` не больше `PARENT_HOPS_LIMIT` шагов,
+ *     с защитой от цикла. Реестр агентов знает только живых, поэтому
+ *     неизвестная сессия считается сессией без сигнала (fail-closed).
+ *     Спецсигнал действует через любое число красных окон, пока человек его
+ *     не выключит.
+ *  6. Пустой ход (доставку изъяли, wake-латч открыл ход) на красном
+ *     отклоняется: в батче из одних служебных вставок терять нечего. У сессии
+ *     со спецсигналом такой ход не отклоняется — она работает.
  *
  * Удержанное переживает перезапуск DSH: памятка в `$DSH_HOME/dsh-tweaks/held.json`
  * (доставка повторяется на зелёном, до 8 попыток), события пишутся в
  * `$DSH_HOME/dsh-tweaks/traffic-light.log` — journal владельцу недоступен.
  *
- * Классификация шага: батч автоматический ⇔ все сообщения автоматические.
- *   - пользовательские источники: user, parent (стиринг родителя),
- *     user-approval, user-question-reply, plan-mode, ptc-mode, fallback;
- *   - автоматические: schedule, goal, tool-goal, child,
- *     subagent-settled, agent-message, team-message;
- *   - parent/subagent у дочерних сессий разрешаются через autoMode:
- *     субагент, порождённый из ручного шага, работает и на красном;
- *   - родословная ручной работы: субагент, порождённый из ручного шага,
- *     запоминается (`manualChildren`, предел 256 записей, FIFO-вытеснение),
- *     и сообщение с id отправителя из памятки — итог (`subagent-settled`),
- *     стиринг (`agent-message`) или сообщение команды (`team-message`) —
- *     считается пользовательским: родитель не встаёт в очередь до конца
- *     пика. Цепочка работает вверх по уровням (итог ребёнка → родитель, на
- *     любую глубину). Сообщение без id отправителя или от отправителя вне
- *     памятки — автоматическое, как раньше;
- *   - неизвестные источники — как пользовательские (fail-open: никогда
- *     не блокируем то, чего не понимаем).
+ * Лог: строки `trafficLight: …` идут и в логгер DSH, как раньше; новые
+ * структурированные события — только в файл лога:
+ *   `pause | session=<id> | until=<ISO>` — модельный вызов встал на красном
+ *     (раз на сессию за окно);
+ *   `resume | session=<id> | after=green` — вызов отпущен зелёным;
+ *   `signal | session=<id> | state=on|off | actor=ui-config|seed|config|file | rev=<n>`
+ *     — набор спецсигнала изменён (rev — локальный монотонный счётчик);
+ *   `state-conflict | file=<n> | config=<n> | authority=file` — файл и конфиг
+ *     разошлись при активации (авторитетен файл);
+ *   `save-error | reason=<код>` — леджер не записался, повтор на пересчёте;
+ *   `signal-less | reason=no-initiator` — сессия вызова неизвестна, пропускаем.
  *
  * Вызов модели, уже начавшийся в момент включения красного, дорабатывает;
  * жёлтое окно предупреждения существует именно для того, чтобы работа
@@ -54,31 +63,18 @@ import { join } from 'node:path';
  * @module dsh-tweaks/traffic-light-host
  */
 
-import { lightAt, normalizePolicy } from './traffic-light-policy.js';
+import { lightAt, nextSwitchAt, normalizePolicy } from './traffic-light-policy.js';
 
 /** Период пересчёта цвета светофора. */
 const REFRESH_MS = 15_000;
 
-/** Источники сообщений, которые всегда считаются автоматическими. */
-const AUTOMATIC_KINDS = new Set([
-  'schedule',
-  'goal',
-  'tool-goal',
-  'child',
-  'subagent-settled',
-  'agent-message',
-  'team-message',
-]);
-/** Источники сообщений, которые всегда считаются пользовательскими. */
-const USER_KINDS = new Set(['user', 'parent', 'user-approval', 'user-question-reply', 'plan-mode', 'ptc-mode', 'fallback']);
 /**
  * Служебные вставки в батч шага: контекст времени и рантайма, каталог скилов,
  * инструкции, напоминания о повторе инструментов и уведомления о работах.
  *
- * Их подмешивают сам цикл агента и другие плагины, поэтому к решению «ручная
- * работа или автоматическая» они отношения не имеют. Без этого списка каждый
- * шаг выглядел пользовательским: цикл добавляет `runtime-context` в каждый батч,
- * а `time-context` — почти в каждый, и пауза на красном не включалась ни разу.
+ * Их подмешивают сам цикл агента и другие плагины, поэтому признаком пустого
+ * хода служат именно они: без этого списка каждый такой ход выглядел
+ * содержательным и отклонялся бы зря.
  */
 const NEUTRAL_KINDS = new Set([
   'time-context',
@@ -91,10 +87,15 @@ const NEUTRAL_KINDS = new Set([
   'compact-checkpoint',
 ]);
 
-/** Виды сообщений, у которых в источнике есть id отправителя-сессии. */
-const MANUAL_LINEAGE_KINDS = new Set(['subagent-settled', 'child', 'agent-message', 'team-message']);
-/** Предел памятки ручных субагентов: переполнение только возвращает прежнее ожидание. */
-const MANUAL_CHILDREN_LIMIT = 256;
+/**
+ * Сессии со спецсигналом по умолчанию — seed конфига (`trafficLightSpecial`)
+ * и запасной набор хоста, если ни файла, ни значения конфига нет.
+ * Включено по решению Игоря t1447u.
+ */
+const SEED_SPECIAL = ['session-e4698bf8-717f-4e1a-9390-a2b40c03d985'];
+
+/** Предел подъёма по родословной: глубже спецсигнал не ищем (защита от цикла). */
+const PARENT_HOPS_LIMIT = 32;
 
 /** Сколько раз пробуем вернуть удержанное напоминание, прежде чем признать потерю. */
 const HELD_ATTEMPTS = 8;
@@ -145,7 +146,7 @@ function agentsOf(state) {
 }
 
 /**
- * Записать сообщение в лог DSH; без логгера — тихо.
+ * Записать сообщение в лог DSH и в файл твика; без логгера — только в файл.
  * @param {string} message - текст сообщения.
  * @param {unknown} [error] - причина, если есть.
  * @returns {void}
@@ -160,6 +161,16 @@ function log(message, error) {
   } catch (_error) {
     /* логгер сломан: молчим */
   }
+}
+
+/**
+ * Записать структурное событие только в файл лога (логгер DSH не трогаем:
+ * там остаются прежние строки `trafficLight: …`).
+ * @param {string} line - строка события по контракту §4.
+ * @returns {void}
+ */
+function logLine(line) {
+  appendLogFile(line);
 }
 
 /**
@@ -226,117 +237,160 @@ function saveHeldFile(held) {
 }
 
 /**
- * Id сессии-отправителя из источника сообщения.
+ * Привести значение поля `trafficLightSpecial` к списку сессий.
  *
- * `subagent-settled` и `agent-message` несут `senderSessionId`
- * (`dsh-subagent/lib/types/continuation-messages.d.ts:17,33`), `team-message` —
- * `senderId` (`dsh-goal/lib/typert.host.js:1259`), у `child` поля отправителя
- * нет (это элемент `list_agents`, а не источник сообщения) — тогда пусто.
- * @param {object} message - сообщение из входящих агента.
- * @returns {string} id сессии-отправителя либо ''.
+ * Порядок нормализуется сортировкой: значение сравнивается поэлементно, а
+ * `Volatile.get()` отдаёт новый массив на каждое чтение конфигурации, поэтому
+ * сравнение по ссылке ничего не значит. Неизвестное значение (`undefined`,
+ * `null`, не массив) — это «поля нет», а не пустой список.
+ * @param {unknown} value - значение поля конфигурации.
+ * @returns {string[] | null} нормализованный список либо null.
  */
-function senderSessionIdOf(message) {
-  const source = message?.source;
-  const raw = source?.senderSessionId ?? source?.senderId;
-  return typeof raw === 'string' ? raw : '';
-}
-
-/**
- * Классификация одного сообщения по источнику.
- * @param {object} message - сообщение из входящих агента.
- * @param {boolean} autoMode - режим сессии (субагент ли это автоматического родителя).
- * @param {Map<string, string>} [manualChildren] - памятка ручных субагентов
- *   (`id сессии ребёнка → id сессии родителя`).
- * @returns {'auto' | 'user'} класс сообщения.
- */
-function classifyMessage(message, autoMode, manualChildren) {
-  const kind = message?.source?.kind;
-  if (typeof kind !== 'string' || kind === '') return 'user';
-  if (NEUTRAL_KINDS.has(kind)) return 'neutral';
-  if (USER_KINDS.has(kind)) return 'user';
-  if (AUTOMATIC_KINDS.has(kind)) {
-    const senderId = senderSessionIdOf(message);
-    if (MANUAL_LINEAGE_KINDS.has(kind) && senderId !== '' && manualChildren?.has(senderId) === true) return 'user';
-    return 'auto';
+function normalizeSpecialList(value) {
+  if (!Array.isArray(value)) return null;
+  const list = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const id = item.trim();
+    if (id === '' || list.includes(id)) continue;
+    list.push(id);
   }
-  if (kind === 'parent' || kind === 'subagent') return autoMode ? 'auto' : 'user';
-  return 'user';
+  return list.sort();
 }
 
 /**
- * Классификация батча шага.
- *
- * Служебные вставки игнорируются: решение принимают только сообщения-триггеры.
- * Если после них в батче ничего не осталось, шаг продолжает режим текущего хода
- * (`null`) — первый шаг хода всегда несёт триггер, которым ход начали, а
- * вставки контекста приходят на каждом следующем шаге.
- * @param {Array<object>} messages - сообщения батча.
- * @param {boolean} autoMode - режим сессии.
- * @param {Map<string, string>} [manualChildren] - памятка ручных субагентов.
- * @returns {'auto' | 'user' | null} класс батча либо null — наследовать режим хода.
+ * Сравнить два нормализованных списка поэлементно.
+ * @param {string[] | null} left - первый список.
+ * @param {string[] | null} right - второй список.
+ * @returns {boolean} true, если списки совпадают (в том числе оба null).
  */
-function classifyBatch(messages, autoMode, manualChildren) {
-  if (!Array.isArray(messages) || messages.length === 0) return null;
-  let triggers = 0;
-  let automatic = 0;
-  for (const message of messages) {
-    const kind = classifyMessage(message, autoMode, manualChildren);
-    if (kind === 'neutral') continue;
-    triggers += 1;
-    if (kind === 'auto') automatic += 1;
-  }
-  if (triggers === 0) return null;
-  return automatic === triggers ? 'auto' : 'user';
+function sameList(left, right) {
+  if (left === right) return true;
+  if (!Array.isArray(left) || !Array.isArray(right)) return false;
+  if (left.length !== right.length) return false;
+  return left.every((id, index) => id === right[index]);
 }
 
 /**
- * Запомнить субагента, порождённого из ручного шага.
+ * Прочитать леджер спецсигнала.
  *
- * Запись: `id сессии ребёнка → id сессии родителя`. Повторное рождение
- * освежает порядок (delete + set), чтобы вытеснялся действительно старший.
- * При переполнении забывается старшая запись: забытое сообщение снова
- * считается автоматическим, то есть возвращается прежнее поведение.
- * @param {string} childId - id сессии ребёнка.
- * @param {string} parentId - id сессии родителя.
+ * Файл авторитетен, поэтому битый или отсутствующий файл даёт null («файла
+ * нет») — вызывающий откатывается к значению конфига и seed. Пустой массив
+ * сессий — это осознанное «выключено», его нельзя спутать с отсутствием файла.
+ * @returns {string[] | null} список сессий либо null.
+ */
+function loadSpecialFile() {
+  const dir = stateDir();
+  if (dir === null) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, 'special.json'), 'utf8'));
+    const list = normalizeSpecialList(parsed?.sessions);
+    return list;
+  } catch (_error) {
+    return null;
+  }
+}
+
+/**
+ * Записать леджер спецсигнала атомарно: tmp-файл + rename.
+ *
+ * Пустой список пишется намеренно: выключение из интерфейса должно пережить
+ * рестарт DSH, а удалённый файл означал бы «взять seed» — сигнал воскрес бы.
+ * @param {string[]} list - список сессий со спецсигналом.
+ * @returns {string | null} код ошибки записи либо null при успехе.
+ */
+function writeSpecialFile(list) {
+  const dir = stateDir();
+  if (dir === null) return null;
+  const file = join(dir, 'special.json');
+  const tmp = `${file}.tmp`;
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(tmp, JSON.stringify({ sessions: list }));
+    renameSync(tmp, file);
+    return null;
+  } catch (error) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch (_error) {
+      /* tmp уже нет */
+    }
+    return typeof error?.code === 'string' ? error.code : 'unknown';
+  }
+}
+
+/**
+ * Записать эффективный набор в леджер и запомнить, что запись не удалась.
+ *
+ * Ошибка логируется один раз на серию: повтор идёт на каждом пересчёте света,
+ * и строка `save-error` на каждый пересчёт была бы шумом. Пока запись не
+ * удалась, авторитетно значение конфига (оно уже применено в памяти).
  * @returns {void}
  */
-function rememberManualChild(childId, parentId) {
+function persistSpecial() {
   if (runtime === null) return;
-  const manualChildren = runtime.manualChildren;
-  manualChildren.delete(childId);
-  manualChildren.set(childId, parentId);
-  while (manualChildren.size > MANUAL_CHILDREN_LIMIT) {
-    const oldest = manualChildren.keys().next();
-    if (oldest.done === true) break;
-    manualChildren.delete(oldest.value);
-    log(`trafficLight: памятка ручных субагентов переполнена, «${oldest.value}» забыт`);
-  }
+  const code = writeSpecialFile([...runtime.special]);
+  const firstFailure = code !== null && runtime.savePending !== true;
+  runtime.savePending = code !== null;
+  if (firstFailure) logLine(`save-error | reason=${code}`);
 }
 
 /**
- * Забыть всех детей выгружаемого агента.
- *
- * Записи самого выгруженного агента не удаляются: выгрузка handle ребёнка
- * (`dsh-subagent/lib/index.js:2039`) идёт **до** доставки его итога (`:2053`),
- * поэтому удалять метку по `childId` нельзя — родословная потеряется и баг
- * вернётся. Забываются только записи, у которых родитель — выгружаемый агент.
- * @param {string} parentId - id сессии выгружаемого агента.
- * @returns {void}
+ * Мгновение в ISO; для неизвестной границы — строка `unknown`.
+ * @param {number | null} instantMs - миллисекунды эпохи либо null.
+ * @returns {string} ISO-строка.
  */
-function forgetManualChildrenOf(parentId) {
-  if (runtime === null) return;
-  for (const [childId, ownerId] of [...runtime.manualChildren]) {
-    if (ownerId === parentId) runtime.manualChildren.delete(childId);
-  }
+function isoOf(instantMs) {
+  return typeof instantMs === 'number' && Number.isFinite(instantMs) ? new Date(instantMs).toISOString() : 'unknown';
 }
 
 /**
- * Обещание, разрешающееся, когда красный закончится, сигнал прервётся
+ * Разрешён ли сессии красный: есть ли спецсигнал у неё или у предка.
+ *
+ * Подъём идёт по `agent.session.header.parentSession` (дурная связь субагента
+ * с создателем; образец обхода — `dsh-subagent/lib/index.js:1742-1754`).
+ * Реестр агентов знает только живых, поэтому неизвестная сессия — это сессия
+ * без сигнала: лучше подождать зелёного, чем пустить дорогую работу по ошибке.
+ * @param {string} sessionId - id сессии.
+ * @returns {boolean} true, если красный этой сессии разрешён.
+ */
+function hasSignal(sessionId) {
+  if (runtime === null || typeof sessionId !== 'string' || sessionId === '') return false;
+  const agents = agentsOf(runtime);
+  if (agents === undefined || agents === null || typeof agents.get !== 'function') return false;
+  const visited = new Set();
+  let current = sessionId;
+  for (let hop = 0; hop <= PARENT_HOPS_LIMIT; hop += 1) {
+    if (current === '' || visited.has(current)) return false;
+    visited.add(current);
+    // Собственная запись в наборе — уже сигнал: список авторитетен и без
+    // живого handle (сессию мог выгрузить реестр, а решение уже принято).
+    if (runtime.special.has(current)) return true;
+    let agent;
+    try {
+      agent = agents.get(current);
+    } catch (_error) {
+      agent = undefined;
+    }
+    // Дальше подниматься не по чем: предок неизвестен — сигнала нет.
+    if (agent === undefined || agent === null) return false;
+    const parent = agent?.session?.header?.parentSession;
+    current = typeof parent === 'string' ? parent : '';
+  }
+  return false;
+}
+
+/**
+ * Обещание, разрешающееся, когда красный закончится, сигнал появится
  * или хост-половина остановится.
+ *
+ * Ожидающие разложены по сессиям: адресный `releaseSignalled` должен будить
+ * только тех, кому пропуск теперь разрешён, а не весь ход целиком.
+ * @param {string} sessionId - id ожидающей сессии.
  * @param {AbortSignal} [signal] - сигнал текущего вызова.
  * @returns {Promise<void>} разрешается при выходе из красного.
  */
-function untilGreen(signal) {
+function untilGreen(sessionId, signal) {
   if (runtime === null || runtime.light !== 'red') return Promise.resolve();
   return new Promise((resolve) => {
     let waiter;
@@ -344,7 +398,11 @@ function untilGreen(signal) {
     const done = () => {
       if (settled) return;
       settled = true;
-      if (waiter !== undefined) runtime?.waiters.delete(waiter);
+      const set = runtime?.waiters.get(sessionId);
+      if (set !== undefined) {
+        set.delete(waiter);
+        if (set.size === 0) runtime?.waiters.delete(sessionId);
+      }
       try {
         signal?.removeEventListener?.('abort', onAbort);
       } catch (_error) {
@@ -354,13 +412,62 @@ function untilGreen(signal) {
     };
     const onAbort = () => done();
     waiter = { done };
-    runtime.waiters.add(waiter);
+    const set = runtime.waiters.get(sessionId) ?? new Set();
+    set.add(waiter);
+    runtime.waiters.set(sessionId, set);
     try {
       signal?.addEventListener?.('abort', onAbort, { once: true });
     } catch (_error) {
       /* сигнал без addEventListener */
     }
   });
+}
+
+/**
+ * Разбудить ожидающие вызовы тех сессий, которым спецсигнал теперь разрешён.
+ *
+ * Вызывается, когда набор спецсигнала изменился: сессия изменившегося
+ * поддерева не должна ждать зелёного до конца окна.
+ * @returns {void}
+ */
+function releaseSignalled() {
+  if (runtime === null) return;
+  for (const sessionId of [...runtime.waiters.keys()]) {
+    if (!hasSignal(sessionId)) continue;
+    const set = runtime.waiters.get(sessionId);
+    runtime.waiters.delete(sessionId);
+    runtime.pauseLogged.delete(sessionId);
+    if (set === undefined) continue;
+    for (const waiter of [...set]) waiter.done();
+  }
+}
+
+/**
+ * Разбудить ожидающие вызовы одной сессии (агент выгружается).
+ * @param {string} sessionId - id сессии.
+ * @returns {void}
+ */
+function releaseSession(sessionId) {
+  if (runtime === null) return;
+  const set = runtime.waiters.get(sessionId);
+  runtime.waiters.delete(sessionId);
+  runtime.pauseLogged.delete(sessionId);
+  if (set === undefined) return;
+  for (const waiter of [...set]) waiter.done();
+}
+
+/**
+ * Разбудить все ожидающие вызовы: зелёный свет или выключение твика.
+ * @param {boolean} afterGreen - true, если причина — переход на зелёный
+ *   (тогда пишем по строке `resume` на сессию).
+ * @returns {void}
+ */
+function releaseAll(afterGreen) {
+  if (runtime === null) return;
+  for (const sessionId of [...runtime.waiters.keys()]) {
+    if (afterGreen === true) logLine(`resume | session=${sessionId} | after=green`);
+    releaseSession(sessionId);
+  }
 }
 
 /**
@@ -432,17 +539,40 @@ function holdScheduleMessage(agent, message) {
 }
 
 /**
+ * Пустой ли батч шага: пустой или из одних служебных вставок.
+ *
+ * Незнакомый источник содержимым считается: отклонять шаг с непонятным
+ * сообщением нельзя — в нём может быть работа.
+ * @param {Array<object>} [messages] - сообщения батча.
+ * @returns {boolean} true, если терять в шаге нечего.
+ */
+function isEmptyBatch(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return true;
+  for (const message of messages) {
+    const kind = message?.source?.kind;
+    if (typeof kind !== 'string' || !NEUTRAL_KINDS.has(kind)) return false;
+  }
+  return true;
+}
+
+/**
  * Пересчитать цвет светофора и обработать переход.
  * @returns {void}
  */
 function refresh() {
   if (runtime === null) return;
+  // Неудачная запись леджера повторяется здесь: диск мог освободиться.
+  if (runtime.savePending === true) persistSpecial();
   const next = lightAt(Date.now(), runtime.policy);
   if (next !== runtime.light) {
     const previous = runtime.light;
     runtime.light = next;
     log(`trafficLight: ${previous} → ${next}`);
-    if (previous === 'red') for (const waiter of [...runtime.waiters]) waiter.done();
+    // Граница окна: пауза новой сессии в следующем окне логируется снова.
+    runtime.pauseLogged.clear();
+    // Выход из красного отпускает всех: впереди дешёвое время (жёлтое — уже
+    // не пик). Строку `resume … after=green` пишем только на честный зелёный.
+    if (previous === 'red') releaseAll(next === 'green');
   }
   // Недоставленное (служба сессий не готова, сессия занята) повторяем на каждом
   // пересчёте, пока свет зелёный: удержанное не должно пропасть из-за гонки.
@@ -451,12 +581,19 @@ function refresh() {
 
 /**
  * Включить хост-половину.
+ *
+ * Набор спецсигнала берётся в порядке «файл → конфиг → seed»; расхождение
+ * файла и конфига не ошибка (человек мог выключить сигнал в другой вкладке, а
+ * файл пишет хост), поэтому файл авторитетен, а факт расхождения попадает в лог.
  * @param {object} ctx - контекст плагина.
  * @param {object} config - плоская конфигурация твика.
  * @returns {void}
  */
 export function activate(ctx, config) {
   if (runtime !== null) return;
+  const configSpecial = normalizeSpecialList(config?.trafficLightSpecial);
+  const fileSpecial = loadSpecialFile();
+  const effective = fileSpecial ?? configSpecial ?? SEED_SPECIAL;
   runtime = {
     ctx,
     policy: normalizePolicy(config),
@@ -465,10 +602,12 @@ export function activate(ctx, config) {
     pauseSchedules: config?.trafficLightPauseSchedules !== false,
     held: new Map(loadHeldFile()),
     heldAttempts: new Map(),
-    stepAutomatic: new Map(),
-    autoMode: new Map(),
-    manualChildren: new Map(),
-    waiters: new Set(),
+    special: new Set(effective),
+    appliedSpecial: configSpecial,
+    specialRev: 0,
+    savePending: false,
+    waiters: new Map(),
+    pauseLogged: new Set(),
     agents: serviceOf(ctx, 'agents'),
     sessionController: serviceOf(ctx, 'sessionController'),
     logger: serviceOf(ctx, 'logger'),
@@ -476,6 +615,14 @@ export function activate(ctx, config) {
     agentDisposers: new Map(),
     rootDisposers: [],
   };
+
+  const actor = fileSpecial !== null ? 'file' : configSpecial !== null ? 'config' : 'seed';
+  for (const sessionId of runtime.special) {
+    logLine(`signal | session=${sessionId} | state=on | actor=${actor} | rev=0`);
+  }
+  if (fileSpecial !== null && configSpecial !== null && !sameList(fileSpecial, configSpecial)) {
+    logLine(`state-conflict | file=${fileSpecial.length} | config=${configSpecial.length} | authority=file`);
+  }
 
   runtime.rootDisposers.push(
     ctx.on('agent/created', (payload) => {
@@ -485,46 +632,30 @@ export function activate(ctx, config) {
       try {
         disposer = agent.ctx.effect(() => {
           const off = [];
-          off.push(agent.ctx.on('agent/pre-step', (step, next) => {
-            const batch = classifyBatch(
-              step?.messages,
-              runtime.autoMode.get(agent.id) === true,
-              runtime.manualChildren,
-            );
-            if (
-              batch === null &&
-              step?.step === 1 &&
-              runtime.light === 'red' &&
-              runtime.pauseAgents === true
-            ) {
-              // Ход открылся без собственного ввода: доставку расписания на
-              // красном мы изъяли, а wake-латч всё равно завёл ход. Любой
-              // модельный вызов здесь — пустая трата дорогих токенов, поэтому
-              // отклоняем шаг (в батче только служебные вставки, терять нечего).
-              log(`trafficLight: пустой ход сессии ${agent.id} отклонён на красном`);
-              return Promise.resolve({ kind: 'reject' });
-            }
-            // null — батч из одних служебных вставок: режим хода не меняем.
-            if (batch !== null) runtime.stepAutomatic.set(agent.id, batch === 'auto');
-            return next();
-          }));
-          off.push(agent.ctx.on('agent/inbox/inserted', (payload) => {
-            holdScheduleMessage(agent, payload?.message);
-          }));
-          off.push(agent.ctx.on('subagent/start', (info) => {
-            const childId = String(info?.id ?? '');
-            if (childId === '') return;
-            const automatic = runtime.stepAutomatic.get(agent.id) === true;
-            runtime.autoMode.set(childId, automatic);
-            // Новая активация из автошага снимает устаревшую ручную метку:
-            // иначе повторный старт continuable-ребёнка отпустил бы авто-работу.
-            if (automatic) runtime.manualChildren.delete(childId);
-            else rememberManualChild(childId, agent.id);
-          }));
+          off.push(
+            agent.ctx.on('agent/pre-step', (step, next) => {
+              const id = String(agent.id ?? '');
+              if (runtime.light !== 'red' || runtime.pauseAgents !== true) return next();
+              // У сессии со спецсигналом работа идёт: отклонять её ход нельзя.
+              if (hasSignal(id)) return next();
+              if (step?.step === 1 && isEmptyBatch(step?.messages)) {
+                // Ход открылся без собственного ввода: доставку расписания на
+                // красном мы изъяли, а wake-латч всё равно завёл ход. Любой
+                // модельный вызов здесь — пустая трата дорогих токенов, поэтому
+                // отклоняем шаг (в батче только служебные вставки, терять нечего).
+                log(`trafficLight: пустой ход сессии ${id} отклонён на красном`);
+                return Promise.resolve({ kind: 'reject' });
+              }
+              return next();
+            }),
+          );
+          off.push(
+            agent.ctx.on('agent/inbox/inserted', (payload) => {
+              holdScheduleMessage(agent, payload?.message);
+            }),
+          );
           return () => {
             for (const dispose of off) dispose();
-            runtime.stepAutomatic.delete(agent.id);
-            runtime.autoMode.delete(agent.id);
           };
         });
       } catch (error) {
@@ -539,21 +670,18 @@ export function activate(ctx, config) {
     ctx.on('agent/disposed', (payload) => {
       const id = payload?.agent?.id;
       if (id === undefined) return;
-      const disposer = runtime.agentDisposers.get(id);
+      const sessionId = String(id);
+      const disposer = runtime.agentDisposers.get(sessionId);
       if (disposer !== undefined) {
         try {
           disposer();
         } catch (error) {
-          log(`trafficLight: очистка агента ${id} прервана`, error);
+          log(`trafficLight: очистка агента ${sessionId} прервана`, error);
         }
-        runtime.agentDisposers.delete(id);
+        runtime.agentDisposers.delete(sessionId);
       }
-      runtime.stepAutomatic.delete(id);
-      runtime.autoMode.delete(id);
-      // Забываем только детей выгружаемого: его собственная запись обязана
-      // пережить выгрузку, потому что handle ребёнка выгружается до доставки
-      // итога (`dsh-subagent/lib/index.js:2039` и `:2053`).
-      forgetManualChildrenOf(id);
+      // Ожидание выгруженной сессии будить некому: отпускаем сразу.
+      releaseSession(sessionId);
     }),
   );
 
@@ -563,6 +691,7 @@ export function activate(ctx, config) {
         yield* next();
         return;
       }
+      // Сервисный вызов (заголовок чата, компакция) — не работа хода.
       if (options?.purpose !== undefined) {
         yield* next();
         return;
@@ -573,13 +702,27 @@ export function activate(ctx, config) {
       } catch (_error) {
         id = '';
       }
+      // Инициатор точнее: он знает сессию хода. Запасной путь — сессия запроса;
+      // он нужен, когда инициатора нет (холостой вызов вне хода).
       if (id === '') id = String(options?.sessionId ?? '');
-      if (id === '' || runtime.stepAutomatic.get(id) !== true) {
+      if (id === '') {
+        // Сессию не определить — пропускаем и фиксируем это в логе.
+        logLine('signal-less | reason=no-initiator');
         yield* next();
         return;
       }
-      log(`trafficLight: модельный вызов сессии ${id} ждёт конца пика`);
-      await untilGreen(options?.signal);
+      if (hasSignal(id)) {
+        yield* next();
+        return;
+      }
+      if (runtime.pauseLogged.has(id) !== true) {
+        runtime.pauseLogged.add(id);
+        // Прежняя строка журнала DSH (наблюдаемость journal) + структурное
+        // событие в файл: контракт §4.3 не отменяет старые строки.
+        log(`trafficLight: модельный вызов сессии ${id} ждёт конца пика`);
+        logLine(`pause | session=${id} | until=${isoOf(nextSwitchAt(Date.now(), runtime.policy))}`);
+      }
+      await untilGreen(id, options?.signal);
       yield* next();
     }),
   );
@@ -589,8 +732,12 @@ export function activate(ctx, config) {
 }
 
 /**
- * Применить новую конфигурацию без перезапуска: политика и флаги пауз
- * подхватываются, удержанные напоминания сохраняются.
+ * Применить новую конфигурацию без перезапуска: политика, флаги пауз и набор
+ * спецсигнала подхватываются, удержанные напоминания сохраняются.
+ *
+ * Списки сравниваются поэлементно: `Volatile.get()` отдаёт новый массив на
+ * каждое чтение, поэтому сорвавшееся сравнение по ссылке давало бы запись
+ * леджера и строки `signal` на любое постороннее изменение конфигурации.
  * @param {object} config - плоская конфигурация твика.
  * @returns {void}
  */
@@ -599,6 +746,27 @@ export function update(config) {
   runtime.policy = normalizePolicy(config);
   runtime.pauseAgents = config?.trafficLightPauseAgents !== false;
   runtime.pauseSchedules = config?.trafficLightPauseSchedules !== false;
+  const next = normalizeSpecialList(config?.trafficLightSpecial);
+  if (!sameList(next, runtime.appliedSpecial)) {
+    runtime.appliedSpecial = next;
+    // Нет значения поля — это не команда «выключить»: набор не трогаем.
+    if (next !== null) {
+      const previous = runtime.special;
+      runtime.special = new Set(next);
+      runtime.specialRev += 1;
+      const rev = runtime.specialRev;
+      for (const sessionId of runtime.special) {
+        if (previous.has(sessionId)) continue;
+        logLine(`signal | session=${sessionId} | state=on | actor=ui-config | rev=${rev}`);
+      }
+      for (const sessionId of previous) {
+        if (runtime.special.has(sessionId)) continue;
+        logLine(`signal | session=${sessionId} | state=off | actor=ui-config | rev=${rev}`);
+      }
+      persistSpecial();
+      releaseSignalled();
+    }
+  }
   refresh();
 }
 
@@ -627,11 +795,12 @@ export async function deactivate() {
     }
   }
   previous.agentDisposers.clear();
-  previous.stepAutomatic.clear();
-  previous.autoMode.clear();
-  previous.manualChildren.clear();
-  for (const waiter of [...previous.waiters]) waiter.done();
+  // Сорвавшуюся запись леджера пробуем ещё раз: следующий пересчёт уже не придёт.
+  if (previous.savePending === true) persistSpecial();
+  releaseAll(false);
   previous.waiters.clear();
+  previous.pauseLogged.clear();
+  previous.special.clear();
   runtime = null;
   await redeliverHeld(previous);
 }
