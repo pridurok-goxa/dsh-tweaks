@@ -93,6 +93,11 @@ export const Config = Schema.object({
   trafficLightHolidays: Schema.array(Schema.string()).default(TRAFFIC_LIGHT_HOLIDAYS_2026).volatile(),
   trafficLightPauseSchedules: Schema.boolean().default(true).volatile(),
   trafficLightPauseAgents: Schema.boolean().default(true).volatile(),
+  // Цель живёт: после рестарта/fork/resume активация цели (`armed`) снимается,
+  // и без ручной кнопки «Resume goal» продолжение не возобновляется. Хост-часть
+  // возвращает активацию сервисным `goals.resume` для целей `active+disarmed`;
+  // пауза человека, `complete` и `blocked` остаются как есть.
+  goalKeepalive: Schema.boolean().default(true).volatile(),
   // Плашка над полем ввода: если модель не видит картинки, предложить
   // отправить сообщение моделью со зрением. Провайдер, модель и подпись
   // кнопки — служебные поля (галочки у них нет): их читает клиент через
@@ -108,6 +113,9 @@ export const Config = Schema.object({
 
 /** Модуль хост-части скачивания файлов. */
 const DOWNLOAD_HOST = './tweaks/download-host.js';
+
+/** Модуль хост-части твика «цель живёт». */
+const GOAL_KEEPALIVE_HOST = './tweaks/goal-keepalive-host.js';
 
 /** Модуль хост-части редактора очереди. */
 const QUEUE_EDIT_HOST = './tweaks/queue-edit-host.js';
@@ -547,6 +555,101 @@ function attachQueueEditor(ctx) {
 }
 
 /**
+ * Подключить хост-часть твика «цель живёт» (goalKeepalive).
+ *
+ * Модуль маленький и без состояния между включениями: при выключении флага
+ * слушатели снимаются, при включении — ставятся заново. Перезапуск плагина для
+ * смены значений не нужен, поэтому `update` только запоминает конфигурацию.
+ * Загрузка динамическая и в try/catch: сбой твика не должен ломать старт хоста.
+ * @param {object} ctx - хост-контекст плагина.
+ * @param {unknown} config - конфигурация записи (volatile-поля — ссылки).
+ * @returns {void}
+ */
+function attachGoalKeepalive(ctx, config) {
+  /** Загруженный модуль хост-части; null, пока он не загружен. */
+  let host = null;
+  /** Поднята ли хост-часть прямо сейчас. */
+  let enabled = false;
+  /** Очередь переключений: activate и deactivate не накладываются друг на друга. */
+  let queue = Promise.resolve();
+
+  /**
+   * Загрузить модуль хост-части.
+   * @returns {Promise<object | null>} модуль либо null, если он недоступен.
+   */
+  async function ensureHost() {
+    if (host !== null) return host;
+    try {
+      host = await import(GOAL_KEEPALIVE_HOST);
+      return host;
+    } catch (error) {
+      host = null;
+      warn(ctx, `dsh-tweaks: хост-часть твика «цель живёт» (${GOAL_KEEPALIVE_HOST}) недоступна, твик остаётся выключенным`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Привести хост-часть в соответствие с флагом.
+   * @returns {Promise<void>}
+   */
+  async function sync() {
+    const plain = flatten(config);
+    // Запись профиля заменяет конфигурацию целиком: поля, которого в записи нет,
+    // в `config` не будет вовсе. Для этого твика отсутствие поля = включён
+    // (default true в схеме действует, но запись профиля его не материализует),
+    // поэтому гасим только явный false.
+    if (plain.goalKeepalive === false) {
+      if (enabled) {
+        enabled = false;
+        await host?.deactivate?.();
+      }
+      return;
+    }
+    const module = await ensureHost();
+    if (module === null) return;
+    if (typeof module.activate !== 'function') {
+      warn(ctx, `dsh-tweaks: в хост-части твика «цель живёт» (${GOAL_KEEPALIVE_HOST}) нет activate`);
+      return;
+    }
+    if (!enabled) {
+      try {
+        module.activate(ctx, plain);
+        enabled = true;
+      } catch (error) {
+        warn(ctx, 'dsh-tweaks: твик «цель живёт» не включился', error);
+        await module.deactivate?.().catch(() => {});
+        enabled = false;
+      }
+      return;
+    }
+    if (typeof module.update === 'function') module.update(plain);
+  }
+
+  /** Поставить переключение в очередь, не роняя его ошибкой. */
+  function schedule() {
+    queue = queue.then(sync).catch((error) => {
+      warn(ctx, 'dsh-tweaks: переключение твика «цель живёт» прервано', error);
+    });
+  }
+
+  schedule();
+  // Смена только volatile-полей не перезапускает плагин: подхватываем по событию.
+  if (typeof ctx.on === 'function') ctx.on('loader/volatile-update', () => schedule());
+  // Выгрузка плагина обязана снять слушателей события цели.
+  const dispose = () => {
+    queue = queue
+      .then(() => (enabled ? host?.deactivate?.() : undefined))
+      .catch((error) => {
+        warn(ctx, 'dsh-tweaks: твик «цель живёт» не остановлен при выгрузке', error);
+      });
+    return queue;
+  };
+  if (typeof ctx.effect === 'function') ctx.effect(() => dispose);
+  else if (typeof ctx.on === 'function') ctx.on('dispose', dispose);
+}
+
+/**
  * Хост-половина бандла: твики интерфейса живут в браузере, а у твиков «речь»
  * и «светофор» есть хост-части — их поднимает и снимает этот apply по флагам.
  * @param {object} ctx - хост-контекст плагина.
@@ -556,6 +659,7 @@ function attachQueueEditor(ctx) {
 export function apply(ctx, config) {
   attachWhisper(ctx, config);
   attachTrafficLight(ctx, config);
+  attachGoalKeepalive(ctx, config);
   attachQueueEditor(ctx);
   attachDownloads(ctx);
 }
