@@ -2189,7 +2189,7 @@ check('нижний индикатор: режим из настроек уст�
   const freshTexts = indicatorTexts(freshTree);
   assert.equal(freshTexts.length, 1, 'по умолчанию показывается один отсчёт');
   assert.doesNotMatch(freshTexts[0], /^\d{2}:\d{2}$/, 'по умолчанию не текущие часы');
-  assert.match(freshTexts[0], /^\d+\s*[чm]/i, 'по умолчанию — короткое оставшееся время');
+  assert.match(freshTexts[0], /^\d+\s*(?:[чh]|м|m)/iu, 'по умолчанию — короткое оставшееся время');
   assert.match(JSON.stringify(freshTree), /-lamp/, 'в варианте «индикатор и время» лампа тоже показывается');
 });
 

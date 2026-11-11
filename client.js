@@ -4463,29 +4463,14 @@ window.__ModuleLoader__.load({
     }
 
     /** Bounded mobile scrollport and visualViewport-aware menu anchoring. */
-    function bindMobileComposerLayout(card, view, command) {
+    function bindMobileComposerLayout(card, view) {
       if (typeof card?.querySelector !== 'function') return () => {};
-      const saved = new Map();
-      const plus = () => card.querySelector('button[aria-haspopup="listbox"]');
-      const setMenu = (menu, name, value) => {
-        if (!saved.has(menu)) saved.set(menu, new Map());
-        if (!saved.get(menu).has(name)) saved.get(menu).set(name, [menu.style.getPropertyValue(name), menu.style.getPropertyPriority(name)]);
-        menu.style.setProperty(name, value, 'important');
-      };
-      const restoreMenus = () => {
-        for (const [menu, props] of saved) for (const [name, [value, priority]] of props) {
-          if (value) menu.style.setProperty(name, value, priority); else menu.style.removeProperty(name);
-        }
-        saved.clear();
-      };
-      /** Разрешённые подписи меню «+»: остальное живёт в других панелях. */
+      /** Разрешённые пункты меню «+»: остальное живёт в других панелях. */
       const PLUS_MENU_LABELS = new Set(['File', 'Goal', 'Plan', 'Файл', 'Цель', 'План', '文件', '目标', '计划']);
       /** Канонические alias из разметки: не зависят от языка интерфейса. */
       const PLUS_MENU_ALIASES = new Set(['file', 'goal', 'plan']);
-      let plusMenuOpen = false;
-      let plusMenuSeen = false;
 
-      /** Первая строка подписи опции: берём имя, а не склеенный innerText. */
+      /** Имя пункта: берём отдельный узел, а не склеенный innerText. */
       function plusOptionLabel(option) {
         const name = option?.querySelector?.('[class*="_itemName"]');
         const visible = name === null || name === undefined ? '' : String(name.textContent ?? '').trim();
@@ -4501,18 +4486,14 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Оставить в плюс-меню только File/Goal/Plan. Скрываем и секцию Commands,
-       * если под ней не осталось видимых пунктов.
+       * Оставить в нативном меню «+» только File/Goal/Plan. Позицию, ширину и
+       * анимацию меню задаёт ядро: твик не перехватывает клик и не двигает слой.
        * @returns {void}
        */
       function filterPlusMenu() {
-        if (!plusMenuOpen || !mobileComposerDevice(view)) return;
+        if (!mobileComposerDevice(view)) return;
         const menu = card.querySelector('[data-trigger-menu]');
-        if (menu === null) {
-          if (plusMenuSeen) { plusMenuOpen = false; plusMenuSeen = false; }
-          return;
-        }
-        plusMenuSeen = true;
+        if (menu === null) return;
         const options = [...menu.querySelectorAll('button[role="option"]')];
         for (const option of options) {
           const allowed = PLUS_MENU_ALIASES.has(plusOptionAlias(option))
@@ -4531,87 +4512,46 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const position = () => {
-        if (!mobileComposerDevice(view)) { card.removeAttribute('data-mobile-composer'); restoreMenus(); return; }
-        filterPlusMenu();
-        const vp = view.visualViewport, height = vp?.height || view.innerHeight, width = vp?.width || view.innerWidth;
-        const top = vp?.offsetTop || 0, left = vp?.offsetLeft || 0;
-        // The existing zoom tweak scales #root: visual viewport lengths must become local CSS lengths.
-        const zoom = typeof readScale === 'function' ? readScale() : 1;
+      /** Привести мобильные атрибуты и отфильтровать уже открытое меню. */
+      function apply() {
+        if (!mobileComposerDevice(view)) {
+          card.removeAttribute('data-mobile-composer');
+          return;
+        }
         card.setAttribute('data-mobile-composer', '');
         const editor = card.querySelector?.('[data-composer-input]');
         if (editor !== null && editor !== undefined) {
           if (editor.getAttribute?.('spellcheck') !== 'false') editor.setAttribute('spellcheck', 'false');
           if (editor.getAttribute?.('autocorrect') !== 'off') editor.setAttribute('autocorrect', 'off');
         }
+        const vp = view.visualViewport, height = vp?.height || view.innerHeight;
+        const zoom = typeof readScale === 'function' ? readScale() : 1;
         card.style.setProperty('--dsh-mobile-text-cap', Math.max(36, Math.floor(height * 0.2)) / zoom + 'px');
-        const menu = card.querySelector('[data-trigger-menu]'), button = plus();
-        if (!menu || !button) return;
-        const anchor = button.getBoundingClientRect();
-        const above = Math.max(0, anchor.top - top - 12), below = Math.max(0, top + height - anchor.bottom - 12);
-        const up = above >= Math.min(160, below);
-        const cap = Math.max(36, Math.min(320, up ? above : below));
-        const h = Math.min(cap, menu.scrollHeight * zoom || menu.getBoundingClientRect().height || cap), w = Math.min(360, Math.max(40, width - 16));
-        const x = Math.max(left + 8, Math.min(anchor.left, left + width - w - 8));
-        const y = Math.max(top + 8, Math.min(up ? anchor.top - h - 4 : anchor.bottom + 4, top + height - h - 8));
-        for (const [name, value] of Object.entries({ position: 'fixed', left: x / zoom + 'px', top: y / zoom + 'px', right: 'auto', bottom: 'auto', width: w / zoom + 'px', 'min-width': '0', 'max-height': cap / zoom + 'px', 'overflow-y': 'auto', 'z-index': '1200' })) setMenu(menu, name, value);
-      };
+        filterPlusMenu();
+      }
+
       let frame = null;
       const schedule = () => {
         if (frame !== null) return;
-        if (!view.requestAnimationFrame) { position(); return; }
-        frame = view.requestAnimationFrame(() => { frame = null; position(); });
+        if (!view.requestAnimationFrame) { apply(); return; }
+        frame = view.requestAnimationFrame(() => { frame = null; apply(); });
       };
-      const isPlus = (event) => !!command && event.target?.closest?.('button[aria-haspopup="listbox"]') === plus();
-      const onDown = (event) => {
-        // On all platforms the menu selects a mode without stealing the editor selection.
-        if (!isPlus(event)) return;
-        event.preventDefault(); event.stopImmediatePropagation();
-      };
-      const onClick = (event) => {
-        if (!isPlus(event)) return;
-        event.preventDefault(); event.stopImmediatePropagation();
-        if (mobileComposerDevice(view)) {
-          plusMenuOpen = true;
-          plusMenuSeen = false;
-        }
-        command.toggle();
-        schedule();
-      };
-      card.addEventListener('pointerdown', onDown, true);
-      card.addEventListener('mousedown', onDown, true);
-      card.addEventListener('click', onClick, true);
-      // После скрытия клавиатуры меню триггеров иногда остаётся открытым и
-      // перекрывает поле. Закрываем его тапом вне меню и Escape.
-      const menuOf = () => card.querySelector('[data-trigger-menu]');
-      const onOutsidePointer = (event) => {
-        const menu = menuOf();
-        if (menu === null || menu.contains(event.target)) return;
-        command?.dismissMenu?.();
-      };
-      const onEscape = (event) => {
-        if (event.key !== 'Escape' || menuOf() === null) return;
-        command?.dismissMenu?.();
-      };
-      document.addEventListener?.('pointerdown', onOutsidePointer, true);
-      document.addEventListener?.('keydown', onEscape, true);
       view.addEventListener?.('resize', schedule);
       view.visualViewport?.addEventListener?.('resize', schedule);
-      view.visualViewport?.addEventListener?.('scroll', schedule);
       const media = view.matchMedia?.('(pointer: coarse)'); media?.addEventListener?.('change', schedule);
+      // Меню ядро вставляет в DOM само; наблюдаем только за новыми узлами и
+      // строками, позиционирование не трогаем.
       const observer = view.MutationObserver ? new view.MutationObserver(schedule) : null;
       observer?.observe(card, { childList: true, subtree: true });
-      // Scale changes are published on html by the same plugin. Do not observe our own inline menu writes.
-      if (card.ownerDocument?.documentElement) observer?.observe(card.ownerDocument.documentElement, { attributes: true, attributeFilter: ['style'] });
-      position();
+      apply();
       return () => {
-        observer?.disconnect(); if (frame !== null) view.cancelAnimationFrame?.(frame);
-        card.removeEventListener('pointerdown', onDown, true); card.removeEventListener('mousedown', onDown, true); card.removeEventListener('click', onClick, true);
-        document.removeEventListener?.('pointerdown', onOutsidePointer, true);
-        document.removeEventListener?.('keydown', onEscape, true);
-        view.removeEventListener?.('resize', schedule); view.visualViewport?.removeEventListener?.('resize', schedule); view.visualViewport?.removeEventListener?.('scroll', schedule); media?.removeEventListener?.('change', schedule);
-        card.removeAttribute('data-mobile-composer'); card.style.removeProperty('--dsh-mobile-text-cap'); restoreMenus();
-        plusMenuOpen = false; plusMenuSeen = false;
+        observer?.disconnect();
+        if (frame !== null) view.cancelAnimationFrame?.(frame);
+        view.removeEventListener?.('resize', schedule);
+        view.visualViewport?.removeEventListener?.('resize', schedule);
+        media?.removeEventListener?.('change', schedule);
+        card.removeAttribute('data-mobile-composer');
+        card.style.removeProperty('--dsh-mobile-text-cap');
       };
     }
 

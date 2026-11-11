@@ -77,8 +77,9 @@ test('caret scroll delta reveals the caret below and above the draft viewport', 
 });
 
 test('composer wiring keeps the new mobile behaviors', () => {
-  assert.match(source, /plusMenuOpen = true/);
   assert.match(source, /function filterPlusMenu\(\)/);
+  assert.equal(source.includes('plusMenuOpen = true'), false, 'твик больше не перехватывает клик «+»');
+  assert.equal(source.includes('setMenu(menu, name, value)'), false, 'твик не переписывает позицию меню');
   assert.match(source, /PLUS_MENU_ALIASES/, 'фильтр «+» знает канонические alias');
   assert.match(source, /_itemAlias/, 'alias читается из разметки, независимо от локали');
   assert.ok(source.includes("'Файл', 'Цель', 'План'"), 'русские подписи тоже разрешены');
