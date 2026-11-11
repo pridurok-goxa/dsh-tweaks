@@ -4479,14 +4479,25 @@ window.__ModuleLoader__.load({
         saved.clear();
       };
       /** Разрешённые подписи меню «+»: остальное живёт в других панелях. */
-      const PLUS_MENU_LABELS = new Set(['File', 'Goal', 'Plan', '文件', '目标', '计划']);
+      const PLUS_MENU_LABELS = new Set(['File', 'Goal', 'Plan', 'Файл', 'Цель', 'План', '文件', '目标', '计划']);
+      /** Канонические alias из разметки: не зависят от языка интерфейса. */
+      const PLUS_MENU_ALIASES = new Set(['file', 'goal', 'plan']);
       let plusMenuOpen = false;
       let plusMenuSeen = false;
 
-      /** Первая строка подписи опции. */
+      /** Первая строка подписи опции: берём имя, а не склеенный innerText. */
       function plusOptionLabel(option) {
+        const name = option?.querySelector?.('[class*="_itemName"]');
+        const visible = name === null || name === undefined ? '' : String(name.textContent ?? '').trim();
+        if (visible !== '') return visible;
         const text = String(option?.innerText ?? option?.textContent ?? '').trim();
         return text.split('\n')[0].trim();
+      }
+
+      /** Alias опции: file/goal/plan, независимо от локали. */
+      function plusOptionAlias(option) {
+        const alias = option?.querySelector?.('[class*="_itemAlias"]');
+        return alias === null || alias === undefined ? '' : String(alias.textContent ?? '').trim().toLowerCase();
       }
 
       /**
@@ -4504,7 +4515,9 @@ window.__ModuleLoader__.load({
         plusMenuSeen = true;
         const options = [...menu.querySelectorAll('button[role="option"]')];
         for (const option of options) {
-          option.style.display = PLUS_MENU_LABELS.has(plusOptionLabel(option)) ? '' : 'none';
+          const allowed = PLUS_MENU_ALIASES.has(plusOptionAlias(option))
+            || PLUS_MENU_LABELS.has(plusOptionLabel(option));
+          option.style.display = allowed ? '' : 'none';
         }
         const titles = [...menu.querySelectorAll('[role="presentation"]')];
         for (const title of titles) {
