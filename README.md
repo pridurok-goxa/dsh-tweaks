@@ -183,6 +183,14 @@ plugin_manager action=install_bundle target=<путь к папке плагин
 
 Репозиторий: `https://github.com/pridurok-goxa/volna-tweaks`.
 
+Windows:
+
+```powershell
+git clone https://github.com/pridurok-goxa/volna-tweaks.git C:\volna-tweaks
+```
+
+Затем в DSH: `plugin_manager action=install_bundle target=C:\volna-tweaks`.
+
 Вручную: добавить `"volna-tweaks": "link:<путь>"` в зависимости профиля, вписать
 `volna-tweaks` в `dsh.profile.bundles`, затем `pnpm install` в папке профиля.
 
