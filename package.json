@@ -1,9 +1,9 @@
 {
-  "name": "dsh-tweaks",
-  "version": "3.1.0",
+  "name": "volna-tweaks",
+  "version": "4.0.0",
   "private": true,
   "type": "module",
-  "description": "Твики DeepSeek Harness: масштаб интерфейса, своё меню по правой кнопке, светофор дорогих часов, мобильное меню и ввод. Каждый включается галочкой на странице пакета.",
+  "description": "Волна: твики DeepSeek Harness — масштаб интерфейса, своё меню по правой кнопке, светофор дорогих часов, мобильное меню и ввод.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
