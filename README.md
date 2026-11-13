@@ -88,6 +88,30 @@ connection-фильтром; клиентская галочка `fileDownload` 
 цели `active+disarmed`, не трогая ручную паузу, `complete` и `blocked`.
 Журнал — `$DSH_HOME/dsh-tweaks/goal-keepalive.log`, ротация 1 МБ.
 
+## Страховка агентов (`agentGuards`, host)
+
+Механическая страховка к правилам агентов HARNESS (аудит промахов 13.11.2026).
+Хук `tools/pre-execute` отказывает в вызове до исполнения тела инструмента:
+
+| Правило | Флаг | Что ловит | Промахи |
+|---|---|---|---|
+| `secrets` | `agentGuardsSecrets` | в `bash`: `PGPASSWORD=<литерал>`, DSN `postgres://u:<пароль>@`, `--password=<литерал>`, `Bearer <токен>`, токены `ghp_/gho_/github_pat_/re_/sk-/xox?-`. `$VAR`, `${VAR}`, `$(…)` разрешены | 18, 21 |
+| `wip` | `agentGuardsWip` | `+wip` в команде выката; `dev-stand.sh deploy/resume` с `--allow-shared-tree` или из грязного worktree (`git status --porcelain`); `--ref <sha>` пропускается | 1, 2, 8, 13 |
+| `rootWrite` | `agentGuardsRootWrite` | `write`/`edit`/`apply_patch` в основной checkout на `main`/`master` внутри `agentGuardsRootWriteRoots` (по умолчанию `/home/goxa/project`); linked worktree и `agentGuardsRootWriteAllow` (`docs/plans/`, `.cursor/plans/`, `reports/`, `.local/`, `.wt/`, `INFRA-CHANGES.md`) пропускаются | 1, 2, 20, 26 |
+| `loop` | `agentGuardsLoop` | `agentGuardsLoopLimit` (3) одинаковых вызовов подряд у одного агента (имя + аргументы без `description`) | 16, 22 |
+
+`agentGuards: false` снимает хук целиком. Флаги volatile: правка в
+`cordis.patch.yml` профиля применяется без перезапуска плагина. Галочек в
+форме нет — это политика инстанса, а не вкус пользователя.
+
+Журнал отказов — `$DSH_HOME/dsh-tweaks/agent-guards.jsonl` (JSON на строку,
+ротация 1 МБ): `ts`, `rule`, `tool`, `session`, `sub`, `reason`, `misses`.
+Значение секрета в журнал не пишется — только вид совпадения. Журнал читает
+еженедельный разбор реестра инцидентов.
+
+Ошибка самой проверки = пропуск вызова (fail-open) и строка `guard-error`;
+git вызывается с таймаутом 3 с. Проверка: `node test/check-agent-guards.cjs`.
+
 ## Диагностический выключатель
 
 `?tweaks=off` выключает твики **только для этой ссылки**: параметр остаётся в
@@ -533,6 +557,7 @@ node test\check-host.cjs
 node test\check-traffic-light.cjs
 node test\check-mobile-composer.cjs
 node test\check-mobile-sidebar.cjs
+node test\check-agent-guards.cjs
 ```
 
 `test/check-client.cjs` гоняет настоящий `client.js` в песочнице с заглушками DOM,
