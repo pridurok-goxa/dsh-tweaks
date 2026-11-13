@@ -123,10 +123,27 @@ export const Config = Schema.object({
   imageFallbackProvider: Schema.string().default('deepseek-account').volatile(),
   imageFallbackModel: Schema.string().default('deepseek-flash').volatile(),
   imageFallbackLabel: Schema.string().default('Flash').volatile(),
+  // Страховка агентов HARNESS (аудит промахов 13.11.2026): хук tools/pre-execute
+  // отказывает в вызове до исполнения — секрет в argv, выкат «+wip»/грязного
+  // дерева, запись в основной checkout на main/master, зацикливание. Хост-часть
+  // tweaks/agent-guards-host.js; галочки нет, флаги правятся в cordis.patch.yml.
+  agentGuards: Schema.boolean().default(true).volatile(),
+  agentGuardsSecrets: Schema.boolean().default(true).volatile(),
+  agentGuardsWip: Schema.boolean().default(true).volatile(),
+  agentGuardsRootWrite: Schema.boolean().default(true).volatile(),
+  agentGuardsLoop: Schema.boolean().default(true).volatile(),
+  agentGuardsLoopLimit: Schema.number().default(3).volatile(),
+  agentGuardsRootWriteRoots: Schema.array(Schema.string()).default(['/home/goxa/project']).volatile(),
+  agentGuardsRootWriteAllow: Schema.array(Schema.string())
+    .default(['docs/plans/', '.cursor/plans/', 'reports/', '.local/', '.wt/', 'INFRA-CHANGES.md'])
+    .volatile(),
 });
 
 /** Модуль хост-части скачивания файлов. */
 const DOWNLOAD_HOST = './tweaks/download-host.js';
+
+/** Модуль хост-части страховки агентов. */
+const AGENT_GUARDS_HOST = './tweaks/agent-guards-host.js';
 
 /** Модуль хост-части твика «цель живёт». */
 const GOAL_KEEPALIVE_HOST = './tweaks/goal-keepalive-host.js';
@@ -665,6 +682,76 @@ function attachGoalKeepalive(ctx, config) {
 }
 
 /**
+ * Подключить хост-часть страховки агентов (agentGuards).
+ *
+ * Тот же порядок, что у «цели живёт»: модуль грузится динамически, флаг
+ * `agentGuards: false` снимает хук, смена остальных полей приходит в
+ * `update` без перестановки хука. Сбой загрузки уходит в лог и не ломает старт.
+ * @param {object} ctx - хост-контекст плагина.
+ * @param {unknown} config - конфигурация записи (volatile-поля — ссылки).
+ * @returns {void}
+ */
+function attachAgentGuards(ctx, config) {
+  let host = null;
+  let enabled = false;
+  let queue = Promise.resolve();
+
+  async function ensureHost() {
+    if (host !== null) return host;
+    try {
+      host = await import(AGENT_GUARDS_HOST);
+      return host;
+    } catch (error) {
+      host = null;
+      warn(ctx, `volna-tweaks: хост-часть страховки агентов (${AGENT_GUARDS_HOST}) недоступна`, error);
+      return null;
+    }
+  }
+
+  async function sync() {
+    const plain = flatten(config);
+    if (plain.agentGuards === false) {
+      if (enabled) {
+        enabled = false;
+        await host?.deactivate?.();
+      }
+      return;
+    }
+    const module = await ensureHost();
+    if (module === null || typeof module.activate !== 'function') return;
+    if (!enabled) {
+      try {
+        module.activate(ctx, plain);
+        enabled = true;
+      } catch (error) {
+        warn(ctx, 'volna-tweaks: страховка агентов не включилась', error);
+        await module.deactivate?.().catch(() => {});
+        enabled = false;
+      }
+      return;
+    }
+    if (typeof module.update === 'function') module.update(plain);
+  }
+
+  function schedule() {
+    queue = queue.then(sync).catch((error) => {
+      warn(ctx, 'volna-tweaks: переключение страховки агентов прервано', error);
+    });
+  }
+
+  schedule();
+  if (typeof ctx.on === 'function') ctx.on('loader/volatile-update', () => schedule());
+  const dispose = () => {
+    queue = queue
+      .then(() => (enabled ? host?.deactivate?.() : undefined))
+      .catch((error) => warn(ctx, 'volna-tweaks: страховка агентов не снята при выгрузке', error));
+    return queue;
+  };
+  if (typeof ctx.effect === 'function') ctx.effect(() => dispose);
+  else if (typeof ctx.on === 'function') ctx.on('dispose', dispose);
+}
+
+/**
  * Хост-половина бандла: твики интерфейса живут в браузере, а у твиков «речь»
  * и «светофор» есть хост-части — их поднимает и снимает этот apply по флагам.
  * @param {object} ctx - хост-контекст плагина.
@@ -675,6 +762,7 @@ export function apply(ctx, config) {
   attachWhisper(ctx, config);
   attachTrafficLight(ctx, config);
   attachGoalKeepalive(ctx, config);
+  attachAgentGuards(ctx, config);
   attachQueueEditor(ctx);
   attachDownloads(ctx);
 }
